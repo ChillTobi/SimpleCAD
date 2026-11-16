@@ -30,6 +30,7 @@ REQUIREMENTS = [
     "PyOpenGL",
     "ezdxf",
     "svgpathtools",
+    "qt_modern_style",
 ]
 
 
@@ -61,16 +62,29 @@ def create_venv(os_name: str):
 def build_exe(os_name: str):
     py = venv_python(os_name)
     icon = ICONS / "cad_app_dark.ico"
+    sep = ";" if os_name == "windows" else ":"
+    site_packages = VENV / ("Lib/site-packages" if os_name == "windows" else "lib/python*/site-packages")
+    qt_modern_style_path = next(VENV.glob(
+        "Lib/site-packages/qt_modern_style" if os_name == "windows"
+        else "lib/python*/site-packages/qt_modern_style"
+    ), None)
 
     cmd = [
         str(py), "-m", "PyInstaller",
         "--onefile",
         "--noconsole",
         "--name", "SimpleCAD",
-        "--add-data", f"{ICONS}{';' if os_name == 'windows' else ':'}icons",
+        "--add-data", f"{ICONS}{sep}icons",
         "--icon", str(icon),
         str(ENTRY),
     ]
+
+    if qt_modern_style_path and qt_modern_style_path.exists():
+        cmd += ["--add-data", f"{qt_modern_style_path}{sep}qt_modern_style"]
+        print(f"[exe] Bundling qt_modern_style from {qt_modern_style_path}")
+    else:
+        print("[exe] WARNING: qt_modern_style not found, styles.qss may be missing")
+
 
     print(f"[exe] Building executable for {os_name}...")
     run(*cmd, cwd=str(ROOT))
@@ -79,15 +93,18 @@ def build_exe(os_name: str):
 
 def create_shortcut_windows():
     icon = ICONS / "cad_app_dark.ico"
-    shortcut = Path(os.path.expanduser("~/Desktop/SimpleCAD.lnk"))
-    script = (f"$ws = New-Object -ComObject WScript.Shell;"
-              f"$s = $ws.CreateShortcut('{shortcut}');"
-              f"$s.TargetPath = '{ROOT / 'run.bat'}';"
-              f"$s.IconLocation = '{icon}';"
-              f"$s.WorkingDirectory = '{ROOT}';"
-              f"$s.Save()")
-    run("powershell", "-NoProfile", "-Command", script)
-    print(f"[shortcut] Created: {shortcut}")
+    ps1 = ROOT / "_make_shortcut.ps1"
+    ps1.write_text(
+        f'$ws = New-Object -ComObject WScript.Shell\n'
+        f'$s = $ws.CreateShortcut("{ROOT / "SimpleCAD.lnk"}")\n'
+        f'$s.TargetPath = "{ROOT / "dist" / "SimpleCAD.exe"}"\n'
+        f'$s.IconLocation = "{icon}"\n'
+        f'$s.WorkingDirectory = "{ROOT}"\n'
+        f'$s.Save()\n'
+    )
+    run("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1))
+    ps1.unlink()
+    print(f"[shortcut] Created: {ROOT / 'SimpleCAD.lnk'}")
 
 
 def create_shortcut_linux():

@@ -442,6 +442,15 @@ def _dbg(msg):
     with open(_DBG_LOG, "a", encoding="utf-8") as _f:
         _f.write(str(msg) + "\n")
         _f.flush()
+
+def _json_default(obj):
+    """JSON encoder default for NumPy arrays and scalars."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.integer)):
+        return float(obj)
+    return float(obj)
+
 from OpenGL.GLU import *
 from PyQt5.QtOpenGL import QGLFormat, QGLWidget
 
@@ -4823,11 +4832,11 @@ def is_feature(entry):
 
 def feature_signature(f):
     """Everything that influences the geometry of a chamfer / fillet / thread (cache key)."""
-    if f["type"] == "thread": return json.dumps(f, sort_keys=True, default=float)
+    if f["type"] == "thread": return json.dumps(f, sort_keys=True, default=_json_default)
     return json.dumps({"t": f["type"], "e": f.get("edges", []), "v": f.get("visible", True),
                        "auto": bool(f.get("auto_material", False)),
                        "p": {k: f.get(k, v) for k, v in FEATURE_DEFAULTS.items()}},
-                      sort_keys=True, default=float)
+                      sort_keys=True, default=_json_default)
 
 def mesh_edge_chains(verts, tris, faces):
     """Sharp edges of a body grouped into chains: connected mesh edges between the same two
@@ -5922,6 +5931,7 @@ def entry_children(entry, objects):
         return [o for o in objects if o["type"] in ("sketch", "surface") and o.get("parent") is entry]
     if entry["type"] in ("extrusion", "imported"):
         children = [o for o in objects if o["type"] == "sketch" and o.get("parent") is entry]
+        children += [o for o in objects if o["type"] == "extrusion" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "feature" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "technical_drawing" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "surface" and o.get("parent") is entry]
@@ -16546,7 +16556,8 @@ def assembly_save_file(assembly, path):
         raise ValueError(f"assembly files must end in {ASSEMBLY_EXTENSION}")
     with open(path, "w", encoding="utf-8") as stream:
         json.dump({"format": ASSEMBLY_FORMAT, "version": 1,
-                   "assembly": assembly_to_data(assembly, keep_empty=True)}, stream)
+                   "assembly": assembly_to_data(assembly, keep_empty=True)}, stream,
+                  default=_json_default)
 
 def assembly_load_file(path):
     if not os.fspath(path).lower().endswith(ASSEMBLY_EXTENSION):
@@ -18712,7 +18723,7 @@ class MainWindow(QMainWindow):
                     "w", encoding="utf-8", dir=_LOG_DIR,
                     prefix=".settings-", suffix=".tmp", delete=False) as f:
                 temp_path = f.name
-                json.dump(self._settings, f, indent=2)
+                json.dump(self._settings, f, indent=2, default=_json_default)
                 f.write("\n")
             os.replace(temp_path, self._settings_path)
             return True
@@ -19197,6 +19208,7 @@ class MainWindow(QMainWindow):
         self._dock_ext.hide()
         self._ext_pending=None   # sketch entry being extruded
         self._ext_source_visibility=None
+        self._ext_surface_faces=None  # selected faces for direct surface extrusion
         self._ext_timer=QTimer(self); self._ext_timer.setSingleShot(True)
         self._ext_timer.timeout.connect(self._do_live_update_extrusion)
 
@@ -20268,7 +20280,7 @@ class MainWindow(QMainWindow):
 
     # ── undo / redo ───────────────────────────────────────────────────────────
     def _project_state(self):
-        return json.dumps(self._project_data(), sort_keys=True, default=float)
+        return json.dumps(self._project_data(), sort_keys=True, default=_json_default)
 
     def _sketch_state(self):
         """Sketch geometry + constraints + the drawing step in progress (as JSON)."""
@@ -20283,7 +20295,7 @@ class MainWindow(QMainWindow):
                 "circle_ctr": sv.get("circle_ctr"), "arc_ctr": sv.get("arc_ctr"),
             "arc_start": sv.get("arc_start"), "polygon_ctr": sv.get("polygon_ctr"),
             "ellipse_ctr": sv.get("ellipse_ctr"), "ellipse_axis": sv.get("ellipse_axis")}
-        return json.dumps({"sketch": d, "pending": pend}, sort_keys=True, default=float)
+        return json.dumps({"sketch": d, "pending": pend}, sort_keys=True, default=_json_default)
 
     def _sketch_commit(self):
         if self.state["mode"] == MODE_SKETCH:
@@ -24385,21 +24397,129 @@ class MainWindow(QMainWindow):
         dock.show(); dock.raise_()
         self._fit_dock_to_content(dock)
 
+    def _sketch_from_faces(self, faces):
+        """Create virtual sketch entries from selected planar faces for direct extrusion.
+        Groups faces by coplanar planes and returns a list of sketches."""
+        _dbg(f"_sketch_from_faces called with {len(faces) if faces else 0} faces")
+        if not faces:
+            return []
+        
+        def edge_key(p1, p2):
+            k1 = (round(p1[0], 5), round(p1[1], 5), round(p1[2], 5))
+            k2 = (round(p2[0], 5), round(p2[1], 5), round(p2[2], 5))
+            return (k1, k2) if k1 < k2 else (k2, k1)
+        
+        # Group faces by coplanar planes
+        plane_groups = []  # [(origin, normal, [(entry, fi), ...]), ...]
+        for entry, fi in faces:
+            f = entry["faces"][fi]
+            if not f.get("planar") or "frame" not in f:
+                continue
+            f_frame = f["frame"]
+            f_normal = np.asarray(f_frame[3], float)
+            f_origin = np.asarray(f_frame[0], float)
+            # Find existing coplanar group
+            found = False
+            for g_origin, g_normal, g_faces in plane_groups:
+                if abs(float(f_normal @ g_normal)) >= 0.999:
+                    offset_diff = abs(float((f_origin - g_origin) @ g_normal))
+                    if offset_diff <= 1e-4:
+                        g_faces.append((entry, fi))
+                        found = True
+                        break
+            if not found:
+                plane_groups.append((f_origin, f_normal, [(entry, fi)]))
+        
+        _dbg(f"  grouped into {len(plane_groups)} coplanar groups")
+        
+        # Create a sketch for each group
+        results = []
+        for group_idx, (g_origin, g_normal, g_faces) in enumerate(plane_groups):
+            first_entry, first_fi = g_faces[0]
+            face = first_entry["faces"][first_fi]
+            frame = tuple(np.asarray(a, float) for a in face["frame"])
+            sk = Sketch("Face", name=f"Surface extrusion {group_idx+1}", frame=frame)
+            origin, u, v, normal = sk.frame
+            
+            def vertex(point, sk=sk, origin=origin, u=u, v=v):
+                delta = np.asarray(point, dtype=float) - origin
+                xy = (float(delta @ u), float(delta @ v))
+                existing = next((item for item in sk.vertices if math.dist(item.xy(), xy) < 1e-5), None)
+                if existing is None:
+                    existing = Vertex(*xy)
+                    sk.vertices.append(existing)
+                return existing
+            
+            edge_count = {}
+            for entry, fi in g_faces:
+                f = entry["faces"][fi]
+                solid = entry.get("solid")
+                if not solid or len(solid) < 2:
+                    continue
+                verts, tris = solid
+                for ti in f.get("tris", []):
+                    if ti < 0 or ti >= len(tris):
+                        continue
+                    tri = tris[ti]
+                    for i in range(3):
+                        p1, p2 = np.asarray(verts[tri[i]], float), np.asarray(verts[tri[(i+1)%3]], float)
+                        key = edge_key(p1, p2)
+                        edge_count[key] = edge_count.get(key, 0) + 1
+            
+            boundary_edges = [(k[0], k[1]) for k, count in edge_count.items() if count == 1]
+            for p1, p2 in boundary_edges:
+                a, b = vertex(p1), vertex(p2)
+                if a is not b:
+                    sk.segments.append(Segment(a, b))
+            
+            loops = sk.profile_loop_edges()
+            _dbg(f"  group {group_idx}: {len(g_faces)} faces, {len(boundary_edges)} boundary edges, {len(loops) if loops else 0} loops")
+            if loops:
+                results.append({"type": "sketch", "name": f"Surface extrusion", "sketch": sk,
+                                "parent": first_entry, "visible": False, "_surface_extrusion": True,
+                                "_source_faces": g_faces})
+        
+        return results
+
     def _open_extrude_panel(self, *_, ring=False):
         if self._busy(): return
         self._set_measure_mode(False)
-        sel=self.state.get("selected")
-        if not sel or sel["type"]!="sketch":
-            QMessageBox.warning(self,"No sketch","Select a sketch object first."); return
-        self._ext_pending=sel; self._ext_edit=None
-        self._ext_source_visibility=sel.get("visible", True)
+        sel = self.state.get("selected")
+        sel_faces = self.state.get("sel_faces") or \
+                    ([self.state.get("sel_face")] if self.state.get("sel_face") else [])
+        # Try selected faces if no sketch is selected
+        if (not sel or sel["type"] != "sketch") and sel_faces:
+            virtual_sketches = self._sketch_from_faces(sel_faces)
+            if virtual_sketches:
+                # Store additional sketches for multi-surface extrusion (exclude first)
+                self._ext_multi_sketches = virtual_sketches[1:] if len(virtual_sketches) > 1 else None
+                sel = virtual_sketches[0]  # Use first for UI
+                self._ext_surface_faces = sel_faces
+            else:
+                QMessageBox.warning(self, "Invalid selection",
+                    "Selected faces must be planar to extrude directly.")
+                return
+        elif not sel or sel["type"] != "sketch":
+            QMessageBox.warning(self, "No sketch",
+                "Select a sketch or planar surface(s) first.")
+            return
+        else:
+            self._ext_surface_faces = None
+            self._ext_multi_sketches = None
+        self._ext_pending = sel
+        self._ext_edit = None
+        self._ext_source_visibility = sel.get("visible", True)
         ring_set = None
         if ring:
             ring_set = {"axis": "u", "ref": "center", "angle": 90.0,
                         "radius": self._ring_default_radius(sel["sketch"], "u", "center")}
         self._set_ext_widgets(height=20.0, direction="one", cut=False, ring=ring_set)
         self._ring_r_user = False
-        self.lbl_ext_title.setText(f"<b>{'Ring extrusion of' if ring else 'Extrude'} {sel['name']}</b>")
+        n_surfaces = len(self._ext_multi_sketches) + 1 if self._ext_multi_sketches else 1
+        title = f"Extrude {n_surfaces} surfaces" if n_surfaces > 1 else f"Extrude {sel['name']}"
+        if ring:
+            title = f"Ring extrusion of {sel['name']}"
+        self.lbl_ext_title.setText(f"<b>{title}</b>")
         self._st("Set angle or target face, then click OK" if ring else "Set height / extent, then click OK")
         # trigger a preview immediately with current defaults (an error message stays visible)
         self._do_live_update_extrusion()
@@ -25050,6 +25170,8 @@ class MainWindow(QMainWindow):
         sel=self._ext_pending
         if not sel: return
         props=self._ext_params()
+        
+        # Build extrusion for primary sketch
         result=self._build_extrusion(sel, props["height"], props["direction"], props["through"],
                                      props["cut"], props["to_surface"], exclude=self._ext_edit,
                                      target=props["target"], ring=props["ring"])
@@ -25085,6 +25207,27 @@ class MainWindow(QMainWindow):
                       "preview":True,"visible":True,"color":DEFAULT_SOLID_COLOR}
             self.state["objects"].append(existing)
         existing.update(props); self._set_solid(existing, result)
+        
+        # Build extrusions for additional sketches (multi-surface)
+        if self._ext_multi_sketches:
+            for extra_sel in self._ext_multi_sketches:
+                extra_result = self._build_extrusion(extra_sel, props["height"], props["direction"],
+                                                     props["through"], props["cut"], props["to_surface"],
+                                                     exclude=self._ext_edit, target=props["target"],
+                                                     ring=props["ring"])
+                if extra_result is None:
+                    continue
+                extra_existing = next((o for o in self.state["objects"]
+                                       if o["type"]=="extrusion" and o.get("parent") is extra_sel
+                                       and o.get("preview")), None)
+                if extra_existing is None:
+                    extra_existing = {"type":"extrusion", "name":self._unique_name("extrusion"),
+                                      "parent":extra_sel, "preview":True, "visible":True,
+                                      "color":DEFAULT_SOLID_COLOR}
+                    self.state["objects"].append(extra_existing)
+                extra_existing.update(props)
+                self._set_solid(extra_existing, extra_result)
+        
         self._apply_cuts()
         if sel.get("visible", True):
             sel["visible"] = False
@@ -25098,28 +25241,48 @@ class MainWindow(QMainWindow):
             self._do_live_update_extrusion()
             e=self._ext_edit; self._ext_edit=None; self._ext_backup=None
             self._ext_source_visibility=None
-            self._ext_pending=None; self._dock_ext.hide()
+            self._ext_pending=None; self._ext_surface_faces=None; self._ext_multi_sketches=None
+            self._dock_ext.hide()
             self._rebuild_tree(); self._mark_dirty(); self.view3d.update()
             self._st(f"{e['name']} updated"); return
-        find=lambda: next((o for o in self.state["objects"]
-                           if o["type"]=="extrusion" and o.get("parent") is sel
-                           and o.get("preview")),None)
-        existing=find()
-        if existing is None:
-            self._do_live_update_extrusion(); existing=find()
+        
+        # Collect all sketches (primary + multi)
+        all_sketches = [sel] + (self._ext_multi_sketches or [])
+        confirmed_count = 0
+        
+        for sketch in all_sketches:
+            find = lambda s=sketch: next((o for o in self.state["objects"]
+                               if o["type"]=="extrusion" and o.get("parent") is s
+                               and o.get("preview")), None)
+            existing = find()
             if existing is None:
-                QMessageBox.warning(self,"Invalid",
-                                    "Nothing to extrude — a closed profile and a height ≠ 0 are needed.")
-                return
-        existing.pop("preview",None)
-        existing.setdefault("material", DEFAULT_MATERIAL)
-        sel["visible"] = False
+                self._do_live_update_extrusion()
+                existing = find()
+            if existing is None:
+                continue
+            existing.pop("preview", None)
+            existing.setdefault("material", DEFAULT_MATERIAL)
+            # For surface extrusion, set parent to the source body
+            if sketch.get("_surface_extrusion") and sketch.get("parent"):
+                existing["parent"] = sketch["parent"]
+                if existing.get("solid") and existing.get("faces"):
+                    existing["base"] = (existing["solid"][0], existing["solid"][1], existing["faces"])
+            else:
+                sketch["visible"] = False
+            confirmed_count += 1
+        
+        if confirmed_count == 0:
+            QMessageBox.warning(self, "Invalid",
+                                "Nothing to extrude — a closed profile and a height ≠ 0 are needed.")
+            return
+        
         self._ext_source_visibility=None
-        self._ext_pending=None; self._dock_ext.hide()
-        self.state["selected"]=existing
+        self._ext_pending=None; self._ext_surface_faces=None; self._ext_multi_sketches=None
+        self._dock_ext.hide()
         self._rebuild_tree(); self._mark_dirty()
         self.view3d.update()
-        self._st("Cut (remove material) confirmed" if existing.get("cut") else "Extrusion confirmed")
+        msg = f"{confirmed_count} extrusions confirmed" if confirmed_count > 1 else "Extrusion confirmed"
+        self._st(msg)
 
     def _cancel_extrude(self):
         sel=self._ext_pending
@@ -25128,16 +25291,21 @@ class MainWindow(QMainWindow):
             self._regenerate(e)
             self._ext_edit=None; self._ext_backup=None
             self._ext_source_visibility=None
-            self._ext_pending=None; self._dock_ext.hide()
+            self._ext_pending=None; self._ext_surface_faces=None; self._ext_multi_sketches=None
+            self._dock_ext.hide()
             self._rebuild_tree(); self.view3d.update(); self._st("Edit cancelled"); return
-        if sel:
-            self.state["objects"]=[o for o in self.state["objects"]
-                                    if not(o.get("preview") and o.get("parent") is sel)]
-            if self._ext_source_visibility is not None:
+        
+        # Remove previews for all sketches
+        all_sketches = [sel] + (self._ext_multi_sketches or []) if sel else []
+        if all_sketches:
+            self.state["objects"] = [o for o in self.state["objects"]
+                                     if not (o.get("preview") and o.get("parent") in all_sketches)]
+            if self._ext_source_visibility is not None and sel and not sel.get("_surface_extrusion"):
                 sel["visible"] = self._ext_source_visibility
             self._rebuild_tree(); self.view3d.update()
         self._ext_source_visibility=None
-        self._ext_pending=None; self._dock_ext.hide(); self._st("Extrude cancelled")
+        self._ext_pending=None; self._ext_surface_faces=None; self._ext_multi_sketches=None
+        self._dock_ext.hide(); self._st("Extrude cancelled")
 
     # ── chamfer / fillet ─────────────────────────────────────────────────────────────────────────────
     def _schedule_feat_preview(self):
@@ -26164,17 +26332,29 @@ class MainWindow(QMainWindow):
                 if td:
                     te = objs[td["obj"]] if td.get("obj") is not None and td["obj"] < len(objs) else None
                     e["target"] = {"entry": te, "face": td.get("face"), "plane": td.get("plane")}
-                res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
-                                          e["to_surface"], objects=objs, target=e.get("target"),
-                                          ring=e["ring"], draft=e.get("draft"))
-                if res is None and e["to_surface"] and e.get("target"):   # target gone: automatic
+                # Surface extrusion: restore from saved mesh data
+                sm = od.get("surface_mesh")
+                if sm and par is not None and par.get("type") in ("extrusion", "imported"):
+                    verts, tris = _validate_mesh(sm["vertices"], sm["triangles"])
+                    faces = sm.get("faces", [])
+                    e["base"] = (verts, tris, faces)
+                    self._set_solid(e, (verts, tris, faces))
+                elif par is not None and par.get("type") in ("extrusion", "imported"):
+                    # Old file: surface extrusion without mesh data, skip it
+                    print(f"Warning: skipping {od['name']} - surface extrusion without saved mesh")
+                    continue
+                else:
                     res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
-                                              True, objects=objs, ring=e["ring"])
-                if res is None and e["to_surface"]:      # surface gone: keep the saved height
-                    res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
-                                              False, objects=objs, ring=e["ring"])
-                if res is None: raise ValueError(f"cannot rebuild {od['name']}")
-                self._set_solid(e, res)
+                                              e["to_surface"], objects=objs, target=e.get("target"),
+                                              ring=e["ring"], draft=e.get("draft"))
+                    if res is None and e["to_surface"] and e.get("target"):   # target gone: automatic
+                        res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
+                                                  True, objects=objs, ring=e["ring"])
+                    if res is None and e["to_surface"]:      # surface gone: keep the saved height
+                        res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
+                                                  False, objects=objs, ring=e["ring"])
+                    if res is None: raise ValueError(f"cannot rebuild {od['name']}")
+                    self._set_solid(e, res)
             objs.append(e)
             if progress is not None and object_count:
                 progress(30 + 70 * (object_index + 1) // object_count)
@@ -26254,6 +26434,13 @@ class MainWindow(QMainWindow):
                     d["gear_parameters"]=dict(o["gear_parameters"])
                     d["gear_position"]=list(o.get("gear_position", (0.0, 0.0, 0.0)))
                     d["gear_rotation"]=list(o.get("gear_rotation", (0.0, 0.0, 0.0)))
+                # Surface extrusion: parent is a body, save mesh data
+                if par is not None and par.get("type") in ("extrusion", "imported"):
+                    base = o.get("base")
+                    if base:
+                        d["surface_mesh"] = {"vertices": [list(v) for v in base[0]],
+                                             "triangles": [list(t) for t in base[1]],
+                                             "faces": _mesh_face_records(base[2], base[1])}
             out.append(d)
             if progress is not None and object_count:
                 progress(70 * (object_index + 1) // object_count)
@@ -26271,7 +26458,7 @@ class MainWindow(QMainWindow):
                 project_data["assembly"] = assembly_data
             self._update_operation_progress(75, "Writing project file...")
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(project_data, f, indent=1)
+                json.dump(project_data, f, indent=1, default=_json_default)
             self._update_operation_progress(95, "Finalizing saved project...")
             self._file=path; self._dirty=False; self._update_title()
             self._record_recent_file(path)

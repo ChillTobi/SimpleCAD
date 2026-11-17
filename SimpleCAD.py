@@ -39,8 +39,13 @@ Workflow:
      rectangle does not limit this underlay. This visual underlay is not editable sketch geometry.
      Sketch Explorer shows parallel sketches grouped by signed distance along the active sketch's
      normal. Toggle each level's visibility; the current sketch cannot be hidden. Same-level
-     sketches remain yellow and read-only. Below levels are teal, above levels red; colours darken
-     with depth. Enable Reference on a below level to use its geometry for constraints.
+     sketches remain yellow and read-only. The nearest below level stays violet; deeper levels
+     use darker violet shades, and above levels use darkening red shades.
+     Enable Reference on a below level to highlight its fixed geometry while drawing, snap to its
+     points, and select it in Select or Constrain mode. The direct supporting sketch is enabled
+     automatically.
+     Drawing attached to a reference creates a removable Coincident, Point-on-Line or
+     Point-on-Curve constraint instead of merging the new geometry into the fixed reference.
      Hiding a level or disabling its reference checkbox does not remove existing constraints.
      Collapse the Sketch Explorer using its title-bar arrow, or reopen it from the View menu.
      Older face sketches may contain unidentifiable reference copies; those remain face references.
@@ -157,8 +162,8 @@ Key implementation notes:
     Extrusion "parent" = its sketch entry; sketch "parent" = extrusion it was drawn on (or None).
     Imported meshes are root entries, centered locally with editable XYZ position and rotation.
     STEP face frames and outlines are saved with the mesh; child sketches lock its position.
-  - Visibility: tree checkbox = entry["visible"]; entry_visible() resolves the hierarchy
-    (hidden sketch keeps its extrusion; hidden extrusion hides everything built on it).
+  - Visibility: tree checkbox = entry["visible"]; each object's visibility is independent.
+    Only explicit "with children" / "children" actions change descendant visibility.
   - QTreeWidgetItem.setData stores id(entry) (int), NOT the dict itself.
     PyQt5 copies dicts through QVariant, breaking identity checks.
     _on_tree_click looks up the real entry via next(o for o in objects if id(o)==eid).
@@ -1413,6 +1418,40 @@ def rotated_face_frame(frame, rotation):
     cosine, sine = rotation
     return origin, cosine*u+sine*v, -sine*u+cosine*v, normal
 
+def face_reference_sketch(face, frame):
+    """Create fixed face outlines with stable links to their boundary primitives."""
+    sk = Sketch("Face", frame=frame)
+    origin, u, v, normal = sk.frame
+    def vertex(point):
+        delta = np.asarray(point, dtype=float) - origin
+        xy = (float(delta @ u), float(delta @ v))
+        existing = next((item for item in sk.vertices if math.dist(item.xy(), xy) < 1e-6),
+                        None)
+        if existing is None:
+            existing = Vertex(*xy, locked=True)
+            sk.vertices.append(existing)
+        return existing
+    for index, primitive in enumerate(face.get("boundary", [])):
+        if primitive[0] == "line":
+            a, b = vertex(primitive[1]), vertex(primitive[2])
+            if a is b:
+                continue
+            element = Segment(a, b, reference=True)
+            sk.segments.append(element)
+        elif primitive[0] == "circle":
+            element = Circle(vertex(primitive[1]), primitive[2], reference=True)
+            sk.circles.append(element)
+        elif primitive[0] == "arc":
+            _, center, start, end, axis = primitive
+            if float(np.dot(axis, normal)) < 0:
+                start, end = end, start
+            element = Arc(vertex(center), vertex(start), vertex(end), reference=True)
+            sk.arcs.append(element)
+        else:
+            continue
+        element.reference_boundary = index
+    return sk
+
 def project_sketch_segments(source, target):
     """Add source sketch lines to a face sketch as fixed reference segments."""
     origin, axis_u, axis_v, _ = (np.asarray(axis, float) for axis in target.frame)
@@ -1807,9 +1846,9 @@ class Sketch:
         return O + P[:, :1]*u + P[:, 1:2]*v
 
     def get_or_merge(self, x, y, snap):
-        text_vertices = self.text_vertices()
+        independent_vertices = self.text_vertices() | self.reference_vertices()
         for v in self.vertices:
-            if v in text_vertices: continue
+            if v in independent_vertices: continue
             if hasattr(v, "reference_level"): continue
             if math.hypot(v.x-x, v.y-y) <= snap: return v
         v = Vertex(x, y); self.vertices.append(v); return v
@@ -5834,28 +5873,9 @@ def sketch_polylines(sk, include_reference=False):
     return out
 
 # ── scene tree helpers ────────────────────────────────────────────────────────
-def _support_visible(entry):
-    """Surface display visibility does not affect dependent objects."""
-    while entry is not None and entry["type"] == "surface":
-        entry = entry.get("parent")
-    return entry_visible(entry)
-
 def entry_visible(entry):
-    """Hiding a Surface or sketch keeps its extrusions visible; hiding a solid hides
-    everything built on it."""
-    if entry is None: return True
-    if entry.get("source_format") == "bridge":
-        return entry.get("visible", True)
-    if entry["type"] in ("sketch", "surface"):
-        return entry.get("visible", True) and _support_visible(entry.get("parent"))
-    if entry["type"] == "technical_drawing":
-        return entry.get("visible", True) and entry_visible(entry.get("parent"))
-    if entry["type"] == "feature":
-        if not entry.get("visible", True): return False
-        return entry_visible(entry.get("parent"))
-    if not entry.get("visible", True): return False
-    sk_entry = entry.get("parent")
-    return _support_visible(sk_entry.get("parent")) if sk_entry else True
+    """Display visibility belongs to the object, not its support/dependency chain."""
+    return entry is None or entry.get("visible", True)
 
 def entry_children(entry, objects):
     if entry["type"] == "sketch":
@@ -5882,38 +5902,19 @@ def sketch_preview_visible(sketch, selected):
     """Keep hidden profile sketches hidden unless the sketch itself is selected."""
     if entry_visible(sketch):
         return True
-    return sketch_selected_in_3d(sketch, selected) and _support_visible(sketch.get("parent"))
+    return sketch_selected_in_3d(sketch, selected)
 
 
 def related_extrusion_ids(selected, objects):
-    """IDs of all non-cut extrusions connected through sketch support/dependency links."""
+    """Select one extrusion, or all bodies of an explicitly grouped assembly component."""
     if selected is None or selected.get("type") != "extrusion" or selected.get("cut"):
         return set()
-    related = set()
-    pending = [selected]
-    visited = set()
-    while pending:
-        entry = pending.pop()
-        if id(entry) in visited:
-            continue
-        visited.add(id(entry))
-        if entry.get("type") == "extrusion":
-            if entry.get("cut"):
-                continue
-            related.add(id(entry))
-            profile = entry.get("parent")
-            if profile is not None and profile.get("type") == "sketch":
-                pending.append(profile)
-            pending.extend(child for child in objects
-                           if child.get("type") == "sketch" and child.get("parent") is entry)
-        elif entry.get("type") == "sketch":
-            support = entry.get("parent")
-            if support is not None and support.get("type") == "extrusion" and not support.get("cut"):
-                pending.append(support)
-            pending.extend(child for child in objects
-                           if child.get("type") == "extrusion" and not child.get("cut") and
-                           child.get("parent") is entry)
-    return related
+    component = selected.get("_component")
+    if component is None:
+        return {id(selected)}
+    return {id(entry) for entry in objects
+            if entry.get("type") == "extrusion" and not entry.get("cut")
+            and entry.get("_component") is component}
 
 
 def entry_descendants(entry, objects):
@@ -6471,7 +6472,8 @@ class View3D(QGLWidget):
 
     def snap_point(self, px, exclude=()):
         """Snap target for a cursor position: an existing sketch point within VERTEX_SNAP_PX
-        screen pixels wins, otherwise the nearest grid point. Returns (mm, vertex or None)."""
+        screen pixels wins, then enabled reference curves while drawing, then the grid.
+        Returns (mm, vertex or None)."""
         sk = self.state.get("active_sketch")
         if sk is not None:
             best, best_d = None, VERTEX_SNAP_PX
@@ -6492,6 +6494,22 @@ class View3D(QGLWidget):
                 d = math.hypot(px.x()-pp.x(), px.y()-pp.y())
                 if d < best_d: best, best_d = v, d
             if best is not None: return best.xy(), best
+            if self.state.get("sketch_view_state", {}).get("mode") == "draw" and not exclude:
+                raw = self.to_mm(px)
+                nearest, distance = None, 8.0
+                for element in sk.segments + sk.circles + sk.arcs:
+                    if not element.reference or not self._level_reference_available(element):
+                        continue
+                    curve = curve_of(element)
+                    candidate = curve_point(curve, curve_param(curve, raw))
+                    if not _within_curve(curve, candidate):
+                        candidate = min((curve_point(curve, 0), curve_point(curve, curve_end(curve))),
+                                        key=lambda point: math.dist(raw, point))
+                    d = math.dist(raw, candidate) * self.scale
+                    if d < distance:
+                        nearest, distance = candidate, d
+                if nearest is not None:
+                    return nearest, None
         return self.snap(self.to_mm(px)), None
 
     def point_snap(self, px, thr=8.0):
@@ -6570,10 +6588,10 @@ class View3D(QGLWidget):
         pj = np.array(glGetDoublev(GL_PROJECTION_MATRIX), dtype=float).reshape(4, 4).T
         self._mvp = pj @ mv
         self._draw_axes()
-        if self._mode == MODE_SELPLANE:
-            self._draw_plane_selectors()
         self._draw_solids()
         self._draw_surfaces()
+        if self._mode == MODE_SELPLANE:
+            self._draw_plane_selectors()
         self._draw_gear_centerlines()
         if self._measure_mode or self._mode == MODE_THREADPICK: self._draw_measure()
         self._draw_sketch_previews()
@@ -7089,13 +7107,15 @@ class View3D(QGLWidget):
                    "YZ":[(0,0,0),(0,80,0),(0,80,80),(0,0,80)]}
 
     def _draw_plane_selectors(self):
+        glPushAttrib(GL_DEPTH_BUFFER_BIT)
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)
         hv = self._hover3d
         for name, col in [("XY",(0.3,0.5,1.0)),("XZ",(0.3,1.0,0.5)),("YZ",(1.0,0.5,0.3))]:
             pts = self.PLANE_QUADS[name]
             hot = hv is not None and hv[0] == "plane" and hv[1] == name
-            glColor4f(col[0],col[1],col[2],0.55 if hot else 0.25); glBegin(GL_QUADS)
+            glColor4f(col[0],col[1],col[2],0.35 if hot else 0.25); glBegin(GL_QUADS)
             for pt in pts: glVertex3f(*pt)
             glEnd()
             glColor4f(min(1,col[0]+.3),min(1,col[1]+.3),min(1,col[2]+.3),1.0) if hot else \
@@ -7105,6 +7125,7 @@ class View3D(QGLWidget):
             for pt in pts: glVertex3f(*pt)
             glEnd()
         glLineWidth(1); glDisable(GL_BLEND); glEnable(GL_LIGHTING)
+        glPopAttrib()
 
     @staticmethod
     def _feature_edges(entry):
@@ -7812,6 +7833,8 @@ class View3D(QGLWidget):
         for underlay in underlays:
             if not underlay["visible"]:
                 continue
+            if underlay["reference"]:
+                continue
             painter.setPen(QPen(QColor(*underlay["color"]), 1.5, Qt.DashLine))
             for points in underlay["paths"]:
                 if len(points) < 2:
@@ -7996,6 +8019,19 @@ class View3D(QGLWidget):
 
     def _paint_sketch(self, p, sk):
         sv = self.state.get("sketch_view_state", {})
+        levels = {item["level"]: item for item in sv.get("underlays", [])}
+
+        def visible(geometry):
+            level = getattr(geometry, "reference_level", None)
+            if level is None:
+                return True
+            item = levels.get(level)
+            return item is not None and item["visible"] and item["reference"]
+
+        def reference_color(geometry):
+            item = levels.get(getattr(geometry, "reference_level", None))
+            return QColor(*item["color"]) if item is not None else REF
+
         sel_seg  = sv.get("sel_seg")
         sel_vtx1 = sv.get("sel_vtx1")
         sel_vtx2 = sv.get("sel_vtx2")
@@ -8019,7 +8055,7 @@ class View3D(QGLWidget):
             if selected and mode == DTOOL_SELECT: col = QColor(255, 80, 0)
             elif first_pick:                      col = QColor(255, 200, 0)
             elif selected:                        col = QColor(255, 220, 0)
-            elif geom.reference:                  col = REF
+            elif geom.reference:                  col = reference_color(geom)
             elif geom.construction:               col = CONSTR
             else:                                 col = DEFINED if defined else FREE
             lw = 3 if (selected or first_pick) else (1.5 if geom.construction else 2)
@@ -8036,7 +8072,7 @@ class View3D(QGLWidget):
         sel_segs_multi = sv.get("_sel_segs", [])
         selected_segs = self._selection_geometry(sv, sk)[0]
         for i, seg in enumerate(sk.segments):
-            if hasattr(seg, "reference_level"):
+            if not visible(seg):
                 continue
             defined = seg.v0 in det_v and seg.v1 in det_v
             is_sel = (i == sel_seg) or (i in sel_segs_multi) or seg in selected_segs
@@ -8071,7 +8107,7 @@ class View3D(QGLWidget):
 
         # circles
         for ci, circ in enumerate(sk.circles):
-            if hasattr(circ, "reference_level"):
+            if not visible(circ):
                 continue
             equal_first = mode == "constrain" and ctool == CTOOL_EQUAL and \
                           sv.get("equal_first") is circ
@@ -8087,7 +8123,7 @@ class View3D(QGLWidget):
 
         # arcs
         for ai, arc in enumerate(sk.arcs):
-            if hasattr(arc, "reference_level"):
+            if not visible(arc):
                 continue
             defined = {arc.center, arc.v_start, arc.v_end} <= det_v
             pen, col = style(arc, defined, sel_curve == ("arc", ai) or ("arc", ai) in sel_extra)
@@ -8100,7 +8136,7 @@ class View3D(QGLWidget):
             p.drawLine(QPointF(cp.x(),cp.y()-5), QPointF(cp.x(),cp.y()+5))
 
         for ellipse in sk.ellipses:
-            if hasattr(ellipse, "reference_level"):
+            if not visible(ellipse):
                 continue
             defined = set(ellipse.vertices()) <= det_v
             selected = any(i in sel_vs and sk.vertices[i] in ellipse.vertices()
@@ -8123,12 +8159,12 @@ class View3D(QGLWidget):
         text_vertices = sk.text_vertices()
         for i,v in enumerate(sk.vertices):
             if v in text_vertices: continue
-            if hasattr(v, "reference_level"): continue
+            if not visible(v): continue
             pp=self.to_px(v.xy()); p.setPen(Qt.NoPen)
             is_fixed = any(isinstance(c,CFixed) and c.vertex is v
                            for c in sk.constraints)
             if v.locked and i not in sel_vs:
-                p.setBrush(REF); p.drawRect(QRectF(pp.x()-3, pp.y()-3, 6, 6)); continue
+                p.setBrush(reference_color(v)); p.drawRect(QRectF(pp.x()-3, pp.y()-3, 6, 6)); continue
             if i in sel_vs:
                 p.setBrush(QColor(255,120,0))
             elif is_fixed:
@@ -9396,6 +9432,7 @@ class View3D(QGLWidget):
             self._select_press(sv, sk, px, mm, bool(e.modifiers() & Qt.ControlModifier)); return
 
         if mode=="draw":
+            used_before = sk.used_vertices()
             tool=sv.get("draw_tool","line")
             constr=bool(sv.get("construction"))
             if tool=="line":   self._draw_line(sv,sk,mm,px,constr)
@@ -9408,6 +9445,8 @@ class View3D(QGLWidget):
             elif tool=="point":  self._draw_point(sk,px)
             elif tool=="text":   self._draw_text(sk,mm)
             elif tool=="trim":   self._trim_at(sk,px)
+            if tool not in ("trim", "text"):
+                self._attach_reference_constraints(sk, sk.used_vertices() - used_before)
         elif mode=="constrain":
             self._constrain_press(sv,sk,px,mm,e.modifiers()&Qt.ControlModifier)
         self.update()
@@ -9704,6 +9743,7 @@ class View3D(QGLWidget):
             self._drop_if_orphan(sk, *verts); return
         sk.segments.extend(segs)
         self._auto_merge_endpoints(sk)
+        self._attach_reference_constraints(sk, set(verts) & sk.used_vertices())
         self.sigSelInfo.emit(f"Freehand: {len(segs)} line segments")
 
     def _sketch_drag(self, e):
@@ -10075,10 +10115,11 @@ class View3D(QGLWidget):
         """After adding geometry, merge distinct vertices that sit on exactly the same spot
         (e.g. a new line starting on an existing point). Points joined by a Point→Point
         constraint stay separate so that constraint can still be removed.
-        Reference (locked) vertices always survive a merge; two of them never merge."""
+        Reference vertices stay separate so their attachments remain removable constraints."""
         linked = {frozenset((c.vertex_move, c.vertex_target))
                   for c in sk.constraints if isinstance(c, CCoincident)}
         text_vertices = sk.text_vertices()
+        reference_vertices = sk.reference_vertices()
         merged = True
         while merged:
             merged = False
@@ -10087,6 +10128,7 @@ class View3D(QGLWidget):
                 for j in range(i+1, len(verts)):
                     va, vb = verts[i], verts[j]
                     if va in text_vertices or vb in text_vertices: continue
+                    if va in reference_vertices or vb in reference_vertices: continue
                     if va.locked and vb.locked: continue
                     if frozenset((va, vb)) in linked: continue
                     if math.hypot(va.x-vb.x, va.y-vb.y) <= MERGE_TOL:
@@ -10097,6 +10139,28 @@ class View3D(QGLWidget):
         degenerate = [s for s in sk.segments if s.v0 is s.v1]
         if degenerate:
             sk.remove_geometry(segs=degenerate)
+
+    def _attach_reference_constraints(self, sk, vertices):
+        reference_vertices = sk.reference_vertices()
+        references = [vertex for vertex in sk.vertices if vertex in reference_vertices
+                      and self._level_reference_available(vertex)]
+        curves = [element for element in sk.segments + sk.circles + sk.arcs
+                  if element.reference and self._level_reference_available(element)]
+        for vertex in sk.vertices:
+            if vertex not in vertices or vertex.locked:
+                continue
+            target = next((point for point in references
+                           if math.dist(vertex.xy(), point.xy()) <= MERGE_TOL), None)
+            if target is not None:
+                constraint = CCoincident(vertex, target)
+            else:
+                target = next((element for element in curves
+                               if dist_to_curve(curve_of(element), vertex.xy()) <= TRIM_TOL), None)
+                if target is None:
+                    continue
+                constraint = CPointOnLine(vertex, target) if isinstance(target, Segment) else \
+                    CPointOnCurve(vertex, target)
+            self._add_constraint(sk, constraint, describe_constraint(sk, constraint))
 
     def _report(self, what, result):
         """Show the outcome of a constraint addition in the status bar / side panel."""
@@ -10152,14 +10216,22 @@ class View3D(QGLWidget):
             for s in (s1, s3): self._add_constraint(sk, CVertical(s), "", silent=True)
 
     def _draw_circle(self, sv, sk, mm, constr=False):
-        """Centre + radius: first click = centre, second click = point on the circle."""
+        """Centre + radius; matching an enabled reference circle also links its radius."""
         cc=sv.get("circle_ctr")
         if cc is None:
             sv["circle_ctr"]=mm
         else:
             r=math.hypot(mm[0]-cc[0],mm[1]-cc[1])
             if r<0.1: r=1.0
-            sk.circles.append(Circle(sk.get_or_merge(cc[0],cc[1],MERGE_TOL),r,constr))
+            circle = Circle(sk.get_or_merge(cc[0],cc[1],MERGE_TOL),r,constr)
+            target = next((reference for reference in sk.circles
+                           if reference.reference and self._level_reference_available(reference)
+                           and math.dist(circle.center.xy(), reference.center.xy()) <= MERGE_TOL
+                           and abs(circle.radius-reference.radius) <= TRIM_TOL), None)
+            sk.circles.append(circle)
+            if target is not None:
+                constraint = CEqual(circle, target)
+                self._add_constraint(sk, constraint, describe_constraint(sk, constraint))
             sv["circle_ctr"]=None
 
     @staticmethod
@@ -10239,7 +10311,8 @@ class View3D(QGLWidget):
         r  = math.hypot(ast[0]-ac[0], ast[1]-ac[1])
         a0 = math.atan2(ast[1]-ac[1], ast[0]-ac[0])
         end_snap = self._snap_vtx     # end clicked onto an existing point → use that point
-        if end_snap is not None and sk.text_group_for(end_snap) is not None:
+        if end_snap is not None and (sk.text_group_for(end_snap) is not None or
+                                     end_snap in sk.reference_vertices()):
             end_snap = None
         sweep = sv.get("arc_sweep", 0.0)
         if abs(sweep) < 1e-3:   # no tracked movement → CCW to the clicked angle
@@ -10765,7 +10838,7 @@ class View3D(QGLWidget):
 
     def _can_pick_reference(self, sk, px, thr):
         """Constraint references are a fallback, never an obstruction over editable geometry."""
-        if self.state.get("sketch_view_state", {}).get("mode") != "constrain":
+        if self.state.get("sketch_view_state", {}).get("mode") not in (DTOOL_SELECT, "draw", "constrain"):
             return False
         threshold = max(thr, 12.0)
         point = self.to_mm(px)
@@ -10782,7 +10855,7 @@ class View3D(QGLWidget):
         if level is None:
             return True
         sv = self.state.get("sketch_view_state", {})
-        if sv.get("mode") != "constrain" and sv.get("mirror_pending") is None:
+        if sv.get("mode") not in (DTOOL_SELECT, "draw", "constrain") and sv.get("mirror_pending") is None:
             return False
         levels = sv.get("underlays", [])
         return any(item["level"] == level and item["visible"] and item["reference"]
@@ -11734,6 +11807,11 @@ def sketch_to_dict(sk):
                              "align": group.align}
                             for group in sk.text_groups],
             "constraints": cons,
+            "reference_boundaries": {
+                key: {str(i): element.reference_boundary for i, element in enumerate(elements)
+                      if hasattr(element, "reference_boundary")}
+                for key, elements in (("segments", sk.segments), ("circles", sk.circles),
+                                      ("arcs", sk.arcs))},
             "reference_generated_levels": sk.reference_generated_levels,
             "reference_levels": {
                 key: {str(i): element.reference_level for i, element in enumerate(elements)
@@ -11754,6 +11832,10 @@ def sketch_fill(sk, d):
     sk.segments = [Segment(V[a], V[b], con, ref) for a, b, con, ref in d["segments"]]
     sk.circles  = [Circle(V[c], r, con, ref) for c, r, con, ref in d["circles"]]
     sk.arcs     = [Arc(V[c], V[s], V[e], con, ref) for c, s, e, con, ref in d["arcs"]]
+    for key in ("segments", "circles", "arcs"):
+        elements = getattr(sk, key)
+        for index, boundary in d.get("reference_boundaries", {}).get(key, {}).items():
+            elements[int(index)].reference_boundary = boundary
     sk.ellipses = [Ellipse(V[a], V[b], V[c], V[e], con, ref)
                    for a, b, c, e, con, ref in d.get("ellipses", [])]
     for key in ("vertices", "segments", "circles", "arcs", "ellipses"):
@@ -17307,8 +17389,7 @@ class AssemblyDialog(QDialog):
                 entry["color"] = tuple(body["color"])
                 entry["visible"] = component["visible"]
                 entries.append(entry)
-            # All bodies share one stand-in profile sketch, so selecting a body highlights the
-            # whole component (related_extrusion_ids follows the sketch to its extrusions).
+            # Bodies share a stand-in profile; selection groups them by _component identity.
             profile = {"type": "sketch", "name": "", "parent": None}
             for entry in entries:
                 entry["parent"] = profile
@@ -18898,6 +18979,7 @@ class MainWindow(QMainWindow):
         self.obj_tree=QTreeWidget(); self.obj_tree.setHeaderLabel("Scene  (☑ = visible)")
         self.obj_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.obj_tree.itemClicked.connect(self._on_tree_click)
+        self.obj_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         self.obj_tree.itemChanged.connect(self._on_tree_item_changed)
         self.obj_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.obj_tree.customContextMenuRequested.connect(self._on_tree_rclick)
@@ -22436,25 +22518,8 @@ class MainWindow(QMainWindow):
         face = entry["faces"][fi]
         rotation = self.view3d._face_sketch_rotation(face["frame"])
         O, u, v, n = rotated_face_frame(face["frame"], rotation)
-        sk = Sketch("Face", frame=(O, u, v, n))
+        sk = face_reference_sketch(face, (O, u, v, n))
         sk.face_rotation = rotation
-        def to2d(P):
-            d = np.asarray(P, float) - O; return (float(d @ u), float(d @ v))
-        def ref_vertex(xy):
-            for vv in sk.vertices:
-                if vv.locked and math.hypot(vv.x-xy[0], vv.y-xy[1]) < 1e-6: return vv
-            vv = Vertex(xy[0], xy[1], locked=True); sk.vertices.append(vv); return vv
-        for prim in face["boundary"]:
-            if prim[0] == "line":
-                a, b = ref_vertex(to2d(prim[1])), ref_vertex(to2d(prim[2]))
-                if a is not b: sk.segments.append(Segment(a, b, reference=True))
-            elif prim[0] == "arc":
-                _, C, S, E, axis = prim
-                if float(np.dot(axis, n)) < 0: S, E = E, S
-                sk.arcs.append(Arc(ref_vertex(to2d(C)), ref_vertex(to2d(S)),
-                                   ref_vertex(to2d(E)), reference=True))
-            elif prim[0] == "circle":
-                sk.circles.append(Circle(ref_vertex(to2d(prim[1])), prim[2], reference=True))
         profile_entry = entry.get("parent")
         projected_lines = 0
         projected_circles = 0
@@ -22615,7 +22680,7 @@ class MainWindow(QMainWindow):
                              key=lambda item: abs(item["level"]))
             for index, item in enumerate(ordered):
                 factor = 1.0 - 0.55 * index / max(1, len(ordered) - 1)
-                base = (70, 220, 175) if side < 0 else (245, 90, 90)
+                base = (190, 150, 255) if side < 0 else (245, 90, 90)
                 item["color"] = tuple(int(value * factor) for value in base) + (230,)
         if 0.0 in levels:
             levels[0.0]["color"] = (225, 170, 95, 210)
@@ -22635,11 +22700,44 @@ class MainWindow(QMainWindow):
             project_sketch_points(source, projected)
             project_sketch_circles(source, projected)
             project_sketch_curves(source, projected)
-        for key in ("vertices", "segments", "circles", "arcs", "ellipses"):
-            for element in getattr(projected, key):
-                element.reference_level = level
-                getattr(active_sketch, key).append(element)
-        active_sketch.points_free.extend(projected.points_free)
+        # A supporting face can already contain the projected outline. Reuse those
+        # references so its explorer level controls the same geometry that is picked.
+        mapped = {}
+        text_vertices = active_sketch.text_vertices()
+        for vertex in projected.vertices:
+            existing = next((candidate for candidate in active_sketch.vertices
+                             if candidate.locked and
+                             getattr(candidate, "reference_level", level) == level and
+                             candidate not in text_vertices and
+                             math.dist(candidate.xy(), vertex.xy()) < 1e-5), None)
+            mapped[vertex] = existing if existing is not None else vertex
+            mapped[vertex].reference_level = level
+            if existing is None:
+                active_sketch.vertices.append(vertex)
+        for segment in projected.segments:
+            segment.v0, segment.v1 = mapped[segment.v0], mapped[segment.v1]
+            existing = next((candidate for candidate in active_sketch.segments
+                             if candidate.reference and
+                             getattr(candidate, "reference_level", level) == level and
+                             {candidate.v0, candidate.v1} == {segment.v0, segment.v1}), None)
+            target = existing if existing is not None else segment
+            target.reference_level = level
+            if existing is None:
+                active_sketch.segments.append(segment)
+        for circle in projected.circles:
+            circle.center = mapped[circle.center]
+            existing = next((candidate for candidate in active_sketch.circles
+                             if candidate.reference and
+                             getattr(candidate, "reference_level", level) == level and
+                             candidate.center is circle.center and
+                             abs(candidate.radius - circle.radius) < 1e-5), None)
+            target = existing if existing is not None else circle
+            target.reference_level = level
+            if existing is None:
+                active_sketch.circles.append(circle)
+        for point in projected.points_free:
+            if mapped[point] not in active_sketch.points_free:
+                active_sketch.points_free.append(mapped[point])
         active_sketch.reference_generated_levels.append(level)
         active_sketch._an_key = None
 
@@ -23069,6 +23167,16 @@ class MainWindow(QMainWindow):
                 add(member["parent"], group_item)
             handled_pairs.add(pair_id)
 
+    def _add_draft_tree_item(self, entry, parent_item):
+        draft = entry.get("draft")
+        if entry["type"] != "extrusion" or not draft:
+            return
+        item = QTreeWidgetItem([f"Draft ({draft['angle']:.2f}\u00b0)"])
+        item.setFlags(Qt.ItemIsEnabled)
+        item.setData(0, Qt.UserRole + 1, "draft")
+        item.setToolTip(0, "Double-click or right-click Edit to change the draft angle and pivot.")
+        parent_item.addChild(item)
+
     def _rebuild_tree(self):
         self._apply_cuts()
         objects = self.state["objects"]
@@ -23089,11 +23197,11 @@ class MainWindow(QMainWindow):
             item.setCheckState(0, Qt.Checked if entry.get("visible", True) else Qt.Unchecked)
             if not entry_visible(entry):
                 item.setForeground(0, QColor(130, 130, 130))
-                item.setToolTip(0, "Hidden" if not entry.get("visible", True)
-                                else "Hidden because the parent object is hidden")
+                item.setToolTip(0, "Hidden")
             if parent_item is None: self.obj_tree.addTopLevelItem(item)
             else:                   parent_item.addChild(item)
             entry["tree_item"] = item
+            self._add_draft_tree_item(entry, item)
             for child in entry_children(entry, objects):
                 add(child, item)
         self._add_scene_tree_roots(objects, add)
@@ -23124,11 +23232,11 @@ class MainWindow(QMainWindow):
             item.setCheckState(0, Qt.Checked if entry.get("visible", True) else Qt.Unchecked)
             if not entry_visible(entry):
                 item.setForeground(0, QColor(130, 130, 130))
-                item.setToolTip(0, "Hidden" if not entry.get("visible", True)
-                                else "Hidden because the parent object is hidden")
+                item.setToolTip(0, "Hidden")
             if parent_item is None: self.obj_tree.addTopLevelItem(item)
             else:                   parent_item.addChild(item)
             entry["tree_item"] = item
+            self._add_draft_tree_item(entry, item)
             for child in entry_children(entry, objects):
                 add(child, item)
         self._add_scene_tree_roots(objects, add)
@@ -23183,6 +23291,14 @@ class MainWindow(QMainWindow):
         entry = self._entry_of(item)
         if entry is not None: self._select_entry(entry)
 
+    def _on_tree_double_click(self, item, _col):
+        if item.data(0, Qt.UserRole + 1) != "draft":
+            return
+        entry = self._entry_of(item.parent())
+        if entry is not None and entry.get("draft") and not self._busy():
+            self._select_entry(entry)
+            self._open_angle_draft()
+
     def _on_tree_item_changed(self, item, _col):
         """Checkbox toggled → change the object's own visibility."""
         try:
@@ -23195,15 +23311,8 @@ class MainWindow(QMainWindow):
 
     def _set_visible(self, entries, on):
         try:
-            objects = self.state.get("objects", [])
-            affected_entries = []
-            seen = set()
             for e in entries:
                 e["visible"] = on
-                for affected in [e] + entry_descendants(e, objects):
-                    if id(affected) not in seen:
-                        seen.add(id(affected))
-                        affected_entries.append(affected)
                 if e["type"] == "feature":   # invalidate parent so _apply_cuts recomputes
                     par = e.get("parent")
                     if par is not None: par.pop("_cut_key", None)
@@ -23218,14 +23327,13 @@ class MainWindow(QMainWindow):
                         e.pop("_cut_key", None)
             signals_blocked = self.obj_tree.blockSignals(True)
             try:
-                for affected in affected_entries:
+                for affected in entries:
                     item = affected.get("tree_item")
                     if item is None: continue
                     item.setCheckState(0, Qt.Checked if affected.get("visible", True) else Qt.Unchecked)
                     if not entry_visible(affected):
                         item.setForeground(0, QColor(130, 130, 130))
-                        item.setToolTip(0, "Hidden" if not affected.get("visible", True)
-                                        else "Hidden because the parent object is hidden")
+                        item.setToolTip(0, "Hidden")
                     else:
                         item.setForeground(0, self.obj_tree.palette().color(self.obj_tree.foregroundRole()))
                         item.setToolTip(0, "")
@@ -23246,6 +23354,12 @@ class MainWindow(QMainWindow):
     def _on_tree_rclick(self, pos):
         """Context menu: edit / rename / delete and visibility. Empty area: deselect."""
         item = self.obj_tree.itemAt(pos)
+        if item is not None and item.data(0, Qt.UserRole + 1) == "draft":
+            menu = QMenu(self)
+            edit = menu.addAction("Edit draft\u2026")
+            if menu.exec_(self.obj_tree.viewport().mapToGlobal(pos)) is edit:
+                self._on_tree_double_click(item, 0)
+            return
         entry = self._entry_of(item)
         if entry is None:
             self._deselect(); return
@@ -23457,17 +23571,84 @@ class MainWindow(QMainWindow):
             self.view3d.update()
             self._st(f"Editing {entry['name']} — adjust size or edges, then OK")
 
-    def _regenerate(self, entry):
+    def _refresh_face_references(self, sk, face, previous_face=None):
+        frame = rotated_face_frame(face["frame"], sk.face_rotation)
+        projected = face_reference_sketch(face, frame)
+        previous = face_reference_sketch(previous_face, sk.frame) \
+            if previous_face is not None else projected
+
+        def vertices(element):
+            if isinstance(element, Segment):
+                return (element.v0, element.v1)
+            if isinstance(element, Circle):
+                return (element.center,)
+            return (element.center, element.v_start, element.v_end)
+
+        def matches(a, b):
+            pa, pb = vertices(a), vertices(b)
+            if isinstance(a, Circle) and abs(a.radius-b.radius) > 1e-5:
+                return False
+            return all(math.dist(x.xy(), y.xy()) < 1e-5 for x, y in zip(pa, pb)) or \
+                (isinstance(a, Segment) and
+                 all(math.dist(x.xy(), y.xy()) < 1e-5 for x, y in zip(pa, reversed(pb))))
+
+        positions = {}
+        for key in ("segments", "circles", "arcs"):
+            references = [element for element in getattr(sk, key) if element.reference]
+            mapped = {element.reference_boundary: element for element in references
+                      if hasattr(element, "reference_boundary")}
+            for old in getattr(previous, key):
+                index = old.reference_boundary
+                if index in mapped:
+                    continue
+                candidates = [element for element in references
+                              if not hasattr(element, "reference_boundary")]
+                target = next((element for element in candidates if matches(element, old)), None)
+                if target is None:
+                    # Older files store face outlines first, followed by tagged sketch projections.
+                    target = next((element for element in candidates
+                                   if not hasattr(element, "reference_level")), None)
+                if target is not None:
+                    target.reference_boundary = index
+                    mapped[index] = target
+            current = {element.reference_boundary: element for element in getattr(projected, key)}
+            for index, element in mapped.items():
+                target = current.get(index)
+                if target is None:
+                    raise ValueError(f"{sk.name}: the supporting face outline changed topology.")
+                for old_vertex, new_vertex in zip(vertices(element), vertices(target)):
+                    xy = new_vertex.xy()
+                    if old_vertex in positions and math.dist(positions[old_vertex], xy) > 1e-5:
+                        raise ValueError(f"{sk.name}: the supporting face has incompatible vertices.")
+                    positions[old_vertex] = xy
+                if isinstance(element, Circle):
+                    element.radius = target.radius
+        origin, u, v, _ = (np.asarray(axis, dtype=float) for axis in frame)
+        for vertex in sk.vertices:
+            if vertex in positions:
+                vertex.x, vertex.y = positions[vertex]
+            elif vertex.locked:
+                delta = np.asarray(sk.to3d(vertex.xy()), dtype=float) - origin
+                vertex.x, vertex.y = float(delta @ u), float(delta @ v)
+        sk.frame = frame
+        sk._an_key = None
+        if not sk.solve():
+            raise ValueError(f"{sk.name}: constraints cannot follow the changed supporting face.")
+
+    def _regenerate(self, entry, previous_faces=None):
         """Rebuild everything that depends on entry (after it was edited)."""
         objects = self.state["objects"]
         if entry["type"] == "sketch":
             for ext in entry_children(entry, objects):
+                old_faces = ext.get("faces")
                 res = self._build_extrusion(entry, ext.get("height", 20.0), ext.get("direction", "one"),
                                             ext.get("through", False), ext.get("cut", False),
                                             ext.get("to_surface", False), exclude=ext, target=ext.get("target"),
                                             ring=ext.get("ring"))
-                if res: self._set_solid(ext, res)
-                self._regenerate(ext)
+                if res is None:
+                    raise ValueError(f"Cannot rebuild extrusion {ext['name']}.")
+                self._set_solid(ext, res)
+                self._regenerate(ext, previous_faces=old_faces)
         elif entry["type"] == "surface":
             entry["frame"] = self._surface_frame(entry.get("parent"), entry.get("reference_face"),
                                                  entry["offset"], entry["rotation"],
@@ -23482,8 +23663,9 @@ class MainWindow(QMainWindow):
                 if child["type"] == "sketch":
                     fi = child.get("face")
                     if fi is not None and 0 <= fi < len(faces) and faces[fi]["planar"]:
-                        child["sketch"].frame = rotated_face_frame(
-                            faces[fi]["frame"], child["sketch"].face_rotation)
+                        previous_face = previous_faces[fi] if previous_faces is not None and \
+                            0 <= fi < len(previous_faces) else None
+                        self._refresh_face_references(child["sketch"], faces[fi], previous_face)
                 self._regenerate(child)
 
     # ── properties panel ──────────────────────────────────────────────────────
@@ -25309,6 +25491,12 @@ class MainWindow(QMainWindow):
                     "circular": bool(self._angle_draft_circular)}
         if self._angle_draft_reference is not None:
             settings["reference"] = self._angle_draft_reference
+        dependents = [entry] + entry_descendants(entry, self.state["objects"])
+        sketches = [(child["sketch"], sketch_to_dict(child["sketch"]))
+                    for child in dependents if child["type"] == "sketch"]
+        geometry = [(child, {key: child.get(key) for key in
+                            ("base", "solid", "faces", "frame", "draft")})
+                    for child in dependents if child["type"] != "sketch"]
         try:
             parent = entry["parent"]
             mesh = self._build_extrusion(
@@ -25318,13 +25506,26 @@ class MainWindow(QMainWindow):
                 ring=entry.get("ring"), draft=settings)
             if mesh is None:
                 raise ValueError("The extrusion could not be rebuilt.")
+            entry["draft"] = settings
+            self._set_solid(entry, mesh)
+            self._regenerate(entry, previous_faces=self._angle_draft_original["faces"])
         except (ValueError, ArithmeticError) as ex:
+            for sk, data in sketches:
+                sk.frame = tuple(np.asarray(axis, dtype=float) for axis in data["frame"])
+                sketch_fill(sk, data)
+            for child, values in geometry:
+                for key, value in values.items():
+                    if value is None:
+                        child.pop(key, None)
+                    else:
+                        child[key] = value
+                for key in ("_cut_key", "_feat_key", "_feat_mesh"):
+                    child.pop(key, None)
+                if child.get("solid") is not None:
+                    self._cache_normals(child)
             self.lbl_angle_draft_info.setText(f"Cannot apply draft: {ex}")
             return
-        entry["draft"] = settings
-        self._set_solid(entry, mesh)
         self._finish_angle_draft(restore=False)
-        self._regenerate(entry)
         self._apply_cuts()
         self._rebuild_tree()
         self._mark_dirty()

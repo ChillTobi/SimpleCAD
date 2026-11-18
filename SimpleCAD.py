@@ -5274,75 +5274,105 @@ def merge_tangent_chains(chains, can_join=None, cos_min=math.cos(math.radians(25
     next to it) are joined into one chain, so a chamfer / fillet runs through the junction as
     a single piece. A loop of such chains becomes a closed chain."""
     chains = list(chains)
-    def ends(c): return ((c["P"][0], c["P"][1]), (c["P"][-1], c["P"][-2]))
-    def joint_ok(a, b):
-        # a ends where b starts (both oriented so); normals / directions must continue
-        if a["convex"] != b["convex"]: return None
-        if can_join is not None and not can_join(a, b): return None
-        common = [f for f in a["faces"] if f in b["faces"]]
-        if not common: return None
-        ta = _unit(a["P"][-1] - a["P"][-2]); tb = _unit(b["P"][1] - b["P"][0])
-        if ta @ tb < cos_min: return None
-        s = common[0]; pa = list(a["faces"]).index(s); pb = list(b["faces"]).index(s)
-        fa, fb = a["frames"][-1], b["frames"][0]
-        if pa != pb: fb = (fb[0], fb[2], fb[1], fb[4], fb[3])
-        if fa[1] @ fb[1] < cos_min or fa[2] @ fb[2] < cos_min: return None
-        return pa != pb
-    changed = True
-    while changed:
-        changed = False
-        for i, a in enumerate(chains):
-            if a["closed"]: continue
-            if np.linalg.norm(a["P"][0] - a["P"][-1]) < tol and len(a["P"]) > 3:
-                ok = joint_ok(a, a)                         # a loop closing on itself
-                if ok is not None and not ok:
-                    fr = list(a["frames"]); fr[0] = _avg_frame(fr[0], fr[-1])
-                    P = a["P"].copy(); P[-1] = P[0]
-                    chains[i] = _chain_geom(dict(a, P=P, frames=fr[:-1], closed=True)); changed = True; break
-            for j, b in enumerate(chains):
-                if j == i or b["closed"]: continue
-                for ra in (False, True):
-                    for rb in (False, True):
-                        aa = _rev_chain(a) if ra else a; bb = _rev_chain(b) if rb else b
-                        if np.linalg.norm(aa["P"][-1] - bb["P"][0]) > tol: continue
-                        swap = joint_ok(aa, bb)
-                        if swap is None: continue
-                        fb = list(bb["frames"])
-                        if swap: fb = [(f[0], f[2], f[1], f[4], f[3]) for f in fb]
-                        joint = _avg_frame(aa["frames"][-1], fb[0])
-                        m = _chain_geom(dict(aa, P=np.vstack([aa["P"], bb["P"][1:]]),
-                                             frames=list(aa["frames"][:-1]) + [joint] + fb[1:]))
-                        chains = [c for k, c in enumerate(chains) if k not in (i, j)] + [m]
-                        changed = True; break
-                    if changed: break
-                if changed: break
-            if changed: break
+    # Only chains whose end points coincide can be joined: keep every chain's two end points
+    # in an array so the candidates are found with one vectorised distance test instead of
+    # trying (and building reversed copies of) every pair of chains.
+    E = np.array([(c["P"][0], c["P"][-1]) for c in chains], float).reshape(-1, 2, 3)
+    i = 0
+    while i < len(chains):
+        a = chains[i]
+        if a["closed"]:
+            i += 1; continue
+        if len(a["P"]) > 3 and np.linalg.norm(a["P"][0] - a["P"][-1]) < tol:
+            ok = _tangent_joint(a, False, a, False, can_join, cos_min)   # a loop closing on itself
+            if ok is not None and not ok:
+                fr = list(a["frames"]); fr[0] = _avg_frame(fr[0], fr[-1])
+                P = a["P"].copy(); P[-1] = P[0]
+                chains[i] = _chain_geom(dict(a, P=P, frames=fr[:-1], closed=True))
+                i += 1; continue
+        m, j = _join_first(a, i, chains, E, can_join, cos_min, tol)
+        if m is None:
+            i += 1; continue
+        chains[i] = m; E[i] = (m["P"][0], m["P"][-1])     # keep extending the joined chain
+        del chains[j]; E = np.delete(E, j, axis=0)
+        if j < i: i -= 1
     return chains
+
+def _chain_end(c, tail):
+    """(end point, neighbouring point, frame) at the tail (last point) or head of a chain."""
+    P = c["P"]
+    return (P[-1], P[-2], c["frames"][-1]) if tail else (P[0], P[1], c["frames"][0])
+
+def _tangent_joint(a, ra, b, rb, can_join, cos_min):
+    """Can chain a (reversed if ra) be continued by chain b (reversed if rb) — a's end on b's
+    start? None if not; otherwise whether b's face order has to be swapped. Works on the end
+    data only, so no reversed chain copies are built for the test."""
+    if a["convex"] != b["convex"]: return None
+    if can_join is not None and not can_join(a, b): return None
+    common = [f for f in a["faces"] if f in b["faces"]]
+    if not common: return None
+    pa_, qa, fa = _chain_end(a, not ra)        # end of a after the optional reversal
+    pb_, qb, fb = _chain_end(b, rb)            # start of b after the optional reversal
+    if _unit(pa_ - qa) @ _unit(qb - pb_) < cos_min: return None
+    s = common[0]; pa = list(a["faces"]).index(s); pb = list(b["faces"]).index(s)
+    if pa != pb: fb = (fb[0], fb[2], fb[1], fb[4], fb[3])
+    if fa[1] @ fb[1] < cos_min or fa[2] @ fb[2] < cos_min: return None
+    return pa != pb
+
+def _join_chains(a, ra, b, rb, swap):
+    aa = _rev_chain(a) if ra else a; bb = _rev_chain(b) if rb else b
+    fb = list(bb["frames"])
+    if swap: fb = [(f[0], f[2], f[1], f[4], f[3]) for f in fb]
+    joint = _avg_frame(aa["frames"][-1], fb[0])
+    return _chain_geom(dict(aa, P=np.vstack([aa["P"], bb["P"][1:]]),
+                            frames=list(aa["frames"][:-1]) + [joint] + fb[1:]))
+
+# (end of a, start of b) indices into the (head, tail) end array for (ra, rb), in test order
+_JOIN_ORDER = (((False, False), 1, 0), ((False, True), 1, 1), ((True, False), 0, 0), ((True, True), 0, 1))
+
+def _join_first(a, i, chains, E, can_join, cos_min, tol):
+    """Join a (= chains[i]) with the first open chain that continues it tangentially.
+    Returns (joined chain, index of the absorbed chain) or (None, None)."""
+    if not len(E): return None, None
+    ea = np.asarray((a["P"][0], a["P"][-1]), float)
+    D = np.linalg.norm(E[:, None, :, :] - ea[None, :, None, :], axis=-1)   # [j, end of a, end of b]
+    for j in np.nonzero(D.min(axis=(1, 2)) <= tol)[0].tolist():
+        b = chains[j]
+        if j == i or b["closed"]: continue
+        for (ra, rb), ka, kb in _JOIN_ORDER:
+            if D[j, ka, kb] > tol: continue
+            swap = _tangent_joint(a, ra, b, rb, can_join, cos_min)
+            if swap is not None:
+                return _join_chains(a, ra, b, rb, swap), j
+    return None, None
 
 def expand_tangent_chains(selected, candidates):
     """Expand selected edge segments to their full tangent-connected components."""
     expanded, claimed = [], set()
+    cos_min = math.cos(math.radians(25))
+    cand_E = np.array([(c["P"][0], c["P"][-1]) for c in candidates], float).reshape(-1, 2, 3)
     for chain in selected:
         if id(chain) in claimed:
             continue
         merged = chain
         members = {id(chain)}
-        remaining = [c for c in candidates if c is not chain]
-        while True:
-            for i, candidate in enumerate(remaining):
-                joined = merge_tangent_chains([merged, candidate])
-                if len(joined) == 1:
-                    merged = joined[0]
-                    members.add(id(candidate))
-                    remaining.pop(i)
-                    break
-            else:
-                break
+        keep = [k for k, c in enumerate(candidates) if c is not chain]
+        remaining = [candidates[k] for k in keep]
+        E = cand_E[keep] if keep else cand_E[:0]
+        while not merged["closed"]:
+            if len(merged["P"]) > 3 and np.linalg.norm(merged["P"][0] - merged["P"][-1]) < 1e-4 \
+                    and _tangent_joint(merged, False, merged, False, None, cos_min) is False:
+                break                                  # the loop is complete
+            m, j = _join_first(merged, -1, remaining, E, None, cos_min, 1e-4)
+            if m is None: break
+            merged = m
+            members.add(id(remaining[j]))
+            del remaining[j]; E = np.delete(E, j, axis=0)
         expanded.append(merged)
         claimed.update(members)
     return expanded
 
-def _outer_mode(c, ref, feat, V, T, faces, others):
+def _outer_mode(c, ref, feat, V, T, faces, others, cache=None):
     """Which face of a convex chain is continued as a plane when the corner is filled on the
     outside: "outer1" or "outer2". The wedge must not lie inside another body (the body the
     part sits on); otherwise the larger face is the one that is continued. Remembered in ref."""
@@ -5355,7 +5385,7 @@ def _outer_mode(c, ref, feat, V, T, faces, others):
         blocked = []
         for w in (_unit(u2 - u1), _unit(u1 - u2)):          # wedge direction of outer1 / outer2
             p = c["P"][mi] + w*0.3*d
-            blocked.append(any(_point_in_mesh(p, om) for om in others))
+            blocked.append(any(_point_in_mesh(p, om, cache) for om in others))
         if blocked[0] != blocked[1]: mode = "outer2" if blocked[0] else "outer1"
     if mode is None:
         def area(fi):
@@ -5367,13 +5397,29 @@ def _outer_mode(c, ref, feat, V, T, faces, others):
     ref["ext"] = int(mode[-1])
     return mode
 
-def _point_in_mesh(p, mesh):
+def _ray_arrays(mesh, cache=None):
+    """(bbox lo, bbox hi, v0, e1, e2) of a mesh for point-in-mesh ray tests, or None if empty.
+    cache: optional dict (keyed by id(mesh)) — reuse it while the meshes stay alive, so a body
+    is converted to arrays once instead of on every probe."""
+    key = id(mesh)
+    if cache is not None and key in cache: return cache[key]
     V = np.asarray(mesh[0], float); T = np.asarray(mesh[1], int).reshape(-1, 3)
-    if not len(T): return False
-    v0 = V[T[:, 0]]
-    return ray_hit_count(np.asarray(p, float), _PROBE_DIR, v0, V[T[:, 1]] - v0, V[T[:, 2]] - v0) % 2 == 1
+    arrays = None
+    if len(T):
+        v0 = V[T[:, 0]]
+        arrays = (V.min(0), V.max(0), v0, V[T[:, 1]] - v0, V[T[:, 2]] - v0)
+    if cache is not None: cache[key] = arrays
+    return arrays
 
-def _fillet_contact_bodies(chain, radius, others):
+def _point_in_mesh(p, mesh, cache=None):
+    arrays = _ray_arrays(mesh, cache)
+    if arrays is None: return False
+    lo, hi, v0, e1, e2 = arrays
+    p = np.asarray(p, float)
+    if np.any(p < lo - 1e-9) or np.any(p > hi + 1e-9): return False   # outside the bounding box
+    return ray_hit_count(p, _PROBE_DIR, v0, e1, e2) % 2 == 1
+
+def _fillet_contact_bodies(chain, radius, others, cache=None):
     if not others:
         return []
     index = len(chain["frames"]) // 2
@@ -5382,13 +5428,13 @@ def _fillet_contact_bodies(chain, radius, others):
     normals = chain["frames"][index][1:3]
     contacts = []
     for mesh in others:
-        blocked = [_point_in_mesh(point + step * normal, mesh) for normal in normals]
+        blocked = [_point_in_mesh(point + step * normal, mesh, cache) for normal in normals]
         if blocked[0] != blocked[1]:
             contacts.append(mesh)
     return contacts
 
-def _fillet_contacts_body(chain, radius, others):
-    return bool(_fillet_contact_bodies(chain, radius, others))
+def _fillet_contacts_body(chain, radius, others, cache=None):
+    return bool(_fillet_contact_bodies(chain, radius, others, cache))
 
 def _feature_envelope(mesh, others=()):
     """Closed convex envelope for the host body and any bodies touching its feature edge."""
@@ -5511,12 +5557,13 @@ def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
     if not matched or not feat.get("visible", True): return mesh, matched
     outside = bool(feat.get("outside"))
     automatic = feat["type"] == "fillet" and feat.get("auto_material", False)
+    ray_cache = {}       # ray-test arrays of the other bodies, built once for this feature
     concave = [c for c in matched if not c["convex"]]      # inner corners: material is added
     outer, matched_cut = [], []
     for chain, ref in zip(matched, refs):
         if not chain["convex"]:
             continue
-        supports = _fillet_contact_bodies(chain, feat.get("radius", 2.0), others) \
+        supports = _fillet_contact_bodies(chain, feat.get("radius", 2.0), others, ray_cache) \
             if automatic else []
         add_material = bool(supports) if automatic else outside
         if add_material:
@@ -5530,7 +5577,7 @@ def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
     if outer:
         outer = [(dict(c), r) for c, r in outer]
         for c, r in outer:
-            c["_mode"] = _outer_mode(c, r, feat, V, T, faces, others)
+            c["_mode"] = _outer_mode(c, r, feat, V, T, faces, others, ray_cache)
             c["_vf"] = c["faces"][int(c["_mode"][-1]) - 1]
         outer = [(c, None) for c in merge_tangent_chains(
             [c for c, _ in outer], can_join=lambda a, b: a.get("_vf") == b.get("_vf"))]
@@ -5606,7 +5653,7 @@ def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
                 c = outer[ci][0]
                 c.setdefault("_miter", {})[j] = (np.asarray(c["P"][j], float), s*nm)
         for c, _ in outer:
-            supports = _fillet_contact_bodies(c, feat.get("radius", 2.0), others) \
+            supports = _fillet_contact_bodies(c, feat.get("radius", 2.0), others, ray_cache) \
                 if clip_outer and automatic else []
             tool_feat = _bound_outer_feature(c, feat, c["_mode"], V, supports) \
                 if clip_outer else feat

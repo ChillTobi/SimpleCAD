@@ -5075,23 +5075,39 @@ def mesh_edge_chains(verts, tris, faces):
                 chains.append(_chain_data(key, path, [segs[s] for s in sl], V, N, C))
     return chains
 
+def _units(X):
+    """Row-wise _unit: rows shorter than 1e-12 stay as they are."""
+    X = np.asarray(X, float)
+    n = np.sqrt(np.einsum("...i,...i->...", X, X))[..., None]
+    return np.where(n > 1e-12, X / np.where(n > 1e-12, n, 1.0), X)
+
 def _chain_data(key, path, segs, V, N, C):
     P = V[path]; closed = len(path) > 2 and path[0] == path[-1]
-    seg_fr = []; convex = 0
-    for j, (a, b, k1, k2) in enumerate(segs):
-        A, B = P[j], P[j+1]; s = _unit(B - A)
-        n1, n2 = N[k1], N[k2]
-        u1 = _unit(np.cross(s, n1)); u1 = u1 if (C[k1] - A) @ u1 > 0 else -u1
-        u2 = _unit(np.cross(s, n2)); u2 = u2 if (C[k2] - A) @ u2 > 0 else -u2
-        convex += 1 if u1 @ n2 < 0 else -1
-        seg_fr.append((s, n1, n2, u1, u2))
-    m = len(P) - 1 if closed else len(P); ns = len(segs)
-    frames = []
-    for j in range(m):
-        adj = [k for k in ((j - 1) % ns if closed else j - 1, j if j < ns else -1) if k >= 0]
-        t, n1, n2, u1, u2 = (_unit(sum(seg_fr[k][i] for k in adj)) for i in range(5))
-        u1 = _unit(u1 - (u1 @ t)*t); u2 = _unit(u2 - (u2 @ t)*t)
-        frames.append((t, n1, n2, u1, u2))
+    ns = len(segs)
+    S = np.asarray(segs, np.int64).reshape(-1, 4)
+    A, B = P[:ns], P[1:ns + 1]
+    s = _units(B - A)                                   # vectorised: one numpy call per step,
+    n1, n2 = N[S[:, 2]], N[S[:, 3]]                     # not one per chain segment
+    u1 = _units(np.cross(s, n1))
+    u1 = np.where((np.einsum("ij,ij->i", C[S[:, 2]] - A, u1) > 0)[:, None], u1, -u1)
+    u2 = _units(np.cross(s, n2))
+    u2 = np.where((np.einsum("ij,ij->i", C[S[:, 3]] - A, u2) > 0)[:, None], u2, -u2)
+    convex = int(np.where(np.einsum("ij,ij->i", u1, n2) < 0, 1, -1).sum())
+    F = np.stack([s, n1, n2, u1, u2], axis=1)           # (segments, 5, 3)
+    m = len(P) - 1 if closed else len(P)
+    j = np.arange(m)
+    prev = (j - 1) % ns if closed else j - 1
+    prev_ok = np.ones(m, bool) if closed else prev >= 0
+    cur_ok = j < ns
+    # sum of the (up to two) neighbouring segment frames, previous first as before
+    total = np.zeros((m, 5, 3))
+    total += np.where(prev_ok[:, None, None], F[np.clip(prev, 0, ns - 1)], 0.0)
+    total += np.where(cur_ok[:, None, None], F[np.clip(j, 0, ns - 1)], 0.0)
+    U = _units(total)
+    t = U[:, 0]
+    fu1 = _units(U[:, 3] - np.einsum("ij,ij->i", U[:, 3], t)[:, None] * t)
+    fu2 = _units(U[:, 4] - np.einsum("ij,ij->i", U[:, 4], t)[:, None] * t)
+    frames = [(t[k], U[k, 1], U[k, 2], fu1[k], fu2[k]) for k in range(m)]
     L = np.linalg.norm(P[1:] - P[:-1], axis=1); tot = float(L.sum())
     mid = ((P[1:] + P[:-1])/2*L[:, None]).sum(0)/tot if tot > 0 else P.mean(0)
     return {"faces": key, "P": P, "closed": closed, "convex": convex > 0, "frames": frames,
@@ -15135,10 +15151,12 @@ def _earcut_loops(outer, holes):
     return result, pts, outer, holes
 
 def clip_mesh_by_plane(mesh, origin, normal):
-    """Keep the part of a closed triangle mesh on the -normal side of the plane (origin, normal)
-    and close it with a planar cap face. A single linear pass instead of a general boolean.
-    Returns (verts, tris, faces, cap_face_index), or None when the cut outline does not form
-    closed loops (an open or non-manifold mesh): the caller then uses the general boolean."""
+    """Keep the part of a triangle mesh on the -normal side of the plane (origin, normal) and
+    close it with a planar cap face. A single linear pass instead of a general boolean.
+    Tolerant of what booleans leave behind: unused or duplicate vertices and T-junctions (cut
+    points at the same place are merged) and small gaps in the cut outline of a not quite
+    closed mesh (bridged straight). Returns (verts, tris, faces, cap_face_index); the cap face
+    is empty when the plane crosses no triangle."""
     verts, tris, faces = mesh
     V = np.asarray(verts, float).reshape(-1, 3)
     T = np.asarray(tris, np.int64).reshape(-1, 3)
@@ -15156,16 +15174,23 @@ def clip_mesh_by_plane(mesh, origin, normal):
     for fi, face in enumerate(faces):
         if face.get("tris"):
             tri_face[np.asarray(face["tris"], np.int64)] = fi
-    new_points = []; edge_point = {}
+    new_points = []; edge_point = {}; point_at = {}
     base = len(V)
+    quantum = 1e-6 * span + 1e-12
 
     def cut_point(a, b):
         key = (a, b) if a < b else (b, a)
         index = edge_point.get(key)
         if index is None:
             t = d[a] / (d[a] - d[b])
-            new_points.append(V[a] + (V[b] - V[a]) * t)
-            index = edge_point[key] = base + len(new_points) - 1
+            point = V[a] + (V[b] - V[a]) * t
+            # cut points at the same place (duplicate vertices, T-junctions) are one point
+            spot = tuple(np.round(point / quantum).astype(np.int64).tolist())
+            index = point_at.get(spot)
+            if index is None:
+                new_points.append(point)
+                index = point_at[spot] = base + len(new_points) - 1
+            edge_point[key] = index
         return index
 
     out_tris = [tuple(t) for t in T[count == 0].tolist()]
@@ -15183,22 +15208,34 @@ def clip_mesh_by_plane(mesh, origin, normal):
         else:                                # a kept: the kept part is a triangle
             out_tris.append((a, pab, pac)); out_face.append(face)
             start, end = pac, pab
-        if start in next_point: return None
-        next_point[start] = end
-    if not next_point:
-        return None
-    # chain the outline into closed loops
-    loops, seen = [], set()
-    for first in next_point:
-        if first in seen: continue
-        loop, point = [], first
-        while point not in seen:
-            seen.add(point); loop.append(point)
-            point = next_point.get(point)
-            if point is None: return None
-        if point != first: return None
-        loops.append(loop)
+        if start != end and start not in next_point:     # (non-manifold spots: first wins)
+            next_point[start] = end
     all_points = np.vstack([V, np.asarray(new_points, float).reshape(-1, 3)])
+    # chain the outline into loops; chains that stay open (a not quite closed mesh) are
+    # joined across small gaps
+    loops, chains, seen = [], [], set()
+    targets = set(next_point.values())
+    for first in [p for p in next_point if p not in targets] + list(next_point):
+        if first in seen: continue
+        chain, point = [], first
+        while point is not None and point not in seen:
+            seen.add(point); chain.append(point)
+            point = next_point.get(point)
+        if point == first and len(chain) >= 3: loops.append(chain)
+        elif len(chain) >= 2: chains.append(chain)
+    gap_limit = 0.05 * span
+    while chains:
+        chain = chains.pop(0)
+        while True:
+            end = all_points[chain[-1]]
+            closing = float(np.linalg.norm(end - all_points[chain[0]]))
+            best = min(((float(np.linalg.norm(end - all_points[other[0]])), k)
+                        for k, other in enumerate(chains)), default=None)
+            if best is not None and best[0] < closing and best[0] <= gap_limit:
+                chain = chain + chains.pop(best[1])
+                continue
+            if closing <= gap_limit and len(chain) >= 3: loops.append(chain)
+            break
     helper = np.eye(3)[int(np.argmin(np.abs(normal)))]
     u = _unit(np.cross(helper, normal)); v = np.cross(normal, u)       # u x v = normal
     flat = [[(float(all_points[i] @ u), float(all_points[i] @ v)) for i in loop] for loop in loops]
@@ -15229,20 +15266,20 @@ def clip_mesh_by_plane(mesh, origin, normal):
             if all(vid in used for vid in loop): continue
             n = len(loop)
             first_used = next((p for p in range(n) if loop[p] in used), None)
-            if first_used is None: return None
+            if first_used is None: continue
             p = first_used
             for _ in range(n):
                 q = (p + 1) % n; skipped = []
                 while loop[q] not in used:
                     skipped.append(loop[q]); q = (q + 1) % n
-                if skipped:
-                    a_id, b_id = loop[p], loop[q]
-                    chain = [a_id] + skipped + [b_id]
-                    t_index = edge_tri.get((a_id, b_id))
-                    if t_index is None:                 # the triangle runs the other way
-                        t_index = edge_tri.get((b_id, a_id))
-                        if t_index is None: return None
+                a_id, b_id = loop[p], loop[q]
+                chain = [a_id] + skipped + [b_id]
+                t_index = edge_tri.get((a_id, b_id)) if skipped else None
+                if skipped and t_index is None:         # the triangle runs the other way
+                    t_index = edge_tri.get((b_id, a_id))
+                    if t_index is not None:
                         a_id, b_id = b_id, a_id; chain = chain[::-1]
+                if t_index is not None:                 # (none: leave that spot unrepaired)
                     t = tris_ids[t_index]; e = t.index(a_id); apex = t[(e + 2) % 3]
                     fan = [[chain[m], chain[m + 1], apex] for m in range(len(chain) - 1)]
                     tris_ids[t_index] = fan[0]
@@ -15257,8 +15294,6 @@ def clip_mesh_by_plane(mesh, origin, normal):
                 p = q
                 if p == first_used: break
         cap += [tuple(t) for t in tris_ids]
-    if not cap:
-        return None
     # orient the cap outward (+normal)
     C = np.asarray(cap, np.int64).reshape(-1, 3)
     P0, P1, P2 = all_points[C[:, 0]], all_points[C[:, 1]], all_points[C[:, 2]]
@@ -15289,6 +15324,7 @@ def apply_cut_surface(mesh, entry):
                                              entry.get("rotation", (0, 0, 0)))
     if entry.get("flip"): normal = -normal
     V = np.asarray(verts, float).reshape(-1, 3)
+    V = V[np.unique(np.asarray(tris, np.int64).ravel())]   # booleans may leave unused vertices
     distance = (V - origin) @ normal
     tolerance = 1e-6
     if float(distance.max()) <= tolerance:        # the plane does not touch the body: unchanged
@@ -20758,7 +20794,11 @@ class MainWindow(QMainWindow):
         self._operation_progress_bar.setMaximumHeight(16)
         self._operation_progress_bar.hide()
         status_bar.addPermanentWidget(self._operation_progress_bar)
-        self._st("Ready — click 'New Sketch' to begin")
+        if _m3 is None:     # without it every cut / fillet / bridge uses the slow Python boolean
+            self._st("Ready — note: 'manifold3d' is not installed, so cuts, fillets and chamfers are "
+                     "slow (install it with: pip install manifold3d)")
+        else:
+            self._st("Ready — click 'New Sketch' to begin")
 
     def _install_dock_collapse_button(self, dock):
         content = dock.widget()

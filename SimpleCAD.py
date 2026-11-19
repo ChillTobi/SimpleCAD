@@ -251,7 +251,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "1.4b"
+APP_VERSION = "1.5b"
 
 QLocale.setDefault(QLocale.c())
 

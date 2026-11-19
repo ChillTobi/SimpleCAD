@@ -31,6 +31,7 @@ REQUIREMENTS = [
     "ezdxf",
     "svgpathtools",
     "qt_modern_style",
+    "manifold3d"
 ]
 
 

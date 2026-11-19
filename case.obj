@@ -1,0 +1,2056 @@
+{
+ "format": "cad3d-project",
+ "version": 1,
+ "objects": [
+  {
+   "type": "sketch",
+   "name": "sketch01",
+   "visible": false,
+   "parent": null,
+   "face": null,
+   "sketch": {
+    "name": "sketch01",
+    "plane": "XY",
+    "frame": [
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      1.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      1.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      1.0
+     ]
+    ],
+    "face_rotation": [
+     1.0,
+     0.0
+    ],
+    "vertices": [
+     [
+      -60.00000000000001,
+      65.0,
+      false
+     ],
+     [
+      60.0,
+      65.00000000000102,
+      false
+     ],
+     [
+      60.0,
+      -65.00000000000101,
+      false
+     ],
+     [
+      -60.00000000000001,
+      -65.0,
+      false
+     ],
+     [
+      3.56266689826589e-20,
+      100.0,
+      false
+     ],
+     [
+      -3.632811814210387e-20,
+      -100.0,
+      false
+     ],
+     [
+      100.0,
+      -5.506427479262244e-20,
+      false
+     ],
+     [
+      -100.0,
+      5.506650902341087e-20,
+      false
+     ]
+    ],
+    "segments": [
+     [
+      0,
+      1,
+      false,
+      false
+     ],
+     [
+      1,
+      2,
+      false,
+      false
+     ],
+     [
+      2,
+      3,
+      false,
+      false
+     ],
+     [
+      3,
+      0,
+      false,
+      false
+     ],
+     [
+      4,
+      5,
+      true,
+      false
+     ],
+     [
+      6,
+      7,
+      true,
+      false
+     ]
+    ],
+    "circles": [],
+    "arcs": [],
+    "ellipses": [],
+    "points_free": [],
+    "text_groups": [],
+    "constraints": [
+     {
+      "seg": {
+       "s": 0
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 2
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 1
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 3
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 4
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 5
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "vertex": {
+       "v": 4
+      },
+      "x0": 0.0,
+      "y0": 100.0,
+      "__type__": "CFixed"
+     },
+     {
+      "vertex": {
+       "v": 5
+      },
+      "x0": 0.0,
+      "y0": -100.0,
+      "__type__": "CFixed"
+     },
+     {
+      "vertex": {
+       "v": 6
+      },
+      "x0": 100.0,
+      "y0": 0.0,
+      "__type__": "CFixed"
+     },
+     {
+      "vertex": {
+       "v": 7
+      },
+      "x0": -100.0,
+      "y0": 0.0,
+      "__type__": "CFixed"
+     },
+     {
+      "seg_a": {
+       "s": 1
+      },
+      "seg_b": {
+       "s": 3
+      },
+      "center": {
+       "s": 4
+      },
+      "__type__": "CSymmetric"
+     },
+     {
+      "seg_a": {
+       "s": 0
+      },
+      "seg_b": {
+       "s": 2
+      },
+      "center": {
+       "s": 5
+      },
+      "__type__": "CSymmetric"
+     },
+     {
+      "a": {
+       "s": 1
+      },
+      "b": {
+       "s": 3
+      },
+      "mode": "distance",
+      "driving": true,
+      "angle_sides": null,
+      "orient": "D",
+      "dim_mode": null,
+      "circle_relation": null,
+      "circle_outer": null,
+      "circle_side": null,
+      "sign": -1.0,
+      "value": 120.0,
+      "off_mm": 74.64156249999999,
+      "side": -1,
+      "t_frac": 0.6515651041666669,
+      "angle": null,
+      "__type__": "CDistance"
+     },
+     {
+      "a": {
+       "s": 0
+      },
+      "b": {
+       "s": 2
+      },
+      "mode": "distance",
+      "driving": true,
+      "angle_sides": null,
+      "orient": "D",
+      "dim_mode": null,
+      "circle_relation": null,
+      "circle_outer": null,
+      "circle_side": null,
+      "sign": -1.0,
+      "value": 130.0,
+      "off_mm": 73.73281250000063,
+      "side": 1,
+      "t_frac": 0.5731418269230715,
+      "angle": null,
+      "__type__": "CDistance"
+     }
+    ],
+    "reference_boundaries": {
+     "segments": {},
+     "circles": {},
+     "arcs": {}
+    },
+    "reference_generated_levels": [],
+    "reference_levels": {
+     "vertices": {},
+     "segments": {},
+     "circles": {},
+     "arcs": {},
+     "ellipses": {}
+    }
+   },
+   "opacity": 1.0
+  },
+  {
+   "type": "extrusion",
+   "name": "extrusion01",
+   "visible": true,
+   "parent": 0,
+   "height": 3.0,
+   "opacity": 1.0,
+   "direction": "one",
+   "cut": false,
+   "through": false,
+   "to_surface": false,
+   "color": [
+    0.5,
+    0.8,
+    1.0
+   ],
+   "material": "Aluminium"
+  },
+  {
+   "type": "sketch",
+   "name": "sketch02",
+   "visible": false,
+   "parent": 1,
+   "face": 1,
+   "sketch": {
+    "name": "sketch02",
+    "plane": "Face",
+    "frame": [
+     [
+      0.0,
+      0.0,
+      3.0
+     ],
+     [
+      1.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      1.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      1.0
+     ]
+    ],
+    "face_rotation": [
+     1.0,
+     -0.0
+    ],
+    "vertices": [
+     [
+      -60.00000000000001,
+      65.0,
+      true
+     ],
+     [
+      -60.00000000000001,
+      -65.0,
+      true
+     ],
+     [
+      60.0,
+      -65.00000000000101,
+      true
+     ],
+     [
+      60.0,
+      65.00000000000102,
+      true
+     ],
+     [
+      3.56266689826589e-20,
+      100.0,
+      true
+     ],
+     [
+      -3.632811814210387e-20,
+      -100.0,
+      true
+     ],
+     [
+      100.0,
+      -5.506427479262244e-20,
+      true
+     ],
+     [
+      -100.0,
+      5.506650902341087e-20,
+      true
+     ],
+     [
+      -40.0,
+      40.0,
+      false
+     ],
+     [
+      40.0,
+      40.0,
+      false
+     ],
+     [
+      -39.99999999999999,
+      -40.0,
+      false
+     ],
+     [
+      39.99999999999999,
+      -40.0,
+      false
+     ]
+    ],
+    "segments": [
+     [
+      0,
+      1,
+      true,
+      true
+     ],
+     [
+      1,
+      2,
+      true,
+      true
+     ],
+     [
+      2,
+      3,
+      true,
+      true
+     ],
+     [
+      3,
+      0,
+      true,
+      true
+     ],
+     [
+      4,
+      5,
+      true,
+      true
+     ],
+     [
+      6,
+      7,
+      true,
+      true
+     ]
+    ],
+    "circles": [
+     [
+      8,
+      5.0,
+      false,
+      false
+     ],
+     [
+      9,
+      5.0,
+      false,
+      false
+     ],
+     [
+      10,
+      5.0,
+      false,
+      false
+     ],
+     [
+      11,
+      5.0,
+      false,
+      false
+     ],
+     [
+      8,
+      2.0,
+      false,
+      false
+     ],
+     [
+      9,
+      2.0000000000000004,
+      false,
+      false
+     ],
+     [
+      10,
+      2.0000000000000004,
+      false,
+      false
+     ],
+     [
+      11,
+      2.000000000139778,
+      false,
+      false
+     ]
+    ],
+    "arcs": [],
+    "ellipses": [],
+    "points_free": [],
+    "text_groups": [],
+    "constraints": [
+     {
+      "seg_a": {
+       "v": 8
+      },
+      "seg_b": {
+       "v": 9
+      },
+      "center": {
+       "s": 4
+      },
+      "__type__": "CSymmetric"
+     },
+     {
+      "seg_a": {
+       "v": 8
+      },
+      "seg_b": {
+       "v": 10
+      },
+      "center": {
+       "s": 5
+      },
+      "__type__": "CSymmetric"
+     },
+     {
+      "seg_a": {
+       "v": 10
+      },
+      "seg_b": {
+       "v": 11
+      },
+      "center": {
+       "s": 4
+      },
+      "__type__": "CSymmetric"
+     },
+     {
+      "a": {
+       "v": 8
+      },
+      "b": {
+       "v": 9
+      },
+      "mode": "distance",
+      "driving": true,
+      "angle_sides": null,
+      "orient": "H",
+      "dim_mode": null,
+      "circle_relation": null,
+      "circle_outer": null,
+      "circle_side": null,
+      "sign": 1.0,
+      "value": 80.0,
+      "off_mm": null,
+      "side": null,
+      "t_frac": 0.5,
+      "angle": null,
+      "__type__": "CDistance"
+     },
+     {
+      "a": {
+       "v": 10
+      },
+      "b": {
+       "v": 8
+      },
+      "mode": "distance",
+      "driving": true,
+      "angle_sides": null,
+      "orient": "V",
+      "dim_mode": null,
+      "circle_relation": null,
+      "circle_outer": null,
+      "circle_side": null,
+      "sign": 1.0,
+      "value": 80.0,
+      "off_mm": null,
+      "side": null,
+      "t_frac": 0.5,
+      "angle": null,
+      "__type__": "CDistance"
+     },
+     {
+      "target": {
+       "c": 0
+      },
+      "value": 10.0,
+      "orient": null,
+      "dim_mode": "diameter",
+      "sign": 1.0,
+      "off_mm": null,
+      "side": null,
+      "t_frac": 0.5,
+      "angle": null,
+      "__type__": "CDimension"
+     },
+     {
+      "seg_a": {
+       "c": 0
+      },
+      "seg_b": {
+       "c": 1
+      },
+      "__type__": "CEqual"
+     },
+     {
+      "seg_a": {
+       "c": 0
+      },
+      "seg_b": {
+       "c": 2
+      },
+      "__type__": "CEqual"
+     },
+     {
+      "seg_a": {
+       "c": 0
+      },
+      "seg_b": {
+       "c": 3
+      },
+      "__type__": "CEqual"
+     },
+     {
+      "target": {
+       "c": 4
+      },
+      "value": 4.0,
+      "orient": null,
+      "dim_mode": "diameter",
+      "sign": 1.0,
+      "off_mm": null,
+      "side": null,
+      "t_frac": 0.5,
+      "angle": null,
+      "__type__": "CDimension"
+     },
+     {
+      "seg_a": {
+       "c": 4
+      },
+      "seg_b": {
+       "c": 5
+      },
+      "__type__": "CEqual"
+     },
+     {
+      "seg_a": {
+       "c": 4
+      },
+      "seg_b": {
+       "c": 6
+      },
+      "__type__": "CEqual"
+     },
+     {
+      "seg_a": {
+       "c": 4
+      },
+      "seg_b": {
+       "c": 7
+      },
+      "__type__": "CEqual"
+     }
+    ],
+    "reference_boundaries": {
+     "segments": {
+      "0": 0,
+      "1": 1,
+      "2": 2,
+      "3": 3
+     },
+     "circles": {},
+     "arcs": {}
+    },
+    "reference_generated_levels": [
+     -3.0
+    ],
+    "reference_levels": {
+     "vertices": {
+      "0": -3.0,
+      "1": -3.0,
+      "2": -3.0,
+      "3": -3.0,
+      "4": -3.0,
+      "5": -3.0,
+      "6": -3.0,
+      "7": -3.0
+     },
+     "segments": {
+      "0": -3.0,
+      "1": -3.0,
+      "2": -3.0,
+      "3": -3.0,
+      "4": -3.0,
+      "5": -3.0
+     },
+     "circles": {},
+     "arcs": {},
+     "ellipses": {}
+    }
+   },
+   "opacity": 1.0
+  },
+  {
+   "type": "extrusion",
+   "name": "extrusion02",
+   "visible": true,
+   "parent": 2,
+   "height": 5.0,
+   "opacity": 1.0,
+   "direction": "one",
+   "cut": false,
+   "through": false,
+   "to_surface": false,
+   "color": [
+    0.5,
+    0.8,
+    1.0
+   ],
+   "material": "Aluminium"
+  },
+  {
+   "type": "sketch",
+   "name": "sketch03",
+   "visible": true,
+   "parent": 1,
+   "face": 1,
+   "sketch": {
+    "name": "sketch03",
+    "plane": "Face",
+    "frame": [
+     [
+      0.0,
+      0.0,
+      3.0
+     ],
+     [
+      1.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      1.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      1.0
+     ]
+    ],
+    "face_rotation": [
+     1.0,
+     -0.0
+    ],
+    "vertices": [
+     [
+      -60.00000000000001,
+      65.0,
+      true
+     ],
+     [
+      -60.00000000000001,
+      -65.0,
+      true
+     ],
+     [
+      60.0,
+      -65.00000000000101,
+      true
+     ],
+     [
+      60.0,
+      65.00000000000102,
+      true
+     ],
+     [
+      3.56266689826589e-20,
+      100.0,
+      true
+     ],
+     [
+      -3.632811814210387e-20,
+      -100.0,
+      true
+     ],
+     [
+      100.0,
+      -5.506427479262244e-20,
+      true
+     ],
+     [
+      -100.0,
+      5.506650902341087e-20,
+      true
+     ],
+     [
+      -60.00000000000001,
+      65.00000000000034,
+      false
+     ],
+     [
+      60.0,
+      65.00000000000068,
+      false
+     ],
+     [
+      60.0,
+      -65.00000000000101,
+      false
+     ],
+     [
+      -60.00000000000001,
+      -65.00000000000101,
+      false
+     ],
+     [
+      -57.0,
+      60.00000000000051,
+      false
+     ],
+     [
+      57.000000000000014,
+      60.00000000000051,
+      false
+     ],
+     [
+      57.000000000000014,
+      -60.00000000000051,
+      false
+     ],
+     [
+      -57.00000000000001,
+      -60.00000000000051,
+      false
+     ]
+    ],
+    "segments": [
+     [
+      0,
+      1,
+      true,
+      true
+     ],
+     [
+      1,
+      2,
+      true,
+      true
+     ],
+     [
+      2,
+      3,
+      true,
+      true
+     ],
+     [
+      3,
+      0,
+      true,
+      true
+     ],
+     [
+      4,
+      5,
+      true,
+      true
+     ],
+     [
+      6,
+      7,
+      true,
+      true
+     ],
+     [
+      8,
+      9,
+      false,
+      false
+     ],
+     [
+      9,
+      10,
+      false,
+      false
+     ],
+     [
+      10,
+      11,
+      false,
+      false
+     ],
+     [
+      11,
+      8,
+      false,
+      false
+     ],
+     [
+      12,
+      13,
+      false,
+      false
+     ],
+     [
+      13,
+      14,
+      false,
+      false
+     ],
+     [
+      14,
+      15,
+      false,
+      false
+     ],
+     [
+      15,
+      12,
+      false,
+      false
+     ]
+    ],
+    "circles": [],
+    "arcs": [],
+    "ellipses": [],
+    "points_free": [],
+    "text_groups": [],
+    "constraints": [
+     {
+      "seg": {
+       "s": 6
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 8
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 7
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 9
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "vertex_move": {
+       "v": 8
+      },
+      "vertex_target": {
+       "v": 0
+      },
+      "__type__": "CCoincident"
+     },
+     {
+      "vertex_move": {
+       "v": 9
+      },
+      "vertex_target": {
+       "v": 3
+      },
+      "__type__": "CCoincident"
+     },
+     {
+      "vertex_move": {
+       "v": 10
+      },
+      "vertex_target": {
+       "v": 2
+      },
+      "__type__": "CCoincident"
+     },
+     {
+      "seg": {
+       "s": 10
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 12
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 11
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 13
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "a": {
+       "s": 9
+      },
+      "b": {
+       "s": 13
+      },
+      "mode": "distance",
+      "driving": true,
+      "angle_sides": null,
+      "orient": "D",
+      "dim_mode": null,
+      "circle_relation": null,
+      "circle_outer": null,
+      "circle_side": null,
+      "sign": -1.0,
+      "value": 3.0,
+      "off_mm": 3.3988105975893435,
+      "side": 1,
+      "t_frac": 1.6,
+      "angle": null,
+      "__type__": "CDistance"
+     },
+     {
+      "a": {
+       "s": 10
+      },
+      "b": {
+       "s": 6
+      },
+      "mode": "distance",
+      "driving": true,
+      "angle_sides": null,
+      "orient": "D",
+      "dim_mode": null,
+      "circle_relation": null,
+      "circle_outer": null,
+      "circle_side": null,
+      "sign": 1.0,
+      "value": 5.0,
+      "off_mm": 72.57433489827856,
+      "side": 1,
+      "t_frac": 1.6,
+      "angle": null,
+      "__type__": "CDistance"
+     },
+     {
+      "seg_a": {
+       "s": 11
+      },
+      "seg_b": {
+       "s": 13
+      },
+      "center": {
+       "s": 4
+      },
+      "__type__": "CSymmetric"
+     },
+     {
+      "seg_a": {
+       "s": 10
+      },
+      "seg_b": {
+       "s": 12
+      },
+      "center": {
+       "s": 5
+      },
+      "__type__": "CSymmetric"
+     }
+    ],
+    "reference_boundaries": {
+     "segments": {
+      "0": 0,
+      "1": 1,
+      "2": 2,
+      "3": 3
+     },
+     "circles": {},
+     "arcs": {}
+    },
+    "reference_generated_levels": [
+     -3.0
+    ],
+    "reference_levels": {
+     "vertices": {
+      "0": -3.0,
+      "1": -3.0,
+      "2": -3.0,
+      "3": -3.0,
+      "4": -3.0,
+      "5": -3.0,
+      "6": -3.0,
+      "7": -3.0
+     },
+     "segments": {
+      "0": -3.0,
+      "1": -3.0,
+      "2": -3.0,
+      "3": -3.0,
+      "4": -3.0,
+      "5": -3.0
+     },
+     "circles": {},
+     "arcs": {},
+     "ellipses": {}
+    }
+   },
+   "opacity": 1.0
+  },
+  {
+   "type": "extrusion",
+   "name": "extrusion03",
+   "visible": true,
+   "parent": 4,
+   "height": 10.0,
+   "opacity": 1.0,
+   "direction": "one",
+   "cut": false,
+   "through": false,
+   "to_surface": false,
+   "color": [
+    0.5,
+    0.8,
+    1.0
+   ],
+   "material": "Aluminium"
+  },
+  {
+   "type": "sketch",
+   "name": "sketch04",
+   "visible": true,
+   "parent": 5,
+   "face": 1,
+   "sketch": {
+    "name": "sketch04",
+    "plane": "Face",
+    "frame": [
+     [
+      0.0,
+      0.0,
+      13.0
+     ],
+     [
+      1.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      1.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      1.0
+     ]
+    ],
+    "face_rotation": [
+     1.0,
+     -0.0
+    ],
+    "vertices": [
+     [
+      -60.00000000000001,
+      65.00000000000034,
+      true
+     ],
+     [
+      -60.00000000000001,
+      -65.00000000000101,
+      true
+     ],
+     [
+      60.0,
+      -65.00000000000101,
+      true
+     ],
+     [
+      60.0,
+      65.00000000000068,
+      true
+     ],
+     [
+      -57.0,
+      60.00000000000051,
+      true
+     ],
+     [
+      -57.00000000000001,
+      -60.00000000000051,
+      true
+     ],
+     [
+      57.000000000000014,
+      -60.00000000000051,
+      true
+     ],
+     [
+      57.000000000000014,
+      60.00000000000051,
+      true
+     ],
+     [
+      -40.0,
+      40.0,
+      true
+     ],
+     [
+      40.0,
+      40.0,
+      true
+     ],
+     [
+      -39.99999999999999,
+      -40.0,
+      true
+     ],
+     [
+      39.99999999999999,
+      -40.0,
+      true
+     ],
+     [
+      -54.0,
+      65.00000000000036,
+      false
+     ],
+     [
+      -54.0,
+      63.50000000000043,
+      false
+     ],
+     [
+      -56.0,
+      63.50000000000043,
+      false
+     ],
+     [
+      -56.0,
+      61.50000000000043,
+      false
+     ],
+     [
+      -54.0,
+      61.50000000000043,
+      false
+     ],
+     [
+      -54.0,
+      60.00000000000051,
+      false
+     ],
+     [
+      -75.0,
+      1.0109536490333146e-24,
+      false
+     ],
+     [
+      75.0,
+      9.342132601734146e-25,
+      false
+     ],
+     [
+      -40.0,
+      40.0,
+      true
+     ],
+     [
+      40.0,
+      40.0,
+      true
+     ],
+     [
+      -39.99999999999999,
+      -40.0,
+      true
+     ],
+     [
+      39.99999999999999,
+      -40.0,
+      true
+     ],
+     [
+      -60.00000000000001,
+      65.00000000000034,
+      true
+     ],
+     [
+      60.0,
+      65.00000000000068,
+      true
+     ],
+     [
+      60.0,
+      -65.00000000000101,
+      true
+     ],
+     [
+      -60.00000000000001,
+      -65.00000000000101,
+      true
+     ],
+     [
+      -57.00000000000001,
+      62.00000000000051,
+      true
+     ],
+     [
+      57.00000000000001,
+      62.00000000000051,
+      true
+     ],
+     [
+      57.00000000000001,
+      -62.0,
+      true
+     ],
+     [
+      -57.00000000000001,
+      -62.0,
+      true
+     ],
+     [
+      53.99999999999996,
+      65.00000000000036,
+      false
+     ],
+     [
+      53.99999999999996,
+      63.50000000000043,
+      false
+     ],
+     [
+      55.99999999999996,
+      63.50000000000043,
+      false
+     ],
+     [
+      55.99999999999996,
+      61.50000000000043,
+      false
+     ],
+     [
+      54.00000000000003,
+      61.50000000000043,
+      false
+     ],
+     [
+      -1.0702815111322712e-24,
+      75.0,
+      false
+     ],
+     [
+      1.3526952929232039e-24,
+      -4.862917273016823e-25,
+      false
+     ],
+     [
+      54.0,
+      60.0,
+      false
+     ],
+     [
+      -60.00000000000001,
+      65.0,
+      true
+     ],
+     [
+      60.0,
+      65.00000000000102,
+      true
+     ],
+     [
+      60.0,
+      -65.00000000000101,
+      true
+     ],
+     [
+      -60.00000000000001,
+      -65.0,
+      true
+     ],
+     [
+      3.56266689826589e-20,
+      100.0,
+      true
+     ],
+     [
+      -3.632811814210387e-20,
+      -100.0,
+      true
+     ],
+     [
+      100.0,
+      -5.506427479262244e-20,
+      true
+     ],
+     [
+      -100.0,
+      5.506650902341087e-20,
+      true
+     ]
+    ],
+    "segments": [
+     [
+      0,
+      1,
+      true,
+      true
+     ],
+     [
+      1,
+      2,
+      true,
+      true
+     ],
+     [
+      2,
+      3,
+      true,
+      true
+     ],
+     [
+      3,
+      0,
+      true,
+      true
+     ],
+     [
+      4,
+      5,
+      true,
+      true
+     ],
+     [
+      5,
+      6,
+      true,
+      true
+     ],
+     [
+      6,
+      7,
+      true,
+      true
+     ],
+     [
+      7,
+      4,
+      true,
+      true
+     ],
+     [
+      12,
+      13,
+      false,
+      false
+     ],
+     [
+      13,
+      14,
+      false,
+      false
+     ],
+     [
+      14,
+      15,
+      false,
+      false
+     ],
+     [
+      15,
+      16,
+      false,
+      false
+     ],
+     [
+      16,
+      17,
+      false,
+      false
+     ],
+     [
+      18,
+      19,
+      true,
+      false
+     ],
+     [
+      24,
+      25,
+      true,
+      true
+     ],
+     [
+      25,
+      26,
+      true,
+      true
+     ],
+     [
+      26,
+      27,
+      true,
+      true
+     ],
+     [
+      27,
+      24,
+      true,
+      true
+     ],
+     [
+      28,
+      29,
+      true,
+      true
+     ],
+     [
+      29,
+      30,
+      true,
+      true
+     ],
+     [
+      30,
+      31,
+      true,
+      true
+     ],
+     [
+      31,
+      28,
+      true,
+      true
+     ],
+     [
+      12,
+      32,
+      false,
+      false
+     ],
+     [
+      32,
+      33,
+      false,
+      false
+     ],
+     [
+      33,
+      34,
+      false,
+      false
+     ],
+     [
+      34,
+      35,
+      false,
+      false
+     ],
+     [
+      35,
+      36,
+      false,
+      false
+     ],
+     [
+      37,
+      38,
+      true,
+      false
+     ],
+     [
+      17,
+      39,
+      false,
+      false
+     ],
+     [
+      39,
+      36,
+      false,
+      false
+     ],
+     [
+      40,
+      41,
+      true,
+      true
+     ],
+     [
+      41,
+      42,
+      true,
+      true
+     ],
+     [
+      42,
+      43,
+      true,
+      true
+     ],
+     [
+      43,
+      40,
+      true,
+      true
+     ],
+     [
+      44,
+      45,
+      true,
+      true
+     ],
+     [
+      46,
+      47,
+      true,
+      true
+     ]
+    ],
+    "circles": [
+     [
+      8,
+      2.0,
+      true,
+      true
+     ],
+     [
+      9,
+      1.9999999999999998,
+      true,
+      true
+     ],
+     [
+      10,
+      2.0,
+      true,
+      true
+     ],
+     [
+      11,
+      2.000000000419335,
+      true,
+      true
+     ],
+     [
+      20,
+      5.0,
+      true,
+      true
+     ],
+     [
+      21,
+      5.0,
+      true,
+      true
+     ],
+     [
+      22,
+      5.0,
+      true,
+      true
+     ],
+     [
+      23,
+      5.0,
+      true,
+      true
+     ],
+     [
+      20,
+      2.0,
+      true,
+      true
+     ],
+     [
+      21,
+      2.0000000000000004,
+      true,
+      true
+     ],
+     [
+      22,
+      2.0000000000000004,
+      true,
+      true
+     ],
+     [
+      23,
+      2.000000000139778,
+      true,
+      true
+     ]
+    ],
+    "arcs": [],
+    "ellipses": [],
+    "points_free": [],
+    "text_groups": [],
+    "constraints": [
+     {
+      "seg": {
+       "s": 8
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 3
+      },
+      "vertex": {
+       "v": 12
+      },
+      "__type__": "CPointOnLine"
+     },
+     {
+      "seg": {
+       "s": 9
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 10
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 11
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg_a": {
+       "s": 12
+      },
+      "seg_b": {
+       "s": 11
+      },
+      "__type__": "CPerpendicular"
+     },
+     {
+      "seg": {
+       "s": 7
+      },
+      "vertex": {
+       "v": 17
+      },
+      "__type__": "CPointOnLine"
+     },
+     {
+      "a": {
+       "s": 8
+      },
+      "angle": null,
+      "angle_sides": null,
+      "b": {
+       "s": 10
+      },
+      "circle_outer": null,
+      "circle_relation": null,
+      "circle_side": null,
+      "dim_mode": null,
+      "driving": true,
+      "mode": "distance",
+      "off_mm": 3.9169401679197215,
+      "orient": "D",
+      "side": -1,
+      "sign": -1.0,
+      "t_frac": 0.5536195523862523,
+      "value": 2.0,
+      "__type__": "CDistance"
+     },
+     {
+      "seg_a": {
+       "s": 12
+      },
+      "seg_b": {
+       "s": 8
+      },
+      "__type__": "CEqual"
+     },
+     {
+      "a": {
+       "s": 9
+      },
+      "angle": null,
+      "angle_sides": null,
+      "b": {
+       "s": 11
+      },
+      "circle_outer": null,
+      "circle_relation": null,
+      "circle_side": null,
+      "dim_mode": null,
+      "driving": true,
+      "mode": "distance",
+      "off_mm": 2.2952573417660096,
+      "orient": "D",
+      "side": -1,
+      "sign": 1.0,
+      "t_frac": 0.5708142799051302,
+      "value": 2.0,
+      "__type__": "CDistance"
+     },
+     {
+      "seg": {
+       "s": 13
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "vertex": {
+       "v": 18
+      },
+      "x0": -75.0,
+      "y0": 0.0,
+      "__type__": "CFixed"
+     },
+     {
+      "vertex": {
+       "v": 19
+      },
+      "x0": 75.0,
+      "y0": 0.0,
+      "__type__": "CFixed"
+     },
+     {
+      "seg": {
+       "s": 22
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 23
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 24
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 25
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "seg": {
+       "s": 26
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg_a": {
+       "s": 11
+      },
+      "seg_b": {
+       "s": 26
+      },
+      "__type__": "CCollinear"
+     },
+     {
+      "seg_a": {
+       "s": 9
+      },
+      "seg_b": {
+       "s": 24
+      },
+      "__type__": "CCollinear"
+     },
+     {
+      "seg_a": {
+       "s": 9
+      },
+      "seg_b": {
+       "s": 24
+      },
+      "__type__": "CEqual"
+     },
+     {
+      "seg": {
+       "s": 27
+      },
+      "__type__": "CVertical"
+     },
+     {
+      "vertex": {
+       "v": 37
+      },
+      "x0": 0.0,
+      "y0": 75.0,
+      "__type__": "CFixed"
+     },
+     {
+      "vertex": {
+       "v": 38
+      },
+      "x0": 0.0,
+      "y0": 0.0,
+      "__type__": "CFixed"
+     },
+     {
+      "a": {
+       "s": 10
+      },
+      "b": {
+       "s": 27
+      },
+      "mode": "distance",
+      "driving": true,
+      "angle_sides": null,
+      "orient": "D",
+      "dim_mode": null,
+      "circle_relation": null,
+      "circle_outer": null,
+      "circle_side": null,
+      "sign": 1.0,
+      "value": 56.0,
+      "off_mm": 31.248404255150678,
+      "side": 1,
+      "t_frac": 0.5052806163820694,
+      "angle": null,
+      "__type__": "CDistance"
+     },
+     {
+      "seg": {
+       "s": 28
+      },
+      "__type__": "CHorizontal"
+     },
+     {
+      "seg": {
+       "s": 29
+      },
+      "__type__": "CVertical"
+     }
+    ],
+    "reference_boundaries": {
+     "segments": {
+      "0": 0,
+      "1": 1,
+      "2": 2,
+      "3": 3,
+      "4": 4,
+      "5": 5,
+      "6": 6,
+      "7": 7
+     },
+     "circles": {},
+     "arcs": {}
+    },
+    "reference_generated_levels": [
+     -5.0,
+     -10.0,
+     -13.0
+    ],
+    "reference_levels": {
+     "vertices": {
+      "0": -5.0,
+      "1": -5.0,
+      "2": -5.0,
+      "3": -5.0,
+      "4": -5.0,
+      "5": -5.0,
+      "6": -5.0,
+      "7": -5.0,
+      "8": -5.0,
+      "9": -5.0,
+      "10": -5.0,
+      "11": -5.0,
+      "20": -10.0,
+      "21": -10.0,
+      "22": -10.0,
+      "23": -10.0,
+      "24": -10.0,
+      "25": -10.0,
+      "26": -10.0,
+      "27": -10.0,
+      "28": -10.0,
+      "29": -10.0,
+      "30": -10.0,
+      "31": -10.0,
+      "40": -13.0,
+      "41": -13.0,
+      "42": -13.0,
+      "43": -13.0,
+      "44": -13.0,
+      "45": -13.0,
+      "46": -13.0,
+      "47": -13.0
+     },
+     "segments": {
+      "0": -5.0,
+      "1": -5.0,
+      "2": -5.0,
+      "3": -5.0,
+      "4": -5.0,
+      "5": -5.0,
+      "6": -5.0,
+      "7": -5.0,
+      "14": -10.0,
+      "15": -10.0,
+      "16": -10.0,
+      "17": -10.0,
+      "18": -10.0,
+      "19": -10.0,
+      "20": -10.0,
+      "21": -10.0,
+      "30": -13.0,
+      "31": -13.0,
+      "32": -13.0,
+      "33": -13.0,
+      "34": -13.0,
+      "35": -13.0
+     },
+     "circles": {
+      "0": -5.0,
+      "1": -5.0,
+      "2": -5.0,
+      "3": -5.0,
+      "4": -10.0,
+      "5": -10.0,
+      "6": -10.0,
+      "7": -10.0,
+      "8": -10.0,
+      "9": -10.0,
+      "10": -10.0,
+      "11": -10.0
+     },
+     "arcs": {},
+     "ellipses": {}
+    }
+   },
+   "opacity": 1.0
+  },
+  {
+   "type": "extrusion",
+   "name": "extrusion04",
+   "visible": false,
+   "parent": 6,
+   "height": -5.0,
+   "opacity": 1.0,
+   "direction": "one",
+   "cut": true,
+   "through": false,
+   "to_surface": false,
+   "color": [
+    0.5,
+    0.8,
+    1.0
+   ]
+  }
+ ]
+}

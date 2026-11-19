@@ -16,7 +16,7 @@ with 3-D and 2-D XY values) and, for corners, the 3-D distance, ΔX / ΔY / ΔZ 
 in the status bar and in the Measurement panel below the object explorer. Measured edges and
 corners are highlighted in the inverted colour of their body. RMB on a measured
 item removes it, RMB elsewhere (or Esc) clears the measurement.
-Toolbars: 1st row Undo / Redo; 2nd row New Sketch / Surface / Extrude / Ring Extrusion /
+Toolbars: 1st row Undo / Redo; 2nd row New Sketch / Surface / Cut Surface / Extrude / Ring Extrusion /
 Angle Extrusion / Bridge / Chamfer / Fillet / Gear / Thread / Measurement, replaced in sketch mode by the
 grouped sketch tools: Mode (Select / Draw / Constrain / Scissor / Delete), Draw tools (Line,
 Rect, Circle, Ellipse, Polygon, Arc, Point, SVG import, Support), Constraints and Grid / snap. Select
@@ -161,6 +161,17 @@ Workflow:
     actions (Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+Z / Ctrl+Y / Ctrl+W). Closing the window
     with unsaved changes asks Save / Discard (back to the last saved state) / Cancel; when the
     program is closed this comes after the sketch question and before the project question.
+     Cut Surface (toolbar button right of Surface): select an extrusion (explorer or a click on it),
+     then click Cut Surface. A grey transparent plane, shown only while it is edited, is placed with
+     the XYZ move / XYZ rotation fields or by dragging the coloured arrows in the 3-D view (the same
+     X, then Y, then Z rotation convention as imported models and the assembly). The extrusion is
+     cut at the plane live: the side the orange arrow points to is hidden ("Keep the other side"
+     swaps them) and the cut face is drawn light grey with 45° hatching, as in technical drawings.
+     OK stores the plane as the top child of that extrusion; it cuts that body and every extrusion
+     built on it (descendants), never remove-material tool bodies. Its explorer checkbox switches
+     the cut on / off, Edit reopens the placement panel. Several Cut Surfaces are applied one
+     after the other. The cut is a linear plane clip with a capped section (closed meshes); the
+     general boolean is only the fallback for open meshes.
   7. Explorer context menu / Edit menu: Edit (sketch → drawing mode, extrusion → extrude
      sidebar; dependent objects are rebuilt), Rename (F2), Delete (Del, asks Yes/No and also
      removes dependent objects).
@@ -183,6 +194,11 @@ Key implementation notes:
     PyQt5 copies dicts through QVariant, breaking identity checks.
     _on_tree_click looks up the real entry via next(o for o in objects if id(o)==eid).
   - Sketch.frame = (origin, u, v, w): sketch x/y axes in 3-D and extrusion direction.
+  - Cut Surface entries {type "cut_surface", parent = extrusion, position, rotation, flip, size,
+    visible = cut active} are applied by _apply_cuts as the last body stage (after cuts and
+    chamfer/fillet/thread features): csg_subtract with a half-space box; the new face has
+    face["section"] = plane frame and is drawn shaded + hatched. body["_pre_section"] keeps the
+    mesh before the Cut Surfaces so moving the plane does not redo the earlier stages.
   - Solid entries carry "faces" (top/bottom/side per edge) used for per-face hover
     highlighting, planar-face sketches, and datum surfaces tangent to curved faces.
     Generated chamfer/fillet faces retain their feature entry's runtime identity so selection
@@ -6155,7 +6171,8 @@ def entry_children(entry, objects):
     if entry["type"] == "surface":
         return [o for o in objects if o["type"] in ("sketch", "surface") and o.get("parent") is entry]
     if entry["type"] in ("extrusion", "imported"):
-        children = [o for o in objects if o["type"] == "sketch" and o.get("parent") is entry]
+        children = [o for o in objects if o["type"] == "cut_surface" and o.get("parent") is entry]
+        children += [o for o in objects if o["type"] == "sketch" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "extrusion" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "feature" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "technical_drawing" and o.get("parent") is entry]
@@ -6442,6 +6459,9 @@ def measurement_report(items):
     return L, "Measure | " + " | ".join(S)
 
 # ── View3D ────────────────────────────────────────────────────────────────────
+AXIS_HANDLE_COLORS = {"axis_x": (1.0, 0.35, 0.30, 1.0), "axis_y": (0.35, 0.90, 0.35, 1.0),
+                      "axis_z": (0.40, 0.60, 1.0, 1.0)}     # move arrows of the Cut Surface
+
 def dimension_drag_step(pixels_per_mm, fine=False):
     target = min(1.0, 16.0 / max(float(pixels_per_mm), 1e-9))
     decade = 10.0 ** math.floor(math.log10(target))
@@ -6537,6 +6557,7 @@ class View3D(QGLWidget):
         self._meas_hover = None     # edge / corner under the cursor (Measure tool)
         self._dimension_drag = None
         self._dimension_hovered = False
+        self._dimension_hover_key = None     # name of the handle under the cursor (highlighted)
         self._grid_cache = None     # (key, pixmap) of the rendered sketch grid
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -6864,6 +6885,7 @@ class View3D(QGLWidget):
         self._draw_axes()
         self._draw_solids()
         self._draw_surfaces()
+        self._draw_cut_surface()
         if self._mode == MODE_SELPLANE:
             self._draw_plane_selectors()
         self._draw_gear_centerlines()
@@ -6943,6 +6965,27 @@ class View3D(QGLWidget):
             tangent = _unit(np.cross(axis, radial))
             handle_specs = [(end, tangent, mw.sp_angle_draft,
                              "Draft angle", "°", 1.0)]
+        elif getattr(mw, "_cut_panel_active", False) and mw._cut_edit is not None:
+            anchor = np.asarray(mw._cut_edit["position"], float)
+            handle_specs = [(anchor, np.eye(3)[index], mw.sp_cut_position[index],
+                             "Move Cut Surface along " + "XYZ"[index], " mm", 1.0,
+                             None, "axis_" + "xyz"[index]) for index in range(3)]
+            # Rotation arcs. The angles apply X, then Y, then Z, so the world axis each one turns
+            # about is: X -> Rz*Ry*e_x, Y -> Rz*e_y, Z -> e_z.
+            rx, ry, rz = (float(value) for value in mw._cut_edit["rotation"])
+            turn_z = _import_rotation_matrix((0.0, 0.0, rz))
+            turn_zy = turn_z @ _import_rotation_matrix((0.0, ry, 0.0))
+            for index, axis in enumerate((turn_zy[:, 0], turn_z[:, 1], np.array([0.0, 0.0, 1.0]))):
+                axis = _unit(np.asarray(axis, float))
+                # the ring lies in the plane perpendicular to the axis; its angle grows
+                # counter-clockwise about +axis, the way the rotation field grows
+                helper = np.eye(3)[int(np.argmin(np.abs(axis)))]
+                arm = _unit(np.cross(axis, helper))
+                ring = {"center": anchor, "u": arm, "v": np.cross(axis, arm),
+                        "start": 20.0, "stop": 290.0}
+                handle_specs.append((anchor, axis, mw.sp_cut_rotation[index],
+                                     "Rotate Cut Surface around " + "XYZ"[index], "°", 1.0,
+                                     ring, "axis_" + "xyz"[index]))
         elif getattr(mw, "_surface_panel_active", False) and surface_preview is not None:
             parent = mw._surface_reference_parent
             face = mw._surface_reference_face
@@ -7105,6 +7148,11 @@ class View3D(QGLWidget):
             return [] if all_handles else None
         handles = []
         for spec in handle_specs:
+            if len(spec) > 6 and isinstance(spec[6], dict):
+                handle = self._ring_handle(spec)
+                if handle is not None:
+                    handles.append(handle)
+                continue
             anchor, axis, control, name, unit, factor = spec[:6]
             screen, valid = self._project([anchor, anchor + axis])
             if not valid.all():
@@ -7128,7 +7176,7 @@ class View3D(QGLWidget):
             handle = {"control": control, "factor": factor, "name": name, "unit": unit,
                                 "step": 0.1 if control is mw.sp_thread_length else
                                     1.0 if control in (mw.sp_feat_angle, mw.sp_ring_rotation,
-                                                       mw.sp_angle_draft) else None,
+                                                       mw.sp_angle_draft, *mw.sp_cut_rotation) else None,
                             "fine_modifier": Qt.ControlModifier if control in
                                 (mw.sp_thread_length, mw.sp_angle_draft) else
                                             Qt.ControlModifier | Qt.ShiftModifier,
@@ -7141,7 +7189,8 @@ class View3D(QGLWidget):
                 center_screen, center_valid = self._project([spec[6]])
                 if center_valid[0]:
                     arc_center = center_screen[0]
-                    radius = max(6.0, min(42.0, arc_center[0] - 8.0,
+                    radius = max(6.0, min(42.0,
+                                          arc_center[0] - 8.0,
                                           self.width() - 8.0 - arc_center[0],
                                           arc_center[1] - 8.0,
                                           self.height() - 8.0 - arc_center[1]))
@@ -7156,6 +7205,34 @@ class View3D(QGLWidget):
                                   pixels_per_mm=radius * math.pi / 180.0)
             handles.append(handle)
         return handles if all_handles else (handles[0] if handles else None)
+
+    RING_HANDLE_PIXELS = 38.0       # on-screen radius of a 3-D rotation ring
+
+    def _ring_handle(self, spec):
+        """Rotation handle drawn as a real 3-D ring (the projection of a circle in space), so it
+        sits on its axis like the move arrows. spec[6] = {center, u, v, start, stop} in world space."""
+        _, _, control, name, unit, factor = spec[:6]
+        ring = spec[6]
+        centre = np.asarray(ring["center"], float)
+        depth = float((self._mvp @ np.r_[centre, 1.0])[3])
+        pixels_per_unit = self.height() / (2.0 * max(depth, 0.1) * math.tan(math.radians(22.5)))
+        radius = self.RING_HANDLE_PIXELS / max(pixels_per_unit, 1e-9)
+        angles = np.radians(np.linspace(ring["start"], ring["stop"], 61))
+        points = centre + radius * (np.cos(angles)[:, None] * np.asarray(ring["u"], float) +
+                                    np.sin(angles)[:, None] * np.asarray(ring["v"], float))
+        screen, valid = self._project(points)
+        if not valid.all():
+            return None
+        length = float(np.linalg.norm(np.diff(screen, axis=0), axis=1).sum())
+        if length < 20.0:
+            return None
+        tangent = screen[1] - screen[0]
+        tangent /= max(float(np.linalg.norm(tangent)), 1e-12)
+        return {"control": control, "factor": factor, "name": name, "unit": unit,
+                "step": 1.0, "fine_modifier": Qt.ControlModifier | Qt.ShiftModifier,
+                "start": screen[0], "tip": screen[-1], "direction": tangent,
+                "color": spec[7] if len(spec) > 7 else None, "rotation_arc": screen,
+                "pixels_per_mm": length / (ring["stop"] - ring["start"])}
 
     def _dimension_handle_at(self, position):
         point = np.array([position.x(), position.y()], dtype=float)
@@ -7175,18 +7252,22 @@ class View3D(QGLWidget):
         for handle in self._dimension_handle_data(all_handles=True):
             start, tip, direction = handle["start"], handle["tip"], handle["direction"]
             sideways = np.array([-direction[1], direction[0]])
-            accent = ((1.0, 0.2, 0.2, 1.0) if handle.get("color") == "red" else
+            drag = self._dimension_drag
+            hot = handle["name"] == (drag["name"] if drag is not None else self._dimension_hover_key)
+            accent = (AXIS_HANDLE_COLORS[handle["color"]] if handle.get("color") in AXIS_HANDLE_COLORS else
+                      (1.0, 0.2, 0.2, 1.0) if handle.get("color") == "red" else
                       (0.25, 1.0, 0.35, 1.0) if handle.get("unit") == "°" else
-                      (1.0, 0.88 if self._dimension_hovered or self._dimension_drag else 0.65,
-                       0.15, 1.0))
+                      (1.0, 0.65, 0.15, 1.0))
+            if hot:      # the touched handle only: lighter and wider
+                accent = tuple(0.45 + 0.55 * c for c in accent[:3]) + (1.0,)
             glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_CURRENT_BIT)
             glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
             glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
             glOrtho(0, self.width(), self.height(), 0, -1, 1)
             glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
-            for width, color in ((8.0, (0.08, 0.09, 0.10, 0.9)),
-                                 (4.0, accent)):
+            for width, color in (((11.0 if hot else 8.0), (0.08, 0.09, 0.10, 0.9)),
+                                 ((6.0 if hot else 4.0), accent)):
                 glColor4f(*color); glLineWidth(width)
                 arc = handle.get("rotation_arc")
                 if arc is None:
@@ -7201,9 +7282,10 @@ class View3D(QGLWidget):
                     glEnd()
                 else:
                     middle = arc[len(arc) // 2]
-                    glBegin(GL_LINES)
-                    glVertex2f(*handle["rotation_center"]); glVertex2f(*middle)
-                    glEnd()
+                    if handle.get("rotation_center") is not None:
+                        glBegin(GL_LINES)
+                        glVertex2f(*handle["rotation_center"]); glVertex2f(*middle)
+                        glEnd()
                     glBegin(GL_LINE_STRIP)
                     for point in arc:
                         glVertex2f(*point)
@@ -7231,7 +7313,8 @@ class View3D(QGLWidget):
             glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
             glColor3f(0.05, 0.05, 0.05)
             self.renderText(int(label[0] + 1), int(label[1] + 1), value, font)
-            glColor3f(*( (1.0, 0.35, 0.35) if handle.get("color") == "red" else
+            glColor3f(*( AXIS_HANDLE_COLORS[handle["color"]][:3] if handle.get("color") in AXIS_HANDLE_COLORS else
+                         (1.0, 0.35, 0.35) if handle.get("color") == "red" else
                          (1.0, 0.92, 0.65) ))
             self.renderText(int(label[0]), int(label[1]), value, font)
             glPopAttrib()
@@ -7257,7 +7340,9 @@ class View3D(QGLWidget):
                                     last_position=QPointF(event.pos()),
                                     fine=bool(event.modifiers() & handle["fine_modifier"]))
         self._last_pos = self._press_pos = None
-        self.setCursor(QCursor(Qt.SizeAllCursor))
+        self._dimension_hover_key = handle["name"]
+        self.setCursor(self._default_cursor())
+        self.update()
         return True
 
     def _update_dimension_drag(self, event):
@@ -7377,6 +7462,83 @@ class View3D(QGLWidget):
         glDisable(GL_POLYGON_OFFSET_FILL)
         glDepthMask(GL_TRUE)
         glEnable(GL_LIGHTING)
+
+    def _draw_section_faces(self, entry, alpha):
+        """Faces a Cut Surface created: light grey with 45-degree hatching, as in technical drawings."""
+        sections = [(index, face) for index, face in enumerate(entry.get("faces", []))
+                    if face.get("section") is not None and face.get("tris")]
+        if not sections:
+            return
+        verts, tris = entry["solid"]
+        cache = entry.get("_hatch_cache")
+        if cache is None or cache[0] is not verts:
+            cache = (verts, {})
+            entry["_hatch_cache"] = cache
+        glDisable(GL_LIGHTING)
+        glEnable(GL_POLYGON_OFFSET_LINE)
+        glPolygonOffset(-1.0, -1.0)
+        glDepthFunc(GL_LEQUAL)          # same triangles as the body: equal depth passes
+        for index, face in sections:
+            glColor4f(0.80, 0.82, 0.86, alpha)
+            self._draw_face_triangles(entry, index)
+            lines = cache[1].get(index)
+            if lines is None:
+                lines = section_hatch_lines(verts, tris, face["tris"], face["section"])
+                cache[1][index] = lines
+            if len(lines):
+                glColor4f(0.10, 0.12, 0.16, min(1.0, alpha))
+                glLineWidth(1.0)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glEnableClientState(GL_VERTEX_ARRAY)
+                glVertexPointer(3, GL_FLOAT, 0, lines)
+                glDrawArrays(GL_LINES, 0, len(lines))
+                glDisableClientState(GL_VERTEX_ARRAY)
+        glDepthFunc(GL_LESS)
+        glDisable(GL_POLYGON_OFFSET_LINE)
+        glPolygonOffset(0.0, 0.0)
+        glEnable(GL_LIGHTING)
+
+    def _draw_cut_surface(self):
+        """The grey transparent Cut Surface; only shown while it is being placed or edited."""
+        mw = self._main_window
+        entry = getattr(mw, "_cut_edit", None) if mw is not None else None
+        if entry is None or not getattr(mw, "_cut_panel_active", False):
+            return
+        origin, u, v, normal = cut_surface_frame(entry["position"], entry["rotation"])
+        half = float(entry.get("size", 100.0)) / 2.0
+        points = [origin - half*u - half*v, origin + half*u - half*v,
+                  origin + half*u + half*v, origin - half*u + half*v]
+        hidden_side = -normal if entry.get("flip") else normal
+        glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_CURRENT_BIT |
+                     GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT)
+        glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)
+        glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(-2.0, -2.0)
+        glColor4f(0.62, 0.64, 0.68, 0.34)
+        glBegin(GL_QUADS)
+        for point in points: glVertex3f(*point)
+        glEnd()
+        glDisable(GL_POLYGON_OFFSET_FILL)
+        glColor4f(0.80, 0.82, 0.86, 0.95); glLineWidth(1.5)
+        glBegin(GL_LINE_LOOP)
+        for point in points: glVertex3f(*point)
+        glEnd()
+        # arrow towards the hidden side of the extrusion
+        glDisable(GL_DEPTH_TEST)
+        length = half * 0.4
+        tip = origin + hidden_side * length
+        side = u if abs(float(hidden_side @ u)) < 0.9 else v
+        side = side / max(float(np.linalg.norm(side)), 1e-12)
+        other = np.cross(hidden_side, side)
+        head = length * 0.2
+        glColor4f(1.0, 0.5, 0.2, 1.0); glLineWidth(2.5)
+        glBegin(GL_LINES)
+        glVertex3f(*origin); glVertex3f(*tip)
+        for direction in (side, -side, other, -other):
+            glVertex3f(*tip); glVertex3f(*(tip - hidden_side * head + direction * head * 0.5))
+        glEnd()
+        glPopAttrib()
 
     PLANE_QUADS = {"XY":[(0,0,0),(80,0,0),(80,80,0),(0,80,0)],
                    "XZ":[(0,0,0),(80,0,0),(80,0,80),(0,0,80)],
@@ -7752,6 +7914,8 @@ class View3D(QGLWidget):
                     glColor4f(0.25, 1.0, 0.4, 1.0); glLineWidth(3.0)
                     self._draw_face_outline(entry, selected_face)
                     glDepthFunc(GL_LESS)
+            if not cut and not _has_preview:
+                self._draw_section_faces(entry, alpha)
             glEnable(GL_LIGHTING)
             if cut: glDepthMask(GL_TRUE); glDisable(GL_POLYGON_OFFSET_FILL)
         glPopAttrib()
@@ -9236,10 +9400,12 @@ class View3D(QGLWidget):
         if self._mode != MODE_SKETCH and not e.buttons():
             handle = self._dimension_handle_at(e.pos())
             hovered = handle is not None
-            if hovered != self._dimension_hovered:
+            key = handle["name"] if hovered else None
+            if key != self._dimension_hover_key or hovered != self._dimension_hovered:
                 self._dimension_hovered = hovered
+                self._dimension_hover_key = key
                 self.setToolTip(handle["name"] if hovered else "")
-                self.setCursor(QCursor(Qt.SizeAllCursor) if hovered else self._default_cursor())
+                self.setCursor(self._default_cursor())
                 self.update()
             if hovered:
                 return
@@ -9292,8 +9458,10 @@ class View3D(QGLWidget):
         if e.button() == Qt.LeftButton and self._dimension_drag is not None:
             self._update_dimension_drag(e)
             self._dimension_drag = None
-            self._dimension_hovered = self._dimension_handle_at(e.pos()) is not None
-            self.setCursor(QCursor(Qt.SizeAllCursor) if self._dimension_hovered else self._default_cursor())
+            handle = self._dimension_handle_at(e.pos())
+            self._dimension_hovered = handle is not None
+            self._dimension_hover_key = handle["name"] if handle is not None else None
+            self.setCursor(self._default_cursor())
             self.update()
             return
         if e.button() == Qt.LeftButton and self._angle_mode:
@@ -14914,6 +15082,287 @@ def halfspace_box(P0, r, center, size):
     if mesh_volume(verts, tris) < 0: tris = [(a, c, b) for a, b, c in tris]
     return verts, tris, [{"kind": "end", "tris": list(range(len(tris))), "planar": False}]
 
+# ── Cut Surface: hides one side of an extrusion behind a movable plane ───────────
+SECTION_FACE_LABEL = "section "      # csg label: the face a cut surface creates is "section end"
+
+def cut_surface_frame(position, rotation):
+    """(origin, u, v, normal) of a Cut Surface: world XYZ position, rotation about X, then Y,
+    then Z in degrees (the same convention as imported models and the assembly)."""
+    matrix = _import_rotation_matrix(rotation)
+    return (np.asarray(position, float), matrix[:, 0], matrix[:, 1], matrix[:, 2])
+
+def cut_surface_signature(entry):
+    """Everything that influences the geometry a Cut Surface produces (cache key)."""
+    return json.dumps([[float(x) for x in entry.get("position", (0, 0, 0))],
+                       [float(x) for x in entry.get("rotation", (0, 0, 0))],
+                       bool(entry.get("flip"))])
+
+def _earcut_loops(outer, holes):
+    """Earcut of an outer 2-D polygon with holes (any orientation). Returns CCW index triples
+    into outer + holes (concatenated). Collinear points may be left out of the triangles."""
+    def area(poly):
+        return 0.5 * sum(a[0]*b[1] - b[0]*a[1] for a, b in zip(poly, poly[1:] + poly[:1]))
+    outer = list(outer) if area(list(outer)) > 0 else list(outer)[::-1]
+    holes = [list(h) if area(list(h)) < 0 else list(h)[::-1] for h in holes]
+    pts = list(outer); starts = []
+    for hole in holes:
+        starts.append(len(pts)); pts += hole
+    outer_node = _ec_ring(outer, 0)
+    queue = []
+    for start, hole in zip(starts, holes):
+        ring = _ec_ring(hole, start)
+        if ring is ring.next: ring.steiner = True
+        left = ring; p = ring.next
+        while p is not ring:
+            if p.x < left.x or (p.x == left.x and p.y < left.y): left = p
+            p = p.next
+        queue.append(left)
+    queue.sort(key=lambda n: n.x)
+    for hole in queue:
+        bridge = _ec_bridge(hole, outer_node)
+        if bridge is None: continue
+        rev = _ec_split(bridge, hole)
+        _ec_filter(rev, rev.next)
+        outer_node = _ec_filter(bridge, bridge.next)
+    out = []
+    _ec_linked(_ec_filter(outer_node), out, 0)
+    result = []
+    for a, b, c in out:
+        (ax, ay), (bx, by), (cx, cy) = pts[a], pts[b], pts[c]
+        cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        if abs(cross) < 1e-18: continue
+        result.append((a, b, c) if cross > 0 else (a, c, b))
+    return result, pts, outer, holes
+
+def clip_mesh_by_plane(mesh, origin, normal):
+    """Keep the part of a closed triangle mesh on the -normal side of the plane (origin, normal)
+    and close it with a planar cap face. A single linear pass instead of a general boolean.
+    Returns (verts, tris, faces, cap_face_index), or None when the cut outline does not form
+    closed loops (an open or non-manifold mesh): the caller then uses the general boolean."""
+    verts, tris, faces = mesh
+    V = np.asarray(verts, float).reshape(-1, 3)
+    T = np.asarray(tris, np.int64).reshape(-1, 3)
+    normal = _unit(normal)
+    span = float(np.ptp(V, axis=0).max()) if len(V) else 1.0
+    eps = 1e-9 + 1e-7 * span
+    d = V @ normal - float(np.asarray(origin, float) @ normal)
+    # no vertex may lie on the plane: shift the plane a hair (far below drawing precision)
+    for k in range(1, 60):
+        if not np.any(np.abs(d) < eps): break
+        d = d - eps * 2.5 * k * (1 if k % 2 else -1)
+    hidden = d > 0
+    count = hidden[T].sum(axis=1)
+    tri_face = np.full(len(T), -1, np.int64)
+    for fi, face in enumerate(faces):
+        if face.get("tris"):
+            tri_face[np.asarray(face["tris"], np.int64)] = fi
+    new_points = []; edge_point = {}
+    base = len(V)
+
+    def cut_point(a, b):
+        key = (a, b) if a < b else (b, a)
+        index = edge_point.get(key)
+        if index is None:
+            t = d[a] / (d[a] - d[b])
+            new_points.append(V[a] + (V[b] - V[a]) * t)
+            index = edge_point[key] = base + len(new_points) - 1
+        return index
+
+    out_tris = [tuple(t) for t in T[count == 0].tolist()]
+    out_face = tri_face[count == 0].tolist()
+    next_point = {}                          # directed cap outline: start -> end
+    for k in np.flatnonzero((count == 1) | (count == 2)).tolist():
+        tri = T[k].tolist(); h = [bool(hidden[i]) for i in tri]
+        odd = next(j for j in range(3) if h[j] != h[(j + 1) % 3] and h[j] != h[(j + 2) % 3])
+        a, b, c = tri[odd], tri[(odd + 1) % 3], tri[(odd + 2) % 3]
+        pab, pac = cut_point(a, b), cut_point(a, c)
+        face = int(tri_face[k])
+        if count[k] == 1:                    # a hidden: the kept part is a quad
+            out_tris += [(pab, b, c), (pab, c, pac)]; out_face += [face, face]
+            start, end = pab, pac
+        else:                                # a kept: the kept part is a triangle
+            out_tris.append((a, pab, pac)); out_face.append(face)
+            start, end = pac, pab
+        if start in next_point: return None
+        next_point[start] = end
+    if not next_point:
+        return None
+    # chain the outline into closed loops
+    loops, seen = [], set()
+    for first in next_point:
+        if first in seen: continue
+        loop, point = [], first
+        while point not in seen:
+            seen.add(point); loop.append(point)
+            point = next_point.get(point)
+            if point is None: return None
+        if point != first: return None
+        loops.append(loop)
+    all_points = np.vstack([V, np.asarray(new_points, float).reshape(-1, 3)])
+    helper = np.eye(3)[int(np.argmin(np.abs(normal)))]
+    u = _unit(np.cross(helper, normal)); v = np.cross(normal, u)       # u x v = normal
+    flat = [[(float(all_points[i] @ u), float(all_points[i] @ v)) for i in loop] for loop in loops]
+    areas = [abs(0.5 * sum(p[0]*q[1] - q[0]*p[1] for p, q in zip(f, f[1:] + f[:1]))) for f in flat]
+    depth = [sum(1 for j in range(len(loops)) if j != i and areas[j] > areas[i] and
+                 _pt_in_poly(flat[i][0], flat[j])) for i in range(len(loops))]
+    cap = []
+    for i in range(len(loops)):
+        if depth[i] % 2: continue
+        holes = [j for j in range(len(loops)) if depth[j] == depth[i] + 1 and
+                 areas[j] < areas[i] and _pt_in_poly(flat[j][0], flat[i])]
+        ids = [list(loops[i])] + [list(loops[j]) for j in holes]
+        triangles, _, outer2d, holes2d = _earcut_loops(flat[i], [flat[j] for j in holes])
+        # the vertex ids in the order earcut used them (each loop possibly reversed)
+        oriented = [ids[0] if outer2d == flat[i] else ids[0][::-1]]
+        for g, j in enumerate(holes):
+            oriented.append(ids[g + 1] if holes2d[g] == flat[j] else ids[g + 1][::-1])
+        lookup = [vid for loop in oriented for vid in loop]
+        tris_ids = [[lookup[a], lookup[b], lookup[c]] for a, b, c in triangles]
+        # earcut may skip collinear outline points: split the triangle on that edge so the
+        # cap shares every outline vertex with the side faces (the body stays watertight)
+        edge_tri = {}
+        for t_index, t in enumerate(tris_ids):
+            for e in range(3):
+                edge_tri[(t[e], t[(e + 1) % 3])] = t_index
+        used = {vid for t in tris_ids for vid in t}
+        for loop in oriented:
+            if all(vid in used for vid in loop): continue
+            n = len(loop)
+            first_used = next((p for p in range(n) if loop[p] in used), None)
+            if first_used is None: return None
+            p = first_used
+            for _ in range(n):
+                q = (p + 1) % n; skipped = []
+                while loop[q] not in used:
+                    skipped.append(loop[q]); q = (q + 1) % n
+                if skipped:
+                    a_id, b_id = loop[p], loop[q]
+                    chain = [a_id] + skipped + [b_id]
+                    t_index = edge_tri.get((a_id, b_id))
+                    if t_index is None:                 # the triangle runs the other way
+                        t_index = edge_tri.get((b_id, a_id))
+                        if t_index is None: return None
+                        a_id, b_id = b_id, a_id; chain = chain[::-1]
+                    t = tris_ids[t_index]; e = t.index(a_id); apex = t[(e + 2) % 3]
+                    fan = [[chain[m], chain[m + 1], apex] for m in range(len(chain) - 1)]
+                    tris_ids[t_index] = fan[0]
+                    for extra in fan[1:]:
+                        tris_ids.append(extra)
+                    for t_new_index in [t_index] + list(range(len(tris_ids) - len(fan) + 1,
+                                                              len(tris_ids))):
+                        t_new = tris_ids[t_new_index]
+                        for e2 in range(3):
+                            edge_tri[(t_new[e2], t_new[(e2 + 1) % 3])] = t_new_index
+                    used.update(skipped)
+                p = q
+                if p == first_used: break
+        cap += [tuple(t) for t in tris_ids]
+    if not cap:
+        return None
+    # orient the cap outward (+normal)
+    C = np.asarray(cap, np.int64).reshape(-1, 3)
+    P0, P1, P2 = all_points[C[:, 0]], all_points[C[:, 1]], all_points[C[:, 2]]
+    outward = np.cross(P1 - P0, P2 - P0) @ normal >= 0
+    C[~outward] = C[~outward][:, [0, 2, 1]]
+    oriented_cap = [tuple(t) for t in C.tolist()]
+    cap_index = len(faces)
+    all_tris = out_tris + oriented_cap
+    all_face = out_face + [cap_index] * len(oriented_cap)
+    # drop vertices that are no longer used and renumber
+    flat_ids = np.asarray(all_tris, np.int64).reshape(-1, 3)
+    used_ids, inverse = np.unique(flat_ids.ravel(), return_inverse=True)
+    new_tris = [tuple(t) for t in inverse.reshape(-1, 3).tolist()]
+    new_verts = [tuple(p) for p in all_points[used_ids].tolist()]
+    new_faces = [dict(face, tris=[]) for face in faces]
+    new_faces.append({"kind": SECTION_FACE_LABEL + "end", "planar": False, "tris": []})
+    for t_index, fi in enumerate(all_face):
+        if fi >= 0: new_faces[fi]["tris"].append(t_index)
+    return new_verts, new_tris, new_faces, cap_index
+
+def apply_cut_surface(mesh, entry):
+    """Hide the part of mesh = (verts, tris, faces) lying on the side the Cut Surface's normal
+    points to (the opposite side with `flip`). The remaining part is closed by a section face
+    (kind "section end", `section` = the plane frame) that is drawn shaded."""
+    verts, tris, faces = mesh
+    if not len(tris): return mesh
+    origin, u, v, normal = cut_surface_frame(entry.get("position", (0, 0, 0)),
+                                             entry.get("rotation", (0, 0, 0)))
+    if entry.get("flip"): normal = -normal
+    V = np.asarray(verts, float).reshape(-1, 3)
+    distance = (V - origin) @ normal
+    tolerance = 1e-6
+    if float(distance.max()) <= tolerance:        # the plane does not touch the body: unchanged
+        return mesh
+    if float(distance.min()) >= -tolerance:       # everything lies on the hidden side
+        return [], [], [dict(face, tris=[]) for face in faces]
+    frame = (origin, np.asarray(u, float), np.asarray(v, float), normal)
+    clipped = clip_mesh_by_plane(mesh, origin, normal)          # fast path (closed meshes)
+    if clipped is not None:
+        new_verts, new_tris, new_faces, cap = clipped
+        new_faces[cap]["section"] = frame
+        return new_verts, new_tris, new_faces
+    _dbg("cut surface: plane clip needs closed loops, using the general boolean")
+    low, high = V.min(0), V.max(0)
+    size = float(np.linalg.norm(high - low)) + float(np.linalg.norm(origin - (low + high) / 2.0)) + 10.0
+    tool = halfspace_box(origin, normal, (low + high) / 2.0, size)
+    result = csg_subtract(mesh, [tool], label=SECTION_FACE_LABEL)
+    if not result[1]:
+        return result
+    new_faces = []
+    for face in result[2]:
+        if str(face.get("kind", "")).startswith(SECTION_FACE_LABEL):
+            face = dict(face, section=frame)
+        new_faces.append(face)
+    return result[0], result[1], new_faces
+
+def _nice_spacing(value):
+    """Round a hatch spacing to 1 / 2 / 2.5 / 5 x 10^n so the hatching looks tidy."""
+    if value <= 0: return 1.0
+    exponent = math.floor(math.log10(value))
+    for step in (1.0, 2.0, 2.5, 5.0, 10.0):
+        if step * 10.0 ** exponent >= value * 0.999:
+            return step * 10.0 ** exponent
+    return 10.0 ** (exponent + 1)
+
+def section_hatch_lines(verts, tris, face_tris, frame, angle=45.0, lines_across=26):
+    """Hatching of a planar section face (parallel lines at 45 deg, as in technical drawings).
+    Returns a float32 array (2n, 3) of line-segment end points. The lines are anchored in world
+    space, so the pattern stays put while the plane is dragged within itself."""
+    face_tris = np.asarray(face_tris, dtype=int)
+    if not len(face_tris): return np.empty((0, 3), np.float32)
+    origin, u, v, normal = (np.asarray(a, float) for a in frame)
+    a = math.radians(angle)
+    along = math.cos(a) * u + math.sin(a) * v
+    across = -math.sin(a) * u + math.cos(a) * v
+    P = np.asarray(verts, float)[np.asarray(tris, int).reshape(-1, 3)[face_tris]]     # (m, 3, 3)
+    x, y = P @ along, P @ across
+    extent = max(float(np.ptp(P @ u)), float(np.ptp(P @ v)), 1e-6)
+    spacing = _nice_spacing(extent / lines_across)
+    y_low, y_high = y.min(axis=1), y.max(axis=1)
+    first = math.ceil(float(y_low.min()) / spacing)
+    last = math.floor(float(y_high.max()) / spacing)
+    # lifted a hair off the face (towards the viewer) so the lines never sink into the fill
+    plane_shift = normal * (float(origin @ normal) + 0.05 * spacing)
+    out = []
+    for k in range(first, last + 1):
+        c = (k + 0.0137) * spacing                  # nudged: never exactly through a vertex
+        hit = (y_low < c) & (y_high > c)
+        if not hit.any(): continue
+        xs, ys = x[hit], y[hit]
+        crossings = []
+        for i, j in ((0, 1), (1, 2), (2, 0)):
+            dy = ys[:, j] - ys[:, i]
+            valid = (ys[:, i] - c) * (ys[:, j] - c) < 0
+            t = np.where(valid, (c - ys[:, i]) / np.where(dy == 0, 1.0, dy), 0.0)
+            crossings.append(np.where(valid, xs[:, i] + t * (xs[:, j] - xs[:, i]), np.nan))
+        crossings = np.stack(crossings, axis=1)
+        low, high = np.nanmin(crossings, axis=1), np.nanmax(crossings, axis=1)
+        for x0, x1 in zip(low.tolist(), high.tolist()):
+            if x1 - x0 < 1e-9: continue          # sliver triangle: no visible segment
+            out.append(x0 * along + c * across + plane_shift)
+            out.append(x1 * along + c * across + plane_shift)
+    return np.asarray(out, np.float32).reshape(-1, 3)
+
 def profile_samples(loops, n_grid=9, max_edge_pts=96):
     """2-D sample points of an extrusion profile: its outline and a grid inside it."""
     pts = [p for loop in loops for e in loop for p in e["pts"]]
@@ -19383,6 +19832,10 @@ class MainWindow(QMainWindow):
         self.act_surface=QAction(QIcon(os.path.join(icon_dir, "surface.png")),
                                  "Surface", self, triggered=self._create_surface,
                                  toolTip="Surface - Create a positioned surface for sketches")
+        self.act_cut_surface=QAction(QIcon(os.path.join(icon_dir, "extrusion_cut.png")),
+                                     "Cut Surface", self, triggered=self._create_cut_surface,
+                                     toolTip="Cut Surface - Hide one side of the selected extrusion "
+                                             "behind a movable plane (shown with a shaded section)")
         self.act_gear=QAction(QIcon(os.path.join(icon_dir, "gear.png")),
                               "Gear", self, triggered=self._create_gear,
                               toolTip="Gear - Generate spur, ring, planetary, bevel, helical gears, or a rack")
@@ -19417,6 +19870,7 @@ class MainWindow(QMainWindow):
             triggered=self._open_assembly,
             toolTip="Assembly - Place parent objects and imported STEP / STL files together")
         tb2.addAction(self.act_new_sketch); tb2.addAction(self.act_surface)
+        tb2.addAction(self.act_cut_surface)
         tb2.addAction(self.act_extrude); tb2.addAction(self.act_ring)
         tb2.addAction(self.act_angle_draft); tb2.addAction(self.act_bridge)
         tb2.addAction(self.act_chamfer); tb2.addAction(self.act_fillet)
@@ -19779,6 +20233,59 @@ class MainWindow(QMainWindow):
         self._surface_reference_parent=None
         self._surface_reference_face=None
         self.view3d._surface_preview=None
+
+        # Cut Surface panel: position / rotation of the plane that hides one side of an extrusion.
+        self._dock_cut=QDockWidget("Cut Surface", self)
+        self._dock_cut.setObjectName("dock_cut_surface")
+        self._dock_cut.setFeatures(QDockWidget.DockWidgetMovable)
+        cut_w=QWidget(); cut_lay=QVBoxLayout(cut_w)
+        cut_lay.setContentsMargins(8,8,8,8); cut_lay.setSpacing(6)
+        self.lbl_cut_title=QLabel("<b>Cut Surface</b>")
+        self.lbl_cut_title.setWordWrap(True)
+        cut_lay.addWidget(self.lbl_cut_title)
+        cut_form=QFormLayout()
+        self.sp_cut_position=[]
+        for axis in "XYZ":
+            spin=QDoubleSpinBox(); spin.setRange(-1000000,1000000)
+            spin.setDecimals(3); spin.setSingleStep(1.0); spin.setSuffix(" mm")
+            spin.valueChanged.connect(self._cut_panel_changed)
+            self.sp_cut_position.append(spin)
+            cut_form.addRow(f"Move {axis}:", spin)
+        self.sp_cut_rotation=[]
+        for axis in "XYZ":
+            spin=QDoubleSpinBox(); spin.setRange(-360000,360000)
+            spin.setDecimals(3); spin.setSingleStep(5.0); spin.setSuffix("°")
+            spin.valueChanged.connect(self._cut_panel_changed)
+            self.sp_cut_rotation.append(spin)
+            cut_form.addRow(f"Rotate around {axis}:", spin)
+        cut_lay.addLayout(cut_form)
+        self.chk_cut_flip=QCheckBox("Keep the other side")
+        self.chk_cut_flip.setToolTip("Swap the visible and the hidden part of the extrusion")
+        self.chk_cut_flip.toggled.connect(self._cut_panel_changed)
+        cut_lay.addWidget(self.chk_cut_flip)
+        cut_note=QLabel("The extrusion is cut at the grey surface: the part on the side of the "
+                        "arrow is hidden, the rest is shown with a shaded section face. Drag the "
+                        "straight arrows (move) and arcs (rotate) in the 3-D view, coloured per "
+                        "axis, or use the fields. Rotations apply X, then Y, then Z. The extrusion and the "
+                        "extrusions built on it are cut. Untick the Cut Surface in the explorer to show the whole "
+                        "extrusion again.")
+        cut_note.setWordWrap(True); cut_lay.addWidget(cut_note)
+        cut_lay.addStretch()
+        cut_buttons=QHBoxLayout()
+        self.btn_cut_ok=QPushButton("✔ OK")
+        self.btn_cut_ok.clicked.connect(self._confirm_cut_surface)
+        self.btn_cut_cancel=QPushButton("✖ Cancel")
+        self.btn_cut_cancel.clicked.connect(self._cancel_cut_surface)
+        cut_buttons.addWidget(self.btn_cut_ok); cut_buttons.addWidget(self.btn_cut_cancel)
+        cut_lay.addLayout(cut_buttons)
+        self._dock_cut.setWidget(cut_w)
+        self.addDockWidget(Qt.RightDockWidgetArea,self._dock_cut)
+        self._dock_cut.hide()
+        self._cut_edit=None              # Cut Surface entry being placed / edited
+        self._cut_backup=None            # its saved values while editing (None = newly created)
+        self._cut_panel_active=False
+        self._cut_timer=QTimer(self); self._cut_timer.setSingleShot(True); self._cut_timer.setInterval(120)
+        self._cut_timer.timeout.connect(self._update_cut_preview)
 
         # feature (chamfer / fillet) panel
         self._dock_feat=QDockWidget("Chamfer / Fillet",self)
@@ -20237,7 +20744,7 @@ class MainWindow(QMainWindow):
         self._dock_collapse_buttons = {}
         self._dock_collapse_states = {}
         for dock in (self._dock_obj, self._dock_sketch_levels, self._dock_ext, self._dock_surface, self._dock_feat,
-                 self._dock_angle_draft,
+                 self._dock_angle_draft, self._dock_cut,
                      self._dock_gear, self._dock_thread):
             self._install_dock_collapse_button(dock)
 
@@ -20355,7 +20862,7 @@ class MainWindow(QMainWindow):
 
     def _align_editor_inputs(self):
         for dock in (self._dock_ext, self._dock_surface, self._dock_feat,
-                 self._dock_angle_draft, self._dock_gear, self._dock_thread):
+                 self._dock_angle_draft, self._dock_cut, self._dock_gear, self._dock_thread):
             for spin in dock.findChildren(QDoubleSpinBox) + dock.findChildren(QSpinBox):
                 spin.setFixedWidth(88)
                 layout = spin.parentWidget().layout()
@@ -20840,6 +21347,8 @@ class MainWindow(QMainWindow):
             self._st(f"{word}: finish or cancel the thread tool first"); return
         if self._gear_preview is not None:
             self._st(f"{word}: finish or cancel the gear generator first"); return
+        if getattr(self, "_cut_panel_active", False):
+            self._st(f"{word}: finish or cancel the Cut Surface first"); return
         if self.view3d._bridge_mode:
             self._st(f"{word}: finish or cancel the bridge first"); return
         mode = self.state["mode"]
@@ -20907,6 +21416,7 @@ class MainWindow(QMainWindow):
         # Modelling actions are hidden while sketching to make room for the sketch tools.
         self.act_new_sketch.setVisible(not in_sk); self.act_extrude.setVisible(not in_sk)
         self.act_surface.setVisible(not in_sk); self.act_gear.setVisible(not in_sk)
+        self.act_cut_surface.setVisible(not in_sk)
         self.act_thread.setVisible(not in_sk)
         self.act_ring.setVisible(not in_sk)
         self.act_bridge.setVisible(not in_sk)
@@ -20922,6 +21432,7 @@ class MainWindow(QMainWindow):
             self._cancel_angle_draft()
         self.act_new_sketch.setEnabled(mode==MODE_NORMAL)
         self.act_surface.setEnabled(mode==MODE_NORMAL); self.act_gear.setEnabled(mode==MODE_NORMAL)
+        self.act_cut_surface.setEnabled(mode==MODE_NORMAL)
         self.act_thread.setEnabled(mode==MODE_NORMAL)
         self.act_extrude.setEnabled(mode==MODE_NORMAL)
         self.act_ring.setEnabled(mode==MODE_NORMAL)
@@ -20937,6 +21448,8 @@ class MainWindow(QMainWindow):
             self._st("Finish or cancel the angle extrusion first"); return True
         if getattr(self, "_dock_thread", None) is not None and self._dock_thread.isVisible():
             self._st("Finish or cancel the thread tool first"); return True
+        if getattr(self, "_cut_panel_active", False):
+            self._st("Finish or cancel the Cut Surface first"); return True
         if self._gear_preview is not None:
             self._st("Finish or cancel the gear generator first"); return True
         if self.state["mode"] != MODE_NORMAL or self._ext_pending is not None or \
@@ -21218,6 +21731,128 @@ class MainWindow(QMainWindow):
 
     def _create_surface(self, _checked=False):
         self._configure_surface()
+
+    # ── Cut Surface ───────────────────────────────────────────────────────────
+    def _cut_target_extrusion(self):
+        """The extrusion a new Cut Surface applies to: the selected extrusion, or the extrusion
+        that owns the selected face / Cut Surface / feature."""
+        sel = self.state.get("selected")
+        if sel is None and self.state.get("sel_face"):
+            sel = self.state["sel_face"][0]
+        if sel is not None and sel.get("type") in ("cut_surface", "feature"):
+            sel = sel.get("parent")
+        if sel is not None and sel.get("type") == "extrusion" and not sel.get("cut") and \
+                not sel.get("preview") and any(o is sel for o in self.state["objects"]):
+            return sel
+        return None
+
+    def _create_cut_surface(self, _checked=False):
+        if self._busy(): return
+        self._set_measure_mode(False)
+        body = self._cut_target_extrusion()
+        if body is None:
+            self._st("Select an extrusion (explorer or a click on it) first, then click Cut Surface")
+            return
+        # the body and every extrusion built on it are cut: size the plane for all of them
+        family = [body] + [o for o in entry_descendants(body, self.state["objects"])
+                           if o.get("type") == "extrusion" and not o.get("cut")
+                           and not o.get("preview") and o.get("solid")]
+        meshes = [o.get("_pre_section") or (*o["solid"], o.get("faces", [])) for o in family]
+        meshes = [np.asarray(mesh[0], float).reshape(-1, 3) for mesh in meshes if len(mesh[1])]
+        if not meshes:
+            self._st("This extrusion has no solid to cut"); return
+        vertices = np.vstack(meshes)
+        low, high = vertices.min(0), vertices.max(0)
+        entry = {"type": "cut_surface", "name": self._unique_name("cut_surface"), "parent": body,
+                 "position": [float(x) for x in (low + high) / 2.0], "rotation": [0.0, 0.0, 0.0],
+                 "flip": False, "size": max(float(np.linalg.norm(high - low)) * 1.3, 10.0),
+                 "visible": True, "tree_item": None,
+                 "preview": True}          # not saved until confirmed
+        self.state["objects"].append(entry)
+        self._begin_cut_edit(entry, None)
+
+    def _edit_cut_surface(self, entry):
+        """Reopen the placement panel of an existing Cut Surface (Cancel restores its old values)."""
+        backup = {key: copy.deepcopy(entry.get(key)) for key in
+                  ("position", "rotation", "flip", "visible")}
+        entry["visible"] = True                  # editing shows the cut
+        self._begin_cut_edit(entry, backup)
+
+    def _begin_cut_edit(self, entry, backup):
+        self._cut_edit, self._cut_backup = entry, backup
+        self._cut_panel_active = True
+        for spin, value in zip(self.sp_cut_position, entry["position"]):
+            spin.blockSignals(True); spin.setValue(float(value)); spin.blockSignals(False)
+        for spin, value in zip(self.sp_cut_rotation, entry["rotation"]):
+            spin.blockSignals(True); spin.setValue(float(value)); spin.blockSignals(False)
+        self.chk_cut_flip.blockSignals(True)
+        self.chk_cut_flip.setChecked(bool(entry.get("flip")))
+        self.chk_cut_flip.blockSignals(False)
+        self.lbl_cut_title.setText(
+            f"<b>{'Edit ' if backup is not None else ''}{entry['name']}</b> — cuts {entry['parent']['name']}")
+        self._rebuild_tree()
+        self._select_entry(entry)
+        self._show_compact_dock(self._dock_cut)
+        self.view3d.setFocus(); self.view3d.update()
+        self._st(f"Place the Cut Surface: move / rotate it, then OK. The part on the arrow's side "
+                 f"of {entry['parent']['name']} is hidden")
+
+    def _cut_panel_changed(self, *_):
+        entry = self._cut_edit
+        if entry is None or not self._cut_panel_active:
+            return
+        entry["position"] = [spin.value() for spin in self.sp_cut_position]
+        entry["rotation"] = [spin.value() for spin in self.sp_cut_rotation]
+        entry["flip"] = self.chk_cut_flip.isChecked()
+        self._cut_timer.start()          # rebuild the clipped body once the values settle
+        self.view3d.update()
+
+    def _update_cut_preview(self):
+        if not self._cut_panel_active or self._cut_edit is None:
+            return
+        self._apply_cuts()
+        self.view3d.update()
+
+    def _finish_cut_panel(self):
+        self._cut_timer.stop()
+        self._cut_panel_active = False
+        self._cut_edit = None; self._cut_backup = None
+        self._dock_cut.hide()
+
+    def _confirm_cut_surface(self):
+        entry = self._cut_edit
+        if entry is None: return
+        self._cut_timer.stop()
+        entry["position"] = [spin.value() for spin in self.sp_cut_position]
+        entry["rotation"] = [spin.value() for spin in self.sp_cut_rotation]
+        entry["flip"] = self.chk_cut_flip.isChecked()
+        entry["visible"] = True
+        entry.pop("preview", None)
+        self._apply_cuts()
+        if entry.get("_error"):
+            if self._cut_backup is None: entry["preview"] = True
+            QMessageBox.warning(self, "Cut Surface unavailable",
+                                f"The Cut Surface cannot be applied: {entry['_error']}")
+            return
+        self._finish_cut_panel()
+        self.state["selected"] = entry
+        self._rebuild_tree(); self._mark_dirty(); self.view3d.update()
+        self._st(f"Applied {entry['name']} to {entry['parent']['name']} "
+                 "(tick / untick it in the explorer to show / hide the cut)")
+
+    def _cancel_cut_surface(self):
+        entry, backup = self._cut_edit, self._cut_backup
+        self._finish_cut_panel()
+        if entry is not None:
+            if backup is None:           # a new Cut Surface that was never confirmed
+                self.state["objects"][:] = [o for o in self.state["objects"] if o is not entry]
+                if self.state.get("selected") is entry:
+                    self.state["selected"] = None
+            else:
+                entry.update(backup)
+        self._rebuild_tree()
+        self.view3d.update()
+        self._st("Cut Surface cancelled")
 
     def _create_gear(self, _checked=False):
         if self._gear_preview is not None:
@@ -24079,6 +24714,7 @@ class MainWindow(QMainWindow):
                    "\U0001f4d0" if entry["type"] == "sketch" else \
                      "\U0001f4c4" if entry["type"] == "technical_drawing" else \
                    "\u2736" if entry["type"] == "feature" else \
+                   "\u2702" if entry["type"] == "cut_surface" else \
                    "\U0001f7e5" if entry.get("cut") else "\u2b1b"
             item = QTreeWidgetItem([f"{icon} {entry['name']}"])
             item.setData(0, Qt.UserRole, id(entry))
@@ -24090,9 +24726,12 @@ class MainWindow(QMainWindow):
             if parent_item is None: self.obj_tree.addTopLevelItem(item)
             else:                   parent_item.addChild(item)
             entry["tree_item"] = item
+            children = entry_children(entry, objects)
+            for child in children:                 # Cut Surfaces are the top children
+                if child["type"] == "cut_surface": add(child, item)
             self._add_draft_tree_item(entry, item)
-            for child in entry_children(entry, objects):
-                add(child, item)
+            for child in children:
+                if child["type"] != "cut_surface": add(child, item)
         self._add_scene_tree_roots(objects, add)
         self.obj_tree.expandAll()
         # restore visual selection
@@ -24114,6 +24753,7 @@ class MainWindow(QMainWindow):
                    "\U0001f4d0" if entry["type"] == "sketch" else \
                      "\U0001f4c4" if entry["type"] == "technical_drawing" else \
                    "\u2736" if entry["type"] == "feature" else \
+                   "\u2702" if entry["type"] == "cut_surface" else \
                    "\U0001f7e5" if entry.get("cut") else "\u2b1b"
             item = QTreeWidgetItem([f"{icon} {entry['name']}"])
             item.setData(0, Qt.UserRole, id(entry))
@@ -24125,9 +24765,12 @@ class MainWindow(QMainWindow):
             if parent_item is None: self.obj_tree.addTopLevelItem(item)
             else:                   parent_item.addChild(item)
             entry["tree_item"] = item
+            children = entry_children(entry, objects)
+            for child in children:                 # Cut Surfaces are the top children
+                if child["type"] == "cut_surface": add(child, item)
             self._add_draft_tree_item(entry, item)
-            for child in entry_children(entry, objects):
-                add(child, item)
+            for child in children:
+                if child["type"] != "cut_surface": add(child, item)
         self._add_scene_tree_roots(objects, add)
         self.obj_tree.expandAll()
         sel = self.state.get("selected")
@@ -24399,6 +25042,9 @@ class MainWindow(QMainWindow):
             return
         if entry["type"] == "extrusion" and entry.get("gear_parameters"):
             self._open_gear_editor(entry)
+            return
+        if entry["type"] == "cut_surface":
+            self._edit_cut_surface(entry)
             return
         # auto-make visible when editing
         if not entry.get("visible", True):
@@ -24834,6 +25480,16 @@ class MainWindow(QMainWindow):
             self.p_extra.setText(
                 f"Offset {offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f} mm · "
                 f"Rotation {rotation[0]:.3f}, {rotation[1]:.3f}, {rotation[2]:.3f}°")
+        elif sel["type"] == "cut_surface":
+            self.p_type.setText("Cut Surface")
+            self.p_parent.setText(par["name"] if par else "—")
+            position, rotation = sel.get("position", (0, 0, 0)), sel.get("rotation", (0, 0, 0))
+            self.lbl_prop_extra.setText("Position / rotation:")
+            self.p_extra.setText(
+                f"Position {position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f} mm · "
+                f"Rotation {rotation[0]:.3f}, {rotation[1]:.3f}, {rotation[2]:.3f}° · "
+                f"{'other side kept' if sel.get('flip') else 'normal side hidden'}"
+                f"{'' if sel.get('visible', True) else ' · cut inactive'}")
         elif sel["type"] == "feature":
             ft = sel["feat"]
             self.p_type.setText(ft["type"].capitalize())
@@ -25853,6 +26509,49 @@ class MainWindow(QMainWindow):
                 except RuntimeError: pass
         return mesh
 
+    def _section_entries(self, body):
+        """The active (ticked) Cut Surfaces that cut this extrusion, in creation order: its own
+        and those of the extrusions it is built on (a Cut Surface cuts all its descendant
+        extrusions too). Remove-material tool bodies are never cut."""
+        if body.get("cut"):
+            return []
+        ancestors, entry = set(), body
+        while entry is not None and id(entry) not in ancestors:
+            ancestors.add(id(entry))
+            entry = entry.get("parent")
+        return [o for o in self.state["objects"]
+                if o.get("type") == "cut_surface" and id(o.get("parent")) in ancestors
+                and o.get("visible", True)]
+
+    def _apply_sections(self, body, pre, sections, key):
+        """body["solid"] / ["faces"] = the finished mesh `pre` with every active Cut Surface applied.
+        A Cut Surface that cannot be applied is reported (status bar + tree tooltip) and skipped."""
+        mesh = pre
+        for section in sections:
+            own_body = section.get("parent") is body
+            try:
+                mesh = apply_cut_surface(mesh, section)
+                if own_body: section.pop("_error", None)
+                tip = ""
+            except Exception as ex:
+                section["_error"] = str(ex)
+                _dbg(f"cut surface '{section.get('name')}' not applied to {body.get('name')}: {ex}")
+                self._st(f"'{section.get('name')}' could not be applied to {body.get('name')}: {ex}")
+                tip = f"Not applied: {ex}"
+            item = section.get("tree_item")
+            if item is not None and (own_body or tip):
+                # a tooltip change emits itemChanged, whose handler would rebuild everything
+                # again: only touch it when it really changes, with the tree's signals blocked
+                try:
+                    if item.toolTip(0) != tip:
+                        blocked = self.obj_tree.blockSignals(True)
+                        try: item.setToolTip(0, tip)
+                        finally: self.obj_tree.blockSignals(blocked)
+                except RuntimeError:
+                    pass
+        body["solid"] = (mesh[0], mesh[1]); body["faces"] = mesh[2]
+        body["_cs_key"] = key
+
     def _apply_cuts(self, progress=None):
         """Rebuild extrusion cuts/features and chamfer/fillet features on merged Bridge bodies."""
         objs = self.state["objects"]
@@ -25874,8 +26573,16 @@ class MainWindow(QMainWindow):
             feat_key = key + tuple((id(fo), feature_signature(fo["feat"]))
                                    for fo in feats if fo.get("visible", True))
             old_fk = e.get("_feat_key")
+            sections = self._section_entries(e)
+            section_key = tuple((id(so), cut_surface_signature(so)) for so in sections)
             if e.get("_cut_key") == key and old_fk == feat_key and e.get("_feat_mesh") is not None:
-                continue
+                if e.get("_cs_key") == section_key:
+                    continue
+                if e.get("_pre_section") is not None:      # only a Cut Surface changed
+                    self._apply_sections(e, e["_pre_section"], sections, section_key)
+                    if not MainWindow._render_data_current(e):
+                        MainWindow._cache_normals(e)
+                    continue
             cut_changed = e.get("_cut_key") != key or e.get("_cut_mesh") is None
             if cut_changed:
                 v, t, f = csg_subtract(e["base"], [c["base"] for c in cutters]) if cutters else e["base"]
@@ -25907,6 +26614,9 @@ class MainWindow(QMainWindow):
                 if bm is not None and e.get("_blend_feat_key") == feat_key:
                     mesh = bm
                 e["solid"] = (mesh[0], mesh[1]); e["faces"] = mesh[2]
+            # Cut Surfaces hide one side of the finished body (cut + features)
+            e["_pre_section"] = (e["solid"][0], e["solid"][1], e["faces"])
+            self._apply_sections(e, e["_pre_section"], sections, section_key)
             if not MainWindow._render_data_current(e):
                 MainWindow._cache_normals(e)
         for i, e in enumerate(objs):
@@ -26991,8 +27701,10 @@ class MainWindow(QMainWindow):
         entry["_blend_mesh"] = result
         entry["_blend_feat_key"] = feat_key
         _dbg(f"_on_blend_done: entry={entry.get('name')} verts={len(result[0])}")
-        entry["solid"] = (result[0], result[1])
-        entry["faces"] = result[2]
+        entry["_pre_section"] = (result[0], result[1], result[2])
+        sections = self._section_entries(entry)
+        self._apply_sections(entry, entry["_pre_section"], sections,
+                             tuple((id(so), cut_surface_signature(so)) for so in sections))
         MainWindow._cache_normals(entry)
         self.view3d.update()
 
@@ -27060,6 +27772,7 @@ class MainWindow(QMainWindow):
         if timer is not None: timer.stop()
         if getattr(self, "_dock_thread", None) is not None and self._dock_thread.isVisible():
             self._cancel_thread()
+        if getattr(self, "_cut_panel_active", False): self._cancel_cut_surface()
         if self._gear_preview is not None: self._cancel_gear()
         if self.state["mode"] != MODE_NORMAL: self._cancel_sketch()
         if self._ext_pending is not None: self._cancel_extrude()
@@ -27387,6 +28100,18 @@ class MainWindow(QMainWindow):
                 e={"type":"feature","name":od["name"],"parent":par,
                    "feat":od["feat"],"visible":od.get("visible", True),"tree_item":None}
                 if par is not None: par.pop("_cut_key", None)
+            elif od["type"] == "cut_surface":
+                position = [float(value) for value in od.get("position", (0, 0, 0))]
+                rotation = [float(value) for value in od.get("rotation", (0, 0, 0))]
+                size = float(od.get("size", 100.0))
+                if par is None or par.get("type") != "extrusion" or \
+                        len(position) != 3 or not np.isfinite(position).all() or \
+                        len(rotation) != 3 or not np.isfinite(rotation).all() or \
+                        not math.isfinite(size) or size <= 0:
+                    raise ValueError(f"invalid placement or parent for Cut Surface {od['name']}")
+                e={"type":"cut_surface","name":od["name"],"parent":par,"position":position,
+                   "rotation":rotation,"flip":bool(od.get("flip", False)),"size":size,
+                   "visible":od.get("visible", True),"tree_item":None}
             else:
                 e={"type":"extrusion","name":od["name"],"parent":par,
                    "height":od["height"],"opacity":od.get("opacity", 1.0),
@@ -27464,6 +28189,11 @@ class MainWindow(QMainWindow):
                 d["width"]=o["width"]; d["height"]=o["height"]
             elif o["type"]=="feature":
                 d["feat"]=o["feat"]
+            elif o["type"]=="cut_surface":
+                d["position"]=[float(x) for x in o["position"]]
+                d["rotation"]=[float(x) for x in o["rotation"]]
+                d["flip"]=bool(o.get("flip", False))
+                d["size"]=float(o.get("size", 100.0))
             elif o["type"]=="technical_drawing":
                 d["options"] = self._drawing_options_for_storage(o.get("options", {}))
             elif o["type"]=="imported":

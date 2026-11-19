@@ -37,6 +37,9 @@ Workflow:
      While sketching on an attached Surface, its visible supporting solid is shown as a shaded
      silhouette and feature edges behind the sketch, including attached extrusions. The Surface
      rectangle does not limit this underlay. This visual underlay is not editable sketch geometry.
+     On a face sketch, faces of other visible solids that lie in the same plane (e.g. the end
+     of an extrusion that runs up to this face's plane) are shown grey with a dashed outline.
+     They are display only: no reference, snap or constraint target.
      Sketch Explorer shows parallel sketches grouped by signed distance along the active sketch's
      normal. Toggle each level's visibility; the current sketch cannot be hidden. Same-level
      sketches remain yellow and read-only. The nearest below level stays violet; deeper levels
@@ -73,8 +76,10 @@ Workflow:
      axis. Text cannot be mirrored. Endpoints on the axis remain separate, so they can move away.
      On a face, the face outline is shown as fixed (violet) reference geometry; it cannot
      be deleted, cut or trimmed. In Constrain mode it can serve as a fixed reference;
-     lines and coplanar circles from the extrusion's source sketch are also projected as fixed
-     references. Equal supports line length and circle diameter; Parallel and Symmetric use lines.
+     if the extrusion's source sketch is parallel to the face and below it, its geometry is
+     also projected as fixed references on its Sketch Explorer level (a perpendicular or
+     tilted source sketch is not projected).
+     Equal supports line length and circle diameter; Parallel and Symmetric use lines.
      overlapping drawn geometry takes priority when picking.
      New face sketches use a consistent surface-normal view: world +Z is up on side faces,
      world +Y on horizontal faces, independent of the 3-D camera. A bottom-left indicator
@@ -84,7 +89,10 @@ Workflow:
         measures between entities; Diameter / Radius sets a circle dimension. Angle is a separate
         two-line constraint. Tangential accepts a line and circle/arc,
       or two circles/arcs. Point→Point detects its target: point → coincident, line → point on
-     line, circle/arc → point on curve, origin → fixed at (0,0). They are
+     line, circle/arc → point on curve, sketch axis → point on that axis, origin → fixed at
+     (0,0). The sketch X and Y axes also act as fixed lines for Length / Distance,
+     Perpendicular, Parallel, Collinear, Angle, Tangential and as a Symmetric centre line:
+     click the axis where no sketch geometry lies on it. They are
      solved numerically: dimensions drive the geometry, dragging only moves geometry within
      its remaining freedom, and redundant / conflicting constraints are rejected.
     In support-geometry mode the Length and Angle tools only measure (information, in brackets).
@@ -95,7 +103,9 @@ Workflow:
      The constraint list shows every constraint (select = highlight, remove, edit value).
      In Select mode dimensions can be dragged to a better position (double-click = edit).
   4. Accept sketch → returns to 3-D view; sketch appears in Objects tree.
-     Esc with nothing pending cancels the sketch (asks if it has geometry). RMB never closes
+     Esc with nothing pending cancels the sketch (asks if it has geometry). Closing the
+     program while sketching first asks to cancel the sketch (No keeps it open), then the
+     usual unsaved-changes question follows. RMB never closes
      the sketch: it deselects or aborts the current drawing step / constraint pick / tool.
      Ctrl+Z / Ctrl+Y undo / redo every sketch step (drawing clicks, constraints, drags, …).
   5. Select sketch in tree → Extrude → direction (one direction / opposite / symmetric),
@@ -147,15 +157,19 @@ Workflow:
     A part whose source changed is marked (outdated); Update Selected / Update All re-read the
     sources and keep the placement. Save / Open handle .asby files and Export writes the complete
     assembly as STEP or STL. The assembly is also saved in the project file (key "assembly"),
-    outside the undo history.
+    outside the undo history. The menu bar (File / Edit / View / Tools) holds the toolbar
+    actions (Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+Z / Ctrl+Y / Ctrl+W). Closing the window
+    with unsaved changes asks Save / Discard (back to the last saved state) / Cancel; when the
+    program is closed this comes after the sketch question and before the project question.
   7. Explorer context menu / Edit menu: Edit (sketch → drawing mode, extrusion → extrude
      sidebar; dependent objects are rebuilt), Rename (F2), Delete (Del, asks Yes/No and also
      removes dependent objects).
   8. Undo / redo (Edit menu, toolbar, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z): inside a sketch every
      sketch step; in the 3-D view every project change (sketch accepted, extrusion, delete,
      rename, visibility, colour, edits). Snapshot based (JSON of the sketch / project).
-    9. Errors: uncaught exceptions are written to simplecad_error.txt (next to the script, or
-     the temp folder) instead of ending the program. Edit → Settings → Debug switches the
+    9. Errors: uncaught exceptions, native crash tracebacks and Qt critical / fatal messages
+     are written to simplecad_error.txt (next to the script, or the temp folder); it holds
+     errors only (no start-up or debug output). Uncaught exceptions do not end the program. Edit → Settings → Debug switches the
      simplecad_debug.txt output on / off.
 
 Key implementation notes:
@@ -197,6 +211,7 @@ import sys, os, json, copy, math, struct, datetime, traceback, tempfile, collect
 import html
 import re
 import faulthandler
+import atexit
 import xml.etree.ElementTree as ET
 from functools import lru_cache
 import platform as sys_platform     # (OpenGL.GL's star import also exports a "platform")
@@ -211,7 +226,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QByteArray, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
-                          QLocale, QEventLoop, QEvent)
+                          QLocale, QEventLoop, QEvent, QtCriticalMsg, QtFatalMsg)
 from PyQt5.QtGui import (QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath,
                          QTransform, QCursor, QPolygonF, QKeySequence, QPixmap, QIcon,
                          QPalette, QPdfWriter, QImage, QFontInfo, QPicture)
@@ -428,8 +443,7 @@ def _set_dark_title_bar(window):
 DEBUG_ENABLED = True
 _LOG_DIR = os.path.dirname(os.path.abspath(__file__))
 _DBG_LOG = os.path.join(_LOG_DIR, "simplecad_debug.txt")
-_ERROR_LOG = os.path.join(_LOG_DIR, "simplecad_error.txt")
-_CRASH_LOG = os.path.join(_LOG_DIR, "simplecad_crash.txt")
+_ERROR_LOG = os.path.join(_LOG_DIR, "simplecad_error.txt")   # errors and native crashes only
 
 def _trace(msg):
     with open(_ERROR_LOG, "a", encoding="utf-8") as f:
@@ -927,7 +941,10 @@ def constraint_refs(c):
 def describe_constraint(sk, c):
     """Human-readable one-liner for the constraint list."""
     def P(v): return f"P{sk.vertices.index(v)}" if v in sk.vertices else "P?"
-    def L(s): return f"L{sk.segments.index(s)}" if s in sk.segments else "L?"
+    def L(s):
+        axis = getattr(s, "sketch_axis", None)
+        if axis is not None: return f"{axis.upper()} axis"
+        return f"L{sk.segments.index(s)}" if s in sk.segments else "L?"
     if isinstance(c, CFixed):
         at = " at origin" if (c.x0, c.y0) == (0.0, 0.0) else ""
         return f"📌 Fixed  {P(c.vertex)}{at}"
@@ -2026,10 +2043,30 @@ class Sketch:
         for group in self.text_groups: used |= group.vertices()
         return used
 
+    def axis_segment(self, key):
+        """The sketch's X ("x", y = 0) or Y ("y", x = 0) axis as a fixed line constraints can
+        refer to. It is not part of the sketch geometry lists (never drawn, picked, snapped,
+        trimmed or extruded; the view draws the axes itself). Its vertices are locked, so the
+        solver treats them as constants."""
+        axes = self.__dict__.setdefault("_axes", {})
+        if key not in axes:
+            if key not in ("x", "y"):
+                raise ValueError(f"unknown sketch axis {key!r}")
+            end = (1.0, 0.0) if key == "x" else (0.0, 1.0)
+            segment = Segment(Vertex(0.0, 0.0, locked=True), Vertex(*end, locked=True),
+                              construction=True)
+            segment.sketch_axis = key
+            axes[key] = segment
+        return axes[key]
+
+    def axis_segments(self):
+        """The axis lines created so far (see axis_segment)."""
+        return set(self.__dict__.get("_axes", {}).values())
+
     def _known_geometry(self):
         """Every geometry object a constraint may legally refer to."""
         return (set(self.vertices) | self.used_vertices() | set(self.segments) |
-                set(self.circles) | set(self.arcs) | set(self.ellipses))
+                set(self.circles) | set(self.arcs) | set(self.ellipses) | self.axis_segments())
 
     def missing_refs(self, c, known=None):
         """Geometry referenced by constraint c that is no longer part of this sketch."""
@@ -2160,6 +2197,26 @@ class Sketch:
         self.vertices = [v for v in self.vertices if v not in orphans]
         gone = segs | circles | arcs | ellipses | orphans
         self.constraints = [c for c in self.constraints if not (constraint_refs(c) & gone)]
+
+    def remove_unused_references(self, elements):
+        """Remove the given reference segments / circles / arcs unless a constraint uses them
+        or one of their vertices; vertices left without geometry go too. Returns the count."""
+        used = set()
+        for constraint in self.constraints:
+            used |= constraint_refs(constraint)
+        def removable(element):
+            ends = {getattr(element, name, None)
+                    for name in ("v0", "v1", "center", "v_start", "v_end")} - {None}
+            return element.reference and element not in used and not (ends & used)
+        gone = {element for element in elements if removable(element)}
+        if not gone: return 0
+        before = self.used_vertices()
+        self.segments = [s for s in self.segments if s not in gone]
+        self.circles  = [c for c in self.circles if c not in gone]
+        self.arcs     = [a for a in self.arcs if a not in gone]
+        orphans = before - self.used_vertices() - set(self.points_free)
+        self.vertices = [v for v in self.vertices if v not in orphans]
+        return len(gone)
 
     # ── scissor (trim) ───────────────────────────────────────────────────────
     def _trim_cuts(self, target):
@@ -4227,27 +4284,60 @@ def helical_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
     return vertices, triangles, faces
 
 # ── ring extrusion: profile swept around an axis in the sketch plane (donut, ring, …) ──
-RING_AXES = ("u", "v", "-u", "-v")
+# world axes through the global origin; usable when they lie in the sketch plane
+RING_WORLD_AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
+RING_AXES = ("u", "v", "-u", "-v") + tuple(RING_WORLD_AXES)
 RING_REFS = ("center", "outer", "inner")
 
-def ring_profile_extent(loops, axis="u"):
+def _ring_world_axis_2d(frame, key):
+    """In-plane perpendicular (unit, sketch coordinates) of a world axis and the axis
+    position along it. Raises ValueError if the axis does not lie in the sketch plane."""
+    O, u, v, w = (np.asarray(a, float) for a in frame)
+    e = np.asarray(RING_WORLD_AXES[key], float)
+    name = f"World {key.upper()}"
+    if abs(float(e @ _unit(w))) > 1e-6:
+        raise ValueError(f"the {name} axis is not parallel to the sketch plane — choose an "
+                         f"axis that lies in the plane")
+    if abs(float(-O @ _unit(w))) > 1e-6:
+        raise ValueError(f"the {name} axis does not lie in the sketch plane (the plane does "
+                         f"not pass through the origin) — use a sketch axis instead")
+    d = np.array([e @ u, e @ v], float); d /= np.linalg.norm(d)
+    perp = np.array([-d[1], d[0]])
+    origin_2d = np.array([-O @ u, -O @ v], float)       # world origin in sketch coordinates
+    return perp, float(origin_2d @ perp)
+
+def ring_profile_extent(loops, axis="u", frame=None):
     """(centre, half width) of the profile perpendicular to a ring axis parallel to the
-    sketch's X ("u") or Y ("v") axis."""
+    sketch's X ("u") or Y ("v") axis, or to a world axis ("x" / "y" / "z", needs frame)."""
     pts = np.array([p for lp in loops for e in lp for p in e["pts"]], float)
-    c = pts[:, 0] if axis in ("v", "-v") else pts[:, 1]
+    if axis in RING_WORLD_AXES and frame is not None:
+        c = pts[:, :2] @ _ring_world_axis_2d(frame, axis)[0]
+    else:
+        c = pts[:, 0] if axis in ("v", "-v") else pts[:, 1]
     return float(c.min() + c.max())/2, float(c.max() - c.min())/2
 
 def ring_axis(loops, frame, axis="u", radius=10.0, ref="center"):
-    """Axis of a ring extrusion: parallel to the sketch's own X ("u") or Y ("v") axis. The
+    """Axis of a ring extrusion: parallel to the sketch's own X ("u") or Y ("v") axis, or a
+    world axis (see below). The
     radius is measured from the axis to the centre of the profile ("center"), to its farthest
     edge ("outer") or to its nearest edge ("inner"). A positive radius puts the axis on the
     positive side of the profile (+Y of the sketch for the X axis, +X for the Y axis), a
     negative one on the other side. The selected axis key determines the axis direction, and
     positive angles follow the right-hand rule. Returns (point on the axis, axis direction,
     distance of the axis from the profile centre, axis key).
+    A world axis ("x" / "y" / "z") runs through the global origin and must lie in the sketch
+    plane; radius and ref are then ignored (the geometry fixes the distance).
     Raises ValueError if the profile touches or crosses the axis."""
     O, u, v, w = (np.asarray(a, float) for a in frame)
     key = axis if axis in RING_AXES else "u"
+    if key in RING_WORLD_AXES:
+        perp, offset = _ring_world_axis_2d(frame, key)
+        mid, half = ring_profile_extent(loops, key, frame)
+        rc = abs(mid - offset)
+        if rc - half < 1e-4:
+            raise ValueError(f"the profile touches or crosses the World {key.upper()} axis — "
+                             f"move the profile off the axis")
+        return np.zeros(3), np.asarray(RING_WORLD_AXES[key], float), rc, key
     horizontal = key in ("u", "-u")
     e, side = (u, v) if horizontal else (v, u)           # axis direction, in-plane perpendicular
     if key.startswith("-"):
@@ -4300,6 +4390,7 @@ def revolve_profile(loops, frame, C, axis, a0, a1, height=0.0):
     if any(float((C - P2(p)) @ toward_axis) < 1e-4 for _, pts in loop_pts for p in pts):
         raise ValueError("the profile touches or crosses the ring axis — use a larger radius")
     verts, tris, faces = [], [], []
+    flat_sides = []      # (face index, 3-D end points) of lines perpendicular to the axis
 
     def add(tl):
         ids = []
@@ -4333,6 +4424,12 @@ def revolve_profile(loops, frame, C, axis, a0, a1, height=0.0):
                     side.setdefault(owner[i], []).extend(add([(a_, b_, c_), (a_, c_, d_)]))
             for ei in range(len(loop)):
                 faces.append({"kind": "side", "tris": side.get(ei, []), "planar": False})
+                edge = loop[ei]
+                if edge["kind"] == "line" and abs(height) < 1e-9:
+                    a3, b3 = P2(edge["pts"][0]), P2(edge["pts"][-1])
+                    d = b3 - a3; ln = float(np.linalg.norm(d))
+                    if ln > 1e-9 and abs(float(d @ axis))/ln < 1e-6:   # sweeps a flat ring
+                        flat_sides.append((len(faces) - 1, a3, b3))
         if full: continue
 
         # end caps: the profile at the first and at the last ring
@@ -4369,6 +4466,29 @@ def revolve_profile(loops, frame, C, axis, a0, a1, height=0.0):
         faces.append(cap_face("top", top, angs[-1], 1.0))
     if mesh_volume(verts, tris) < 0.0:
         tris = [(a, c, b) for a, b, c in tris]
+    # A profile line perpendicular to the axis sweeps a flat annulus (or annular sector):
+    # mark it planar with a frame and an exact boundary so sketches can be placed on it.
+    if flat_sides:
+        V = np.asarray(verts, float); T = np.asarray(tris, int).reshape(-1, 3)
+        for fi, a3, b3 in flat_sides:
+            ids = faces[fi]["tris"]
+            if not ids: continue
+            F = T[np.asarray(ids, int)]
+            nsum = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]).sum(axis=0)
+            nrm = axis if float(nsum @ axis) >= 0 else -axis
+            Cp = C + axis*float((a3 - C) @ axis)            # centre of the face on the axis
+            ra, rb = float(np.linalg.norm(a3 - Cp)), float(np.linalg.norm(b3 - Cp))
+            if min(ra, rb) < 1e-6: continue
+            outer = a3 if ra >= rb else b3
+            uu = _unit(at(outer, angs[0]) - Cp)
+            if full:
+                boundary = [("circle", Cp, ra), ("circle", Cp, rb)]
+            else:
+                pa0, pa1, pb0, pb1 = at(a3, a0), at(a3, a1), at(b3, a0), at(b3, a1)
+                boundary = [("line", pa0, pb0), ("arc", Cp, pb0, pb1, axis),
+                            ("line", pb1, pa1), ("arc", Cp, pa0, pa1, axis)]
+            faces[fi].update(planar=True, frame=(Cp, uu, np.cross(nrm, uu), nrm),
+                             boundary=boundary)
     return verts, tris, faces
 
 # ── CSG: BSP-tree boolean subtraction ("remove material" extrusions) ──────────
@@ -6928,11 +7048,13 @@ class View3D(QGLWidget):
                 middle_angle = (start_angle + end_angle) / 2.0
                 radius_anchor = _rotate_about([profile_center], axis_origin, axis,
                                               middle_angle)[0]
-                side = vertical if key in ("u", "-u") else horizontal
-                radius_vector = side - _rotate_about([side], np.zeros(3), axis,
-                                                      middle_angle)[0]
-                handle_specs = [(radius_anchor, radius_vector, mw.sp_ring_r,
-                                 "Ring radius", " mm", 1.0)]
+                handle_specs = []
+                if key not in RING_WORLD_AXES:      # a world axis fixes the radius
+                    side = vertical if key in ("u", "-u") else horizontal
+                    radius_vector = side - _rotate_about([side], np.zeros(3), axis,
+                                                          middle_angle)[0]
+                    handle_specs.append((radius_anchor, radius_vector, mw.sp_ring_r,
+                                         "Ring radius", " mm", 1.0))
                 if helical:
                     height_anchor = _rotate_about([profile_center], axis_origin, axis,
                                                   middle_angle)[0]
@@ -7949,6 +8071,7 @@ class View3D(QGLWidget):
             sk = self.state.get("active_sketch")
             if sk:
                 self._paint_solid_underlay(p)
+                self._paint_coplanar_underlay(p)
                 self._paint_sketch_underlays(p)
                 self._paint_sketch(p, sk)
                 self._paint_paste_preview(p, sk, self.state.get("sketch_view_state", {}))
@@ -7983,6 +8106,24 @@ class View3D(QGLWidget):
         painter.drawPath(transform.map(underlay["outline"]))
         painter.setBrush(Qt.NoBrush)
         painter.setPen(QPen(QColor(150, 185, 215, 190), 1.0))
+        painter.drawPath(transform.map(underlay["edges"]))
+        painter.restore()
+
+    def _paint_coplanar_underlay(self, painter):
+        """Grey, dashed-outlined faces of other solids lying in the face sketch's plane
+        (display only, see MainWindow._collect_coplanar_underlay)."""
+        underlay = self.state.get("sketch_view_state", {}).get("coplanar_underlay")
+        if underlay is None:
+            return
+        transform = QTransform(self.scale, 0.0, 0.0, -self.scale,
+                               self.width()/2 + self.offset.x(),
+                               self.height()/2 + self.offset.y())
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(150, 150, 150, 70))
+        painter.drawPath(transform.map(underlay["fill"]))
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(175, 175, 175, 210), 1.2, Qt.DashLine))
         painter.drawPath(transform.map(underlay["edges"]))
         painter.restore()
 
@@ -8073,8 +8214,15 @@ class View3D(QGLWidget):
         w, h = self.width(), self.height()
         hv = self._hover2d
         o_hot = hv is not None and hv[0] == "origin"
-        x_hot = o_hot or (hv is not None and hv[0] == "axis" and hv[1] == "x")
-        y_hot = o_hot or (hv is not None and hv[0] == "axis" and hv[1] == "y")
+        # an axis picked as the first element (or Symmetric centre) of a constraint tool
+        sv_axes = self.state.get("sketch_view_state", {})
+        picked = {(sv_axes.get("axis_first") or (None, None))[1]}
+        sym = sv_axes.get("_sym_center")
+        if sym is not None and sym[0] == "axis": picked.add(sym[1])
+        for key in ("dist_first", "tangent_first"):
+            picked.add(getattr(sv_axes.get(key), "sketch_axis", None))
+        x_hot = o_hot or "x" in picked or (hv is not None and hv[0] == "axis" and hv[1] == "x")
+        y_hot = o_hot or "y" in picked or (hv is not None and hv[0] == "axis" and hv[1] == "y")
         # X axis
         p.setPen(QPen(QColor(130, 130, 255, 255) if x_hot else QColor(80, 80, 200, 120),
                       3 if x_hot else 1))
@@ -8563,7 +8711,12 @@ class View3D(QGLWidget):
                     for item in self.state.get("sketch_view_state", {}).get("underlays", [])):
                 continue
             p.setPen(glow)
-            if isinstance(g, Segment):
+            axis = getattr(g, "sketch_axis", None)
+            if axis is not None:                       # a sketch axis: glow along the whole view
+                origin = self.to_px((0, 0))
+                if axis == "x": p.drawLine(QPointF(0, origin.y()), QPointF(self.width(), origin.y()))
+                else:           p.drawLine(QPointF(origin.x(), 0), QPointF(origin.x(), self.height()))
+            elif isinstance(g, Segment):
                 p.drawLine(self.to_px(g.v0.xy()), self.to_px(g.v1.xy()))
             elif isinstance(g, Circle):
                 p.drawEllipse(self.to_px(g.center.xy()), g.radius*self.scale, g.radius*self.scale)
@@ -9405,9 +9558,9 @@ class View3D(QGLWidget):
             if vi is not None:
                 hv = ("vtx", vi)
             else:
-                si = self._near_seg(sk, px, thr=8.0)
-                ci = self._near_circle(sk, px, thr=8.0)
-                ai = self._near_arc(sk, px, thr=8.0)
+                si, ci, ai = self._rank_line_curve(
+                    sk, self._near_seg(sk, px, thr=8.0), self._near_circle(sk, px, thr=8.0),
+                    self._near_arc(sk, px, thr=8.0))
                 if si is not None:   hv = ("seg", si)
                 elif ci is not None: hv = ("circle", ci)
                 elif ai is not None: hv = ("arc", ai)
@@ -9551,6 +9704,7 @@ class View3D(QGLWidget):
             sv["sel_seg"]=None; sv["sel_vtx1"]=None; sv["sel_vtx2"]=None
             sv["ctool"]=CTOOL_NONE; sv["_sel_segs"]=[]; sv["sel_curve"]=None; sv["_sel_extra"]=[]
             sv["dist_first"]=None; sv["equal_first"]=None; sv.pop("_sym_center",None)
+            sv.pop("axis_first",None)
             self._drag_seg=None; self._drag_vtx=None; self._drag_last=None
             self._drag_curve=None; self._arc_last_ang=None; self._drag_dim=None
             self._drag_text=None; self._text_resize=None; self._drag_origin=None
@@ -9600,7 +9754,8 @@ class View3D(QGLWidget):
             busy = self._drawing_step_pending(sv) or (mode == "constrain" and (
                        sv.get("sel_seg") is not None or sv.get("sel_vtx1") is not None
                        or sv.get("dist_first") is not None
-                       or sv.get("equal_first") is not None))
+                       or sv.get("equal_first") is not None
+                       or sv.get("axis_first") is not None))
             ent = None if busy else self._entity_at(sk, px)
             if ent is not None:
                 self._sketch_context_menu(sv, sk, ent, px, e.globalPos())
@@ -9615,6 +9770,9 @@ class View3D(QGLWidget):
             sv["_sel_extra"] = []
             sv["sel_curve"] = None; sv["dist_first"] = None
             sv["equal_first"] = None
+            if sv.pop("axis_first", None) is not None or sv.get("tangent_first") is not None:
+                had_sel = True
+            sv["tangent_first"] = None
             if had_sel:
                 self.sigSelInfo.emit("Selection cleared")
             elif self._abort_drawing_step(sv, sk):
@@ -9662,9 +9820,9 @@ class View3D(QGLWidget):
     def _toggle_selection(self, sv, sk, px):
         """Ctrl+click: add the element under the cursor to the selection or remove it."""
         vi = self._near_vtx(sk, px, thr=6.0)
-        si = self._near_seg(sk, px, thr=12.0)
-        ci = self._near_circle(sk, px, thr=10.0)
-        ai = self._near_arc(sk, px, thr=10.0)
+        si, ci, ai = self._rank_line_curve(
+            sk, self._near_seg(sk, px, thr=12.0), self._near_circle(sk, px, thr=10.0),
+            self._near_arc(sk, px, thr=10.0))
         ei = self._near_ellipse(sk, px, thr=10.0)
         hit = ("vtx", vi) if vi is not None else ("seg", si) if si is not None else \
               ("circle", ci) if ci is not None else ("arc", ai) if ai is not None else \
@@ -9726,9 +9884,9 @@ class View3D(QGLWidget):
             self.sigSelInfo.emit(self._sel_info); self.update(); return
         # single-item selection
         vi = self._near_vtx(sk, px, thr=6.0)
-        si = self._near_seg(sk, px, thr=12.0)
-        ci = self._near_circle(sk, px, thr=10.0)
-        ai = self._near_arc(sk, px, thr=10.0)
+        si, ci, ai = self._rank_line_curve(
+            sk, self._near_seg(sk, px, thr=12.0), self._near_circle(sk, px, thr=10.0),
+            self._near_arc(sk, px, thr=10.0))
         ei = self._near_ellipse(sk, px, thr=10.0)
         element = sk.vertices[vi] if vi is not None else sk.segments[si] if si is not None else None
         group = sk.text_group_for(element) if element is not None else None
@@ -10159,11 +10317,11 @@ class View3D(QGLWidget):
         return ("vtx", vi) if vi is not None else None
 
     def _curve_entity_at(self, sk, px, thr=10.0):
-        si = self._near_seg(sk, px, thr=thr)
+        si, ci, ai = self._rank_line_curve(sk, self._near_seg(sk, px, thr=thr),
+                                           self._near_circle(sk, px, thr=thr),
+                                           self._near_arc(sk, px, thr=thr))
         if si is not None: return ("seg", si)
-        ci = self._near_circle(sk, px, thr=thr)
         if ci is not None: return ("circle", ci)
-        ai = self._near_arc(sk, px, thr=thr)
         return ("arc", ai) if ai is not None else None
 
     def _select_entity(self, sv, ent):
@@ -10734,9 +10892,12 @@ class View3D(QGLWidget):
 
         if ctool==CTOOL_TANGENT:
             entity=self._near_tangent_entity(sk,px)
-            if entity is None: return
+            if entity is None:
+                axis=self._near_axis(px)
+                if axis is None: return
+                entity=sk.axis_segment(axis)
             first=sv.get("tangent_first")
-            valid=sk.segments+sk.circles+sk.arcs
+            valid=sk.segments+sk.circles+sk.arcs+list(sk.axis_segments())
             if first not in valid:
                 sv["tangent_first"]=entity
                 self.sigSelInfo.emit("First entity picked — click a line and circle/arc, or two curves")
@@ -10755,16 +10916,23 @@ class View3D(QGLWidget):
 
         if ctool==CTOOL_ANGLE:
             si=self._near_seg(sk,px)
-            if si is None: return
-            first=sv.get("angle_first")
-            if first is None or first >= len(sk.segments):
-                sv["angle_first"]=si
+            axis=self._near_axis(px) if si is None else None
+            if si is None and axis is None: return
+            first=sv.get("angle_first"); first_axis=self._axis_first(sv, ctool)
+            if first is not None and first >= len(sk.segments): first=None
+            if first is None and first_axis is None:
+                if si is not None:
+                    sv["angle_first"]=si; name=f"L{si}"
+                else:
+                    sv["axis_first"]=(ctool, axis); name=f"{axis.upper()} axis"
                 sv["angle_first_pos"]=tuple(mm) if mm is not None else None
-                self.sigSelInfo.emit(f"L{si} picked — click the second line to set the angle")
+                self.sigSelInfo.emit(f"{name} picked — click the second line to set the angle")
                 self.update(); return
-            if si==first: return
-            sa,sb=sk.segments[first],sk.segments[si]
-            sv["angle_first"]=None
+            if (si is not None and si==first) or (axis is not None and first_axis is not None):
+                return
+            sa=sk.segments[first] if first is not None else sk.axis_segment(first_axis)
+            sb=sk.segments[si] if si is not None else sk.axis_segment(axis)
+            sv["angle_first"]=None; sv.pop("axis_first",None)
             first_pos=sv.pop("angle_first_pos",None)
             angle_sides=_angle_ray_sides(sa,sb,first_pos,mm) \
                 if first_pos is not None and mm is not None else None
@@ -10789,14 +10957,22 @@ class View3D(QGLWidget):
             si=None if ci is not None or vi is not None else self._near_seg(sk,px)
             ent=sk.circles[ci] if ci is not None else \
                 sk.vertices[vi] if vi is not None else sk.segments[si] if si is not None else None
+            if ent is None:
+                axis=self._near_axis(px)
+                ent=sk.axis_segment(axis) if axis is not None else None
             if ent is None: return
+            axes=sk.axis_segments()
             first=sv.get("dist_first")
             if first is None or (first not in sk.vertices and first not in sk.segments
-                                 and first not in sk.circles):
+                                 and first not in sk.circles and first not in axes):
                 sv["dist_first"]=ent
-                self.sigSelInfo.emit("First element picked — click a second point, line or circle")
+                self.sigSelInfo.emit("First element picked — click a second point, line, circle "
+                                     "or sketch axis")
                 self.update(); return
             if ent is first: return
+            if first in axes and ent in axes:
+                self.sigSelInfo.emit("The sketch axes are fixed — pick a point, line or circle")
+                return
             sv["dist_first"]=None
             if sv.get("construction"):
                 # support-geometry mode: measurement only, never constrains anything
@@ -10863,21 +11039,38 @@ class View3D(QGLWidget):
             self.sigSelInfo.emit("Diameter / Radius requires a circle")
             self.update(); return
 
-        if ctool==CTOOL_PERP:
+        if ctool in (CTOOL_PERP, CTOOL_PARA, CTOOL_COLLINEAR):
+            # two lines; either one may also be a sketch axis
             si=self._near_seg(sk,px)
-            if si is None: return
-            first=sv.get("sel_seg")
-            if first is None:
-                sv["sel_seg"]=si
+            axis=self._near_axis(px) if si is None else None
+            if si is None and axis is None: return
+            first=sv.get("sel_seg"); first_axis=self._axis_first(sv, ctool)
+            if first is not None and first >= len(sk.segments): first=None
+            verb={CTOOL_PERP: "perpendicular", CTOOL_PARA: "parallel",
+                  CTOOL_COLLINEAR: "collinear"}[ctool]
+            if first is None and first_axis is None:
+                if si is not None:
+                    sv["sel_seg"]=si; name=f"L{si}"
+                else:
+                    sv["axis_first"]=(ctool, axis); name=f"{axis.upper()} axis"
+                self.sigSelInfo.emit(f"{name} picked — click the second line to make {verb}")
                 self.update(); return          # show first-pick highlight
-            if si != first:
-                sa=sk.segments[first]; sb=sk.segments[si]
+            if (si is not None and si==first) or (axis is not None and first_axis is not None):
+                return
+            sa=sk.segments[first] if first is not None else sk.axis_segment(first_axis)
+            sb=sk.segments[si] if si is not None else sk.axis_segment(axis)
+            sv["sel_seg"]=None; sv.pop("axis_first",None)
+            if sa in sk.axis_segments():       # keep the editable line second (it moves)
+                sa, sb = sb, sa
+            cls={CTOOL_PERP: CPerpendicular, CTOOL_PARA: CParallel,
+                 CTOOL_COLLINEAR: CCollinear}[ctool]
+            if cls is not CCollinear:
                 sk.constraints=[c for c in sk.constraints
-                                 if not(isinstance(c,CPerpendicular) and
-                                        {c.seg_a,c.seg_b}=={sa,sb})]
-                self._add_constraint(sk, CPerpendicular(sa,sb), "Perpendicular",
-                                     prefer_lock=[sa.v0, sa.v1])
-            sv["sel_seg"]=None
+                                if not(isinstance(c,cls) and {c.seg_a,c.seg_b}=={sa,sb})]
+            constraint=cls(sb,sa) if sb in sk.axis_segments() else cls(sa,sb)
+            lock=[sb.v0,sb.v1] if sb in sk.axis_segments() else [sa.v0,sa.v1]
+            self._add_constraint(sk, constraint, describe_constraint(sk, constraint),
+                                 prefer_lock=lock)
             self.update(); return
 
         if ctool==CTOOL_PTPT:
@@ -10894,7 +11087,7 @@ class View3D(QGLWidget):
                 if vi is not None:
                     sv["sel_vtx1"]=vi
                     self.sigSelInfo.emit(f"P{vi} picked — click the target point, line, "
-                                         "circle/arc or the origin")
+                                         "circle/arc, sketch axis or the origin")
                 else:
                     si=self._near_seg(sk,px)
                     if si is None: return
@@ -10940,8 +11133,15 @@ class View3D(QGLWidget):
                         lock=[cu.center] if ci is not None else [cu.center, cu.v_start]
                         self._add_constraint(sk, CPointOnCurve(vm, cu),
                                              f"Point→Curve P{first}→{name}", prefer_lock=lock)
+                elif self._near_axis(px) is not None:
+                    axis=self._near_axis(px); seg=sk.axis_segment(axis)
+                    sk.constraints=[c for c in sk.constraints if not(
+                        isinstance(c,CPointOnLine) and c.vertex is vm and c.seg is seg)]
+                    self._add_constraint(sk, CPointOnLine(vm, seg),
+                                         f"Point→{axis.upper()} axis P{first}")
                 else:
-                    self.sigSelInfo.emit("Click a target point, line, circle/arc or the origin")
+                    self.sigSelInfo.emit("Click a target point, line, circle/arc, sketch axis "
+                                         "or the origin")
                     return
             sv["sel_vtx1"]=None; self.update(); return
 
@@ -10976,51 +11176,26 @@ class View3D(QGLWidget):
             self._add_constraint(sk, CEqual(sa,sb), name, prefer_lock=prefer_lock)
             sv["equal_first"]=None; self.update(); return
 
-        if ctool==CTOOL_PARA:
-            first=sv.get("sel_seg")
-            si=self._near_seg(sk,px)
-            if first is None:
-                if si is None: return
-                sv["sel_seg"]=si
-                self.sigSelInfo.emit(f"L{si} picked — click the second line to make parallel")
-                self.update(); return
-            if si is None or si==first: return
-            sa,sb=sk.segments[first],sk.segments[si]
-            sk.constraints=[c for c in sk.constraints
-                            if not(isinstance(c,CParallel) and {c.seg_a,c.seg_b}=={sa,sb})]
-            self._add_constraint(sk, CParallel(sa,sb), f"Parallel L{first}||L{si}",
-                                 prefer_lock=[sa.v0,sa.v1])
-            sv["sel_seg"]=None; self.update(); return
-
-        if ctool==CTOOL_COLLINEAR:
-            si=self._near_seg(sk,px)
-            if si is None: return
-            first=sv.get("sel_seg")
-            if first is None:
-                sv["sel_seg"]=si
-                self.sigSelInfo.emit(f"L{si} picked — click the second line to make collinear")
-                self.update(); return
-            if si is None or si==first: return
-            sa,sb=sk.segments[first],sk.segments[si]
-            self._add_constraint(sk,CCollinear(sa,sb),f"Collinear L{first}, L{si}",
-                                 prefer_lock=[sa.v0,sa.v1])
-            sv["sel_seg"]=None; self.update(); return
-
         if ctool==CTOOL_SYM:
             ctr=sv.get("_sym_center"); first=sv.get("sel_seg")
             if sv.get("sel_vtx1") is not None:
                 first=sk.vertices[sv["sel_vtx1"]]
             si=self._near_seg(sk,px); vi=self._near_vtx(sk,px)
             if ctr is None:
+                axis=self._near_axis(px) if si is None and vi is None else None
                 if si is not None:
                     sv["_sym_center"]=("seg",si); sv["sel_seg"]=None
                     self.sigSelInfo.emit(f"Center L{si} — click first point or line")
                 elif vi is not None:
                     sv["_sym_center"]=("vtx",vi); sv["sel_seg"]=None
                     self.sigSelInfo.emit(f"Center P{vi} — click first point or line")
+                elif axis is not None:
+                    sv["_sym_center"]=("axis",axis); sv["sel_seg"]=None
+                    self.sigSelInfo.emit(f"Center {axis.upper()} axis — click first point or line")
                 else: return
                 self.update(); return
-            center=sk.segments[ctr[1]] if ctr[0]=="seg" else sk.vertices[ctr[1]]
+            center=sk.segments[ctr[1]] if ctr[0]=="seg" else \
+                   sk.axis_segment(ctr[1]) if ctr[0]=="axis" else sk.vertices[ctr[1]]
             if si is None and vi is None:
                 ci=self._near_circle(sk,px)
                 if ci is not None and sk.circles[ci].center in sk.vertices:
@@ -11046,6 +11221,59 @@ class View3D(QGLWidget):
                                  prefer_lock=prefer_lock)
             sv["sel_seg"]=None; sv["sel_vtx1"]=None
             sv.pop("_sym_center",None); self.update(); return
+
+    PICK_MARGIN_PX = 2.0   # a lower-priority element must be this much closer to win a pick
+
+    @staticmethod
+    def _pick_rank(element):
+        """Pick priority (lower wins): 0 drawn geometry, 1 support geometry, 2 fixed
+        reference geometry. The sketch axes come after all of them (see _near_axis)."""
+        return 2 if getattr(element, "reference", False) else \
+               1 if getattr(element, "construction", False) else 0
+
+    @classmethod
+    def _prefer_by_rank(cls, hits):
+        """hits: [(item, rank, distance px)]. The best hit of the highest priority wins
+        unless a lower-priority hit is more than PICK_MARGIN_PX closer, so a line drawn over
+        a support line is picked, not the support line under it."""
+        best = {}
+        for item, rank, distance in hits:
+            if rank not in best or distance < best[rank][1]:
+                best[rank] = (item, distance)
+        chosen = None
+        for rank in sorted(best):
+            item, distance = best[rank]
+            if chosen is None or chosen[1] > distance + cls.PICK_MARGIN_PX:
+                chosen = (item, distance)
+        return chosen[0] if chosen is not None else None
+
+    def _rank_line_curve(self, sk, si, ci, ai):
+        """One winner among a line, circle and arc hit (each an index or None): the highest
+        pick priority wins (drawn geometry before support before reference); on equal
+        priority line, circle, arc in that order. Returns (si, ci, ai) with the losers None."""
+        hits = [(order, self._pick_rank(element), key)
+                for order, (key, element) in enumerate((
+                    ("seg", sk.segments[si] if si is not None else None),
+                    ("circle", sk.circles[ci] if ci is not None else None),
+                    ("arc", sk.arcs[ai] if ai is not None else None)))
+                if element is not None]
+        if not hits: return si, ci, ai
+        winner = min(hits, key=lambda hit: (hit[1], hit[0]))[2]
+        return (si if winner == "seg" else None, ci if winner == "circle" else None,
+                ai if winner == "arc" else None)
+
+    def _near_axis(self, px, thr=8.0):
+        """The sketch axis line under the cursor: "x" (y = 0), "y" (x = 0) or None. Callers
+        try sketch geometry first, so the axes never hide a line drawn on top of them."""
+        origin = self.to_px((0, 0))
+        dx, dy = abs(px.x()-origin.x()), abs(px.y()-origin.y())
+        if min(dx, dy) > thr: return None
+        return "x" if dy <= dx else "y"
+
+    def _axis_first(self, sv, ctool):
+        """Axis picked as the first element of the running constraint tool, or None."""
+        pick = sv.get("axis_first")
+        return pick[1] if pick is not None and pick[0] == ctool else None
 
     def _can_pick_reference(self, sk, px, thr):
         """Constraint references are a fallback, never an obstruction over editable geometry."""
@@ -11074,7 +11302,7 @@ class View3D(QGLWidget):
 
     def _near_arc(self, sk, px, thr=12.0):
         """Return index of the arc whose curve is within thr px of px."""
-        best_i, best_d = None, thr
+        hits = []
         reference_allowed = self._can_pick_reference(sk, px, thr)
         for i, arc in enumerate(sk.arcs):
             if not self._level_reference_available(arc): continue
@@ -11082,8 +11310,8 @@ class View3D(QGLWidget):
             pts = [self.to_px(xy) for xy in arc.tess()]
             d, _nearest, _segment = _projected_polyline_hit(
                 (px.x(), px.y()), [(point.x(), point.y()) for point in pts])
-            if d < best_d: best_d = d; best_i = i
-        return best_i
+            if d < thr: hits.append((i, self._pick_rank(arc), d))
+        return self._prefer_by_rank(hits)
 
     def _near_ellipse(self, sk, px, thr=10.0):
         best_i, best_d = None, thr
@@ -11124,7 +11352,7 @@ class View3D(QGLWidget):
 
     def _near_circle(self, sk, px, thr=12.0):
         """Return index of circle whose circumference is within thr px of px."""
-        best_i, best_d = None, thr
+        hits = []
         reference_allowed = self._can_pick_reference(sk, px, thr)
         for i, circ in enumerate(sk.circles):
             if not self._level_reference_available(circ): continue
@@ -11133,12 +11361,13 @@ class View3D(QGLWidget):
             rpx = circ.radius * self.scale
             d, _nearest = _projected_circle_hit(
                 (px.x(), px.y()), (cp.x(), cp.y()), rpx)
-            if d < best_d: best_d = d; best_i = i
-        return best_i
+            if d < thr: hits.append((i, self._pick_rank(circ), d))
+        return self._prefer_by_rank(hits)
 
     def _near_seg(self, sk, px, thr=12.0, exclude_vertex=None):
-        best_editable_i, best_editable_d = None, thr
-        best_reference_i, best_reference_d = None, thr
+        """Index of the segment under the cursor (drawn lines before support lines before
+        reference lines, see _prefer_by_rank), or None."""
+        hits = []
         for i,seg in enumerate(sk.segments):
             if not self._level_reference_available(seg): continue
             if exclude_vertex is not None and (seg.v0 is exclude_vertex or seg.v1 is exclude_vertex):
@@ -11146,60 +11375,34 @@ class View3D(QGLWidget):
             pp0=self.to_px(seg.v0.xy()); pp1=self.to_px(seg.v1.xy())
             d, _nearest = _projected_segment_hit(
                 (px.x(), px.y()), (pp0.x(), pp0.y()), (pp1.x(), pp1.y()))
-            if seg.reference:
-                if d < best_reference_d:
-                    best_reference_i, best_reference_d = i, d
-            elif d < best_editable_d:
-                best_editable_i, best_editable_d = i, d
-        if best_reference_i is None:
-            return best_editable_i
-        if best_editable_i is None or best_editable_d > best_reference_d + 2.0:
-            return best_reference_i
-        return best_editable_i
+            if d < thr: hits.append((i, self._pick_rank(seg), d))
+        return self._prefer_by_rank(hits)
 
     def _near_equal_entity(self, sk, px, thr=12.0):
-        """Pick the closest segment or circle, preferring editable geometry on overlap."""
-        best_editable, best_editable_d = None, thr
-        best_reference, best_reference_d = None, thr
+        """Pick the closest segment or circle, preferring drawn over support over reference
+        geometry on overlap (see _prefer_by_rank)."""
+        hits = []
         for segment in sk.segments:
             if not self._level_reference_available(segment): continue
             p0, p1 = self.to_px(segment.v0.xy()), self.to_px(segment.v1.xy())
             distance, _nearest = _projected_segment_hit(
                 (px.x(), px.y()), (p0.x(), p0.y()), (p1.x(), p1.y()))
-            if segment.reference:
-                if distance < best_reference_d:
-                    best_reference, best_reference_d = segment, distance
-            elif distance < best_editable_d:
-                best_editable, best_editable_d = segment, distance
+            if distance < thr: hits.append((segment, self._pick_rank(segment), distance))
         for circle in sk.circles:
             if not self._level_reference_available(circle): continue
             center = self.to_px(circle.center.xy())
             distance, _nearest = _projected_circle_hit(
                 (px.x(), px.y()), (center.x(), center.y()), circle.radius*self.scale)
-            if circle.reference:
-                if distance < best_reference_d:
-                    best_reference, best_reference_d = circle, distance
-            elif distance < best_editable_d:
-                best_editable, best_editable_d = circle, distance
-        if best_reference is None:
-            return best_editable
-        if best_editable is None or best_editable_d > best_reference_d + 2.0:
-            return best_reference
-        return best_editable
+            if distance < thr: hits.append((circle, self._pick_rank(circle), distance))
+        return self._prefer_by_rank(hits)
 
     def _near_tangent_entity(self, sk, px, thr=12.0):
-        """Pick the nearest segment, circle or arc for a tangent constraint."""
-        best_editable, best_editable_d = None, thr
-        best_reference, best_reference_d = None, thr
+        """Pick the nearest segment, circle or arc for a tangent constraint (drawn over
+        support over reference geometry on overlap)."""
+        hits = []
         def consider(entity, distance):
-            nonlocal best_editable, best_editable_d, best_reference, best_reference_d
-            if not self._level_reference_available(entity):
-                return
-            if entity.reference:
-                if distance < best_reference_d:
-                    best_reference, best_reference_d = entity, distance
-            elif distance < best_editable_d:
-                best_editable, best_editable_d = entity, distance
+            if self._level_reference_available(entity) and distance < thr:
+                hits.append((entity, self._pick_rank(entity), distance))
         for segment in sk.segments:
             p0, p1 = self.to_px(segment.v0.xy()), self.to_px(segment.v1.xy())
             distance, _nearest = _projected_segment_hit(
@@ -11215,11 +11418,7 @@ class View3D(QGLWidget):
             distance, _nearest, _segment = _projected_polyline_hit(
                 (px.x(), px.y()), [(point.x(), point.y()) for point in points])
             consider(arc, distance)
-        if best_reference is None:
-            return best_editable
-        if best_editable is None or best_editable_d > best_reference_d + 2.0:
-            return best_reference
-        return best_editable
+        return self._prefer_by_rank(hits)
 
     def _drop_if_orphan(self, sk, *verts):
         used = sk.used_vertices()
@@ -11991,6 +12190,8 @@ def sketch_to_dict(sk):
     cid = {c: i for i, c in enumerate(sk.circles)}
     aid = {a: i for i, a in enumerate(sk.arcs)}
     def ref(o):
+        if isinstance(o, Segment) and getattr(o, "sketch_axis", None) is not None:
+            return {"axis": o.sketch_axis}
         if isinstance(o, Vertex):  return {"v": vid[o]}
         if isinstance(o, Segment): return {"s": sid[o]}
         if isinstance(o, Circle):  return {"c": cid[o]}
@@ -12090,6 +12291,7 @@ def sketch_fill(sk, d):
         ))
     def deref(o):
         if isinstance(o, dict):
+            if "axis" in o: return sk.axis_segment(o["axis"])
             if "v" in o: return V[o["v"]]
             if "s" in o: return sk.segments[o["s"]]
             if "c" in o: return sk.circles[o["c"]]
@@ -14380,11 +14582,14 @@ _QT_PREVIOUS_HANDLER = None
 
 
 def _qt_message_handler(kind, context, message):
+    """Only Qt critical / fatal messages are errors; debug, info and warnings go to the
+    debug log (if enabled)."""
     try:
-        if _CRASH_LOG_FILE is not None:
-            _CRASH_LOG_FILE.write(
-                f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Qt {int(kind)}: {message}\n")
-            _CRASH_LOG_FILE.flush()
+        if kind in (QtCriticalMsg, QtFatalMsg):
+            with open(_ERROR_LOG, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Qt error: {message}\n")
+        else:
+            _dbg(f"Qt: {message}")
     except Exception:
         pass
     if _QT_PREVIOUS_HANDLER is not None:
@@ -14393,18 +14598,33 @@ def _qt_message_handler(kind, context, message):
         sys.__stderr__.write(message + "\n")
 
 
+def _close_crash_logging():
+    """Normal exit: stop faulthandler and drop the error log again if nothing was written."""
+    global _CRASH_LOG_FILE
+    if _CRASH_LOG_FILE is None:
+        return
+    try:
+        faulthandler.disable()
+        _CRASH_LOG_FILE.close()
+        if os.path.getsize(_ERROR_LOG) == 0:
+            os.remove(_ERROR_LOG)
+    except OSError:
+        pass
+    _CRASH_LOG_FILE = None
+
+
 def install_crash_logging():
+    """Native crashes (faulthandler tracebacks) go to the error log. faulthandler needs an
+    open file, so the log is held open while the app runs; nothing is written unless the
+    process crashes, and an empty log is removed again on exit."""
     global _CRASH_LOG_FILE, _QT_PREVIOUS_HANDLER
     if _CRASH_LOG_FILE is not None:
         return
     try:
-        _CRASH_LOG_FILE = open(_CRASH_LOG, "a", encoding="utf-8", buffering=1)
-        _CRASH_LOG_FILE.write(
-            f"\n=== SimpleCAD started {datetime.datetime.now():%Y-%m-%d %H:%M:%S} "
-            f"PID {os.getpid()} ===\n")
-        _CRASH_LOG_FILE.flush()
+        _CRASH_LOG_FILE = open(_ERROR_LOG, "a", encoding="utf-8", buffering=1)
         faulthandler.enable(file=_CRASH_LOG_FILE, all_threads=True)
         _QT_PREVIOUS_HANDLER = qInstallMessageHandler(_qt_message_handler)
+        atexit.register(_close_crash_logging)
     except (OSError, RuntimeError):
         if _CRASH_LOG_FILE is not None:
             _CRASH_LOG_FILE.close()
@@ -16186,7 +16406,9 @@ ASSEMBLY_ROTATION_STEP = 15.0         # degrees; Ctrl while dragging a ring rota
 ASSEMBLY_MOVE_STEP = 1.0              # mm; Ctrl reduces the translation step to 0.1 mm
 ASSEMBLY_EXPLOSION_DISTANCE = 10.0    # mm; initial separation for an aligned component
 
-def assembly_new(name="Assembly 1"):
+ASSEMBLY_DEFAULT_NAME = "Untitled"       # like an unsaved project in the main window
+
+def assembly_new(name=ASSEMBLY_DEFAULT_NAME):
     return {"name": name, "components": [], "constraints": [],
             "explosion_distance": ASSEMBLY_EXPLOSION_DISTANCE}
 
@@ -17249,6 +17471,7 @@ class AssemblyDialog(QDialog):
         self.view.fit_all()
         self._ready = True
         self._reset_history()
+        self._mark_saved()
         self._set_status("Add parent objects from the project or import STEP / STL / OBJ files.")
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -17360,16 +17583,19 @@ class AssemblyDialog(QDialog):
         toolbar.addAction(self.act_fit_together)
         toolbar.addAction(self.act_measure)
         toolbar.addSeparator()
+        self._view_actions = []
         for icon, text, rot_x, rot_z in (
                 ("view_isometric.png", "Isometric", -54.735610317245346, -135.0),
                 ("view_top.png", "Top (XY)", 0.0, 0.0),
                 ("view_front.png", "Front (XZ)", -90.0, 0.0),
                 ("view_side.png", "Right (YZ)", -90.0, -90.0)):
-            toolbar.addAction(action(
-                icon, text, f"{text} view",
-                lambda rx=rot_x, rz=rot_z: self.view.set_camera(rx, rz)))
-        toolbar.addAction(action("show_all_objects.png", "Show all",
-                                 "Show all components and fit them into the view", self._show_all))
+            view_action = action(icon, text, f"{text} view",
+                                 lambda rx=rot_x, rz=rot_z: self.view.set_camera(rx, rz))
+            self._view_actions.append(view_action)
+            toolbar.addAction(view_action)
+        self.act_show_all = action("show_all_objects.png", "Show all",
+                                   "Show all components and fit them into the view", self._show_all)
+        toolbar.addAction(self.act_show_all)
         toolbar.addSeparator()
         self.act_update_selected = action(
             "update_selected.png", "Update selected",
@@ -17381,6 +17607,34 @@ class AssemblyDialog(QDialog):
             lambda: self._update_components(list(self.assembly["components"])))
         toolbar.addAction(self.act_update_selected)
         toolbar.addAction(self.act_update_all)
+
+        # menu bar: the same actions as the toolbar (checked / enabled states stay in sync)
+        menu_bar = QMenuBar(self)
+        self.menu_bar = menu_bar
+        self.act_close = QAction("Close", self, toolTip="Close the assembly window")
+        self.act_close.triggered.connect(lambda _checked=False: self.close())
+        for act, keys in ((self.act_open, QKeySequence.Open), (self.act_save, QKeySequence.Save),
+                          (self.act_save_as, QKeySequence("Ctrl+Shift+S")),
+                          (self.act_undo, QKeySequence.Undo), (self.act_redo, QKeySequence("Ctrl+Y")),
+                          (self.act_close, QKeySequence("Ctrl+W"))):
+            act.setShortcut(QKeySequence(keys))
+            act.setShortcutContext(Qt.WindowShortcut)
+            self.addAction(act)            # shortcuts work while the window has focus
+        file_menu = menu_bar.addMenu("&File")
+        for act in (self.act_open, self.act_save, self.act_save_as, None, self.act_export,
+                    None, self.act_close):
+            file_menu.addSeparator() if act is None else file_menu.addAction(act)
+        edit_menu = menu_bar.addMenu("&Edit")
+        for act in (self.act_undo, self.act_redo, None, self.act_add, self.act_import,
+                    self.act_remove):
+            edit_menu.addSeparator() if act is None else edit_menu.addAction(act)
+        view_menu = menu_bar.addMenu("&View")
+        for act in self._view_actions + [None, self.act_show_all]:
+            view_menu.addSeparator() if act is None else view_menu.addAction(act)
+        tools_menu = menu_bar.addMenu("&Tools")
+        for act in (self.act_align, self.act_exploded, self.act_fit_together, self.act_measure,
+                    None, self.act_update_selected, self.act_update_all):
+            tools_menu.addSeparator() if act is None else tools_menu.addAction(act)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Assembly  (☑ = visible)")
@@ -17520,6 +17774,7 @@ class AssemblyDialog(QDialog):
         bottom.addWidget(self.status, 1); bottom.addWidget(close)
 
         root = QVBoxLayout(self)
+        root.setMenuBar(menu_bar)
         root.addWidget(toolbar)
         root.addWidget(split, 1)
         root.addLayout(bottom)
@@ -17579,8 +17834,11 @@ class AssemblyDialog(QDialog):
 
     def _update_title(self):
         path = self._window._assembly_file
-        self.setWindowTitle(f"Assembly — {self.assembly['name']}" +
-                            (f" — {os.path.basename(path)}" if path else ""))
+        # " *" = unsaved changes since the last save / open (like the main window title)
+        unsaved = getattr(self, "_saved_state", None) is not None and self.has_unsaved_changes()
+        # like the main window: the file name, or "Untitled" while it has no file yet
+        file_name = os.path.basename(path) if path else "Untitled"
+        self.setWindowTitle(f"Assembly — {file_name}" + (" *" if unsaved else ""))
 
     def event(self, e):
         # parts may have been edited in the main window meanwhile: refresh the Outdated markers
@@ -17590,12 +17848,60 @@ class AssemblyDialog(QDialog):
             self._show_properties()
         return super().event(e)
 
+    def _snapshot(self):
+        return assembly_to_data(self.assembly, keep_empty=True)
+
+    def _mark_saved(self):
+        """The current assembly is the saved / opened one (no unsaved changes)."""
+        self._saved_state = self._snapshot()
+        self._update_title()
+
+    def has_unsaved_changes(self):
+        return self._snapshot() != getattr(self, "_saved_state", None)
+
+    def _discard_changes(self):
+        """Return the assembly to its last saved / opened state."""
+        restored = assembly_from_data(self._saved_state)
+        self.assembly.clear()
+        self.assembly.update(restored)
+        self._window._mark_dirty()
+        self._update_title()
+
+    def _confirm_close(self):
+        """Ask to save unsaved assembly changes. True = the window may close."""
+        if getattr(self, "_force_close", False) or not self.has_unsaved_changes():
+            return True
+        answer = QMessageBox.question(
+            self, "Unsaved assembly changes",
+            f"The assembly '{self.assembly['name']}' has unsaved changes. Save them?\n\n"
+            "Discard returns the assembly to its last saved state.",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+        if answer == QMessageBox.Save:
+            return self._save()
+        if answer == QMessageBox.Discard:
+            self._discard_changes()
+            return True
+        return False
+
+    def reject(self):
+        # Esc and Close go through close(), so every way of closing asks about unsaved changes
+        if getattr(self, "_in_close", False):
+            super().reject()
+        else:
+            self.close()
+
     def closeEvent(self, e):
+        if not self._confirm_close():
+            e.ignore(); return
         if self.act_align.isChecked():
             self.act_align.setChecked(False)
         if self.act_measure.isChecked():
             self.act_measure.setChecked(False)
-        super().closeEvent(e)
+        self._in_close = True
+        try:
+            super().closeEvent(e)
+        finally:
+            self._in_close = False
 
     # ── scene (render entries of the 3-D view) ────────────────────────────────
     def _refresh_status(self):
@@ -18081,6 +18387,7 @@ class AssemblyDialog(QDialog):
                 self._update_history_actions()
         self.changed = True
         self._window._mark_dirty()
+        self._update_title()
 
     def _reset_history(self):
         self._undo_history = [assembly_to_data(self.assembly, keep_empty=True)]
@@ -18110,6 +18417,7 @@ class AssemblyDialog(QDialog):
             self._update_gizmo()
             self.changed = True
             self._window._mark_dirty()
+            self._update_title()
             self._set_status(f"{verb} assembly change")
             self.view.update()
         finally:
@@ -18534,7 +18842,8 @@ class AssemblyDialog(QDialog):
         path = None if save_as else self._window._assembly_file
         if not path:
             start = self._window._assembly_file or os.path.join(
-                os.path.dirname(self._window._file or ""), self.assembly["name"])
+                os.path.dirname(self._window._file or ""),
+                (self.assembly["name"] or ASSEMBLY_DEFAULT_NAME) + ASSEMBLY_EXTENSION)
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save assembly", start, f"SimpleCAD assembly (*{ASSEMBLY_EXTENSION})")
             if not path:
@@ -18547,6 +18856,7 @@ class AssemblyDialog(QDialog):
             QMessageBox.critical(self, "Save failed", f"Could not save\n{path}\n\n{ex}")
             return False
         self._window._assembly_file = path
+        self._mark_saved()
         self._update_title()
         self._set_status(f"Assembly saved to {path} (it is also stored in the project file)")
         return True
@@ -18573,6 +18883,7 @@ class AssemblyDialog(QDialog):
         self._update_title()
         self._after_components_changed()
         self._reset_history()
+        self._mark_saved()
         self.view.fit_all()
         self._set_status(f"Opened {path}")
 
@@ -19321,12 +19632,16 @@ class MainWindow(QMainWindow):
         ring_lay.addRow("Radius:", self.sp_ring_r)
         self.cb_ring_axis=QComboBox()
         for txt, key in (("Sketch +X", "u"), ("Sketch +Y", "v"),
-                         ("Sketch -X", "-u"), ("Sketch -Y", "-v")):
+                         ("Sketch -X", "-u"), ("Sketch -Y", "-v"),
+                         ("World X", "x"), ("World Y", "y"),
+                         ("World Z", "z")):
             self.cb_ring_axis.addItem(txt, key)
-        self.cb_ring_axis.setToolTip("The axes are those of the sketch (its plane and orientation), not the "
-                                     "world axes. Negative axes reverse the sweep direction without "
-                                     "moving the rotation axis. Use a negative radius to move the axis "
-                                     "to the other side of the profile.")
+        self.cb_ring_axis.setToolTip("Sketch axes follow the sketch (its plane and orientation) and are "
+                                     "placed by Ref / Radius. Negative axes reverse the sweep direction "
+                                     "without moving the rotation axis; a negative radius moves the axis "
+                                     "to the other side of the profile.\n"
+                                     "World axes run through the global origin and must lie in the sketch "
+                                     "plane; the radius then follows from the sketch geometry.")
         self.cb_ring_axis.currentIndexChanged.connect(self._on_ring_axis_changed)
         ring_lay.addRow("Axis:", self.cb_ring_axis)
         self.lbl_ring_info=QLabel(""); self.lbl_ring_info.setWordWrap(True); ring_lay.addRow(self.lbl_ring_info)
@@ -22771,7 +23086,10 @@ class MainWindow(QMainWindow):
             distance = float((np.asarray(source.frame[0]) - O) @ n)
             parallel = abs(float(source_normal @ n)) >= 1.0 - 1e-6
             level = round(distance, 4) if parallel and distance < -1e-4 else None
-            if parallel and level is None:
+            # Only a parallel source sketch below the face is projected (and tied to its
+            # Sketch Explorer level). A perpendicular or tilted one would collapse into
+            # untracked edge-on lines that cannot be hidden.
+            if level is None:
                 profile_entry = None
         if profile_entry is not None and profile_entry.get("type") == "sketch":
             previous = {key: set(getattr(sk, key)) for key in
@@ -22816,6 +23134,16 @@ class MainWindow(QMainWindow):
         source = source_entry["sketch"]
         origin, u, v, normal = (np.asarray(axis, dtype=float) for axis in sk.frame)
         if abs(float(normal @ np.asarray(source.frame[3], dtype=float))) < 1.0 - 1e-6:
+            # Older face sketches copied a perpendicular / tilted source sketch as edge-on
+            # lines (no face boundary, no explorer level). Those are no longer projected:
+            # drop the copies nothing is constrained to.
+            stray = [element for element in sk.segments + sk.circles + sk.arcs
+                     if element.reference and not hasattr(element, "reference_boundary")
+                     and not hasattr(element, "reference_level")]
+            removed = sk.remove_unused_references(stray)
+            if removed:
+                self._st(f"Removed {removed} projected reference lines of the non-parallel "
+                         f"sketch {source_entry['name']}")
             return
         distance = float((np.asarray(source.frame[0], dtype=float) - origin) @ normal)
         level = 0.0 if abs(distance) <= 1e-4 else round(distance, 4)
@@ -23335,10 +23663,81 @@ class MainWindow(QMainWindow):
         # Keep feature edges separate from the union so recesses and overlapping bodies remain visible.
         return {"outline": outline.simplified(), "edges": edges}
 
+    def _collect_coplanar_underlay(self, active_sketch, tol=1e-4):
+        """Faces of visible solids that lie in the plane of a face sketch, other than the face
+        it is drawn on (e.g. the end of a ring extrusion that stops at this face's plane).
+        They are shown grey with a dashed outline; they are not references (nothing can be
+        picked, snapped or constrained to them). → {"fill", "edges"} paths in sketch mm, or None."""
+        if not self._sketch_parent:
+            return None
+        host, host_face = self._sketch_parent
+        if host is None or host.get("type") not in ("extrusion", "imported"):
+            return None
+        origin, axis_u, axis_v, normal = (
+            np.asarray(axis, dtype=float) for axis in active_sketch.frame)
+        normal = _unit(normal)
+        fill = QPainterPath(); fill.setFillRule(Qt.WindingFill)
+        edge_list = []
+        host_area = QPainterPath(); host_area.setFillRule(Qt.WindingFill)
+        host_faces = host.get("faces", [])
+        if isinstance(host_face, int) and 0 <= host_face < len(host_faces) and host.get("solid"):
+            HV = np.asarray(host["solid"][0], dtype=float) - origin
+            for tri in np.asarray(host["solid"][1], dtype=int).reshape(-1, 3)[
+                    np.asarray(host_faces[host_face]["tris"], int)]:
+                host_area.addPolygon(QPolygonF([QPointF(float(HV[k] @ axis_u), float(HV[k] @ axis_v))
+                                                for k in tri]))
+                host_area.closeSubpath()
+            host_area = host_area.simplified()
+        for body in self._solid_bodies(self.state.get("objects", [])) + [
+                o for o in self.state.get("objects", []) if o.get("type") == "imported"
+                and o.get("solid") and entry_visible(o) and not o.get("preview")]:
+            V = np.asarray(body["solid"][0], dtype=float)
+            T = np.asarray(body["solid"][1], dtype=int).reshape(-1, 3)
+            if not len(T): continue
+            height = (V - origin) @ normal
+            in_plane = np.all(np.abs(height[T]) < tol, axis=1)
+            if not in_plane.any(): continue
+            P = V[T]
+            n = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+            length = np.linalg.norm(n, axis=1)
+            flat = in_plane & (length > 1e-12)
+            flat[flat] &= np.abs((n[flat] / length[flat, None]) @ normal) > 1 - 1e-6
+            if body is host and isinstance(host_face, int):
+                faces = body.get("faces", [])
+                if 0 <= host_face < len(faces) and faces[host_face]["tris"]:
+                    flat[np.asarray(faces[host_face]["tris"], int)] = False   # the sketch's own face
+            if not flat.any(): continue
+            picked = T[flat]
+            rel = V - origin
+            uv = np.column_stack((rel @ axis_u, rel @ axis_v))
+            for a, b, c in uv[picked]:
+                fill.addPolygon(QPolygonF([QPointF(*map(float, a)), QPointF(*map(float, b)),
+                                           QPointF(*map(float, c))]))
+                fill.closeSubpath()
+            # outline = edges used by only one of the picked triangles
+            E = np.sort(np.concatenate([picked[:, [0, 1]], picked[:, [1, 2]], picked[:, [2, 0]]]), axis=1)
+            unique, count = np.unique(E, axis=0, return_counts=True)
+            edge_list += [(uv[i], uv[j]) for i, j in unique[count == 1]]
+        # only what lies outside the face the sketch is on (it has its own reference outline)
+        fill = fill.simplified()
+        if not host_area.isEmpty():
+            fill = fill.subtracted(host_area)
+        if fill.isEmpty():
+            return None
+        edges = QPainterPath()
+        for a, b in edge_list:
+            middle = QPointF(float(a[0] + b[0]) / 2, float(a[1] + b[1]) / 2)
+            if not host_area.isEmpty() and host_area.contains(middle) and \
+                    not fill.contains(middle):
+                continue
+            edges.moveTo(float(a[0]), float(a[1])); edges.lineTo(float(b[0]), float(b[1]))
+        return {"fill": fill, "edges": edges}
+
     def _begin_sketch(self, sk, where=None, name=""):
         self._migrate_legacy_sketch_references(sk)
         underlays = self._collect_sketch_underlays(sk)
         solid_underlay = self._collect_solid_underlay(sk)
+        coplanar_underlay = self._collect_coplanar_underlay(sk)
         parent = self._sketch_parent[0] if self._sketch_parent else None
         direct_source = parent.get("parent") if parent is not None else None
         self._release_unreferenceable_levels(sk, underlays)
@@ -23361,6 +23760,7 @@ class MainWindow(QMainWindow):
             "hl_constraint":None,"dist_first":None,"equal_first":None,
             "underlays":underlays,
             "solid_underlay":solid_underlay,
+            "coplanar_underlay":coplanar_underlay,
         }
         self.sketch_panel.ed_name.setText(name)
         self.sketch_panel.ed_name.setPlaceholderText(sk.name)
@@ -23422,7 +23822,8 @@ class MainWindow(QMainWindow):
         self.sketch_panel.set_mode(mode)
         if mode != "constrain":
             sv["ctool"]=CTOOL_NONE; sv["dist_first"]=None; sv["equal_first"]=None
-            sv.pop("_sym_center",None); self.sketch_panel.set_ctool(CTOOL_NONE)
+            sv.pop("_sym_center",None); sv.pop("axis_first",None)
+            self.sketch_panel.set_ctool(CTOOL_NONE)
         if mode != DTOOL_SELECT:
             sv["sel_seg"]=None; sv["sel_vtx1"]=None; sv["sel_curve"]=None; sv["_sel_segs"]=[]
             sv["_sel_extra"]=[]
@@ -23501,7 +23902,7 @@ class MainWindow(QMainWindow):
         if sv.get("mode") != "constrain": self._on_mode_changed("constrain")
         sv["ctool"]=ct; sv["sel_seg"]=None; sv["sel_vtx1"]=None; sv["sel_vtx2"]=None
         sv["sel_curve"]=None; sv["dist_first"]=None; sv["equal_first"]=None
-        sv["tangent_first"]=None; sv["angle_first"]=None
+        sv["tangent_first"]=None; sv["angle_first"]=None; sv.pop("axis_first",None)
         sv["_sel_extra"]=[]
         self.sketch_panel.set_ctool(ct); self.view3d.update()
 
@@ -24515,12 +24916,14 @@ class MainWindow(QMainWindow):
             elif sel.get("ring"):
                 rg = sel["ring"]
                 extent = "to chosen face" if sel.get("to_surface") else direction
+                placement = (f"World {rg['axis'].upper()} axis" if rg.get("axis") in RING_WORLD_AXES
+                             else f"Radius {rg.get('radius', 0):.2f} mm")
                 if rg.get("helical"):
                     self.p_extra.setText(
-                        f"Radius {rg.get('radius', 0):.2f} mm · helix {rg.get('height', 0):.2f} mm · "
+                        f"{placement} · helix {rg.get('height', 0):.2f} mm · "
                         f"{rg.get('turns', 1):.2f} turns ({extent})")
                 else:
-                    self.p_extra.setText(f"Radius {rg.get('radius', 0):.2f} mm · {rg.get('angle', 0):.1f}° ({extent})")
+                    self.p_extra.setText(f"{placement} · {rg.get('angle', 0):.1f}° ({extent})")
             else:
                 extent = "to next surface" if sel.get("to_surface") else \
                          "through all" if sel.get("through") and sel.get("cut") else f"{direction}"
@@ -24761,7 +25164,9 @@ class MainWindow(QMainWindow):
 
     def _on_ring_axis_changed(self, *_):
         sk = self._ext_pending["sketch"] if self._ext_pending is not None else None
-        if sk is not None and not self._ring_r_user:       # the default follows the profile's size
+        self._sync_extent_widgets()                        # world axes: no Ref / Radius
+        if (sk is not None and not self._ring_r_user and   # the default follows the profile's size
+                self.cb_ring_axis.currentData() not in RING_WORLD_AXES):
             self.sp_ring_r.blockSignals(True)
             self.sp_ring_r.setValue(self._ring_default_radius(sk, self.cb_ring_axis.currentData() or "u",
                                                               self.cb_ring_ref.currentData() or "center"))
@@ -24944,7 +25349,7 @@ class MainWindow(QMainWindow):
         if ring:
             title = f"Ring extrusion of {sel['name']}"
         self.lbl_ext_title.setText(f"<b>{title}</b>")
-        self._st("Set angle or target face, then click OK" if ring else "Set height / extent, then click OK")
+        self._st("Set angle / extent, then click OK" if ring else "Set height / extent, then click OK")
         # trigger a preview immediately with current defaults (an error message stays visible)
         self._do_live_update_extrusion()
         self._show_extrude_dock()
@@ -25055,55 +25460,107 @@ class MainWindow(QMainWindow):
         if z1 + zn < 1e-6: return None
         return -zn, z1 + zn, tools
 
-    def _ring_surface_extent(self, sk, loops, C, axis, sides, objs, target):
-        """Sweep of a ring extrusion up to the chosen target face: (a0, a1, trim tools) with
-        angles in rad, or None. The profile is swept until its samples have all reached the
-        surface; the part beyond it is trimmed away by the tool."""
-        res = self._resolve_target(target, objs) if target else None
-        if res is None: return None
+    @staticmethod
+    def _ring_sweep_hit(res, Q, C, axis, sgn):
+        """Sweep angle (rad, 0..2π) at which the profile samples Q, revolved about the axis
+        through C (sense sgn), have reached the surface res, plus the tool that trims the
+        sweep beyond it; None if no sample reaches it.
+        res: ("plane", (P0, n)), ("sheet", (P0, n, (O, u, v, polygons))) — a plane limited to
+        a sketch's closed regions — or ("face", (verts, tris, tool mesh))."""
+        r = Q - C
+        if res[0] in ("plane", "sheet"):
+            P0, n = res[1][0], res[1][1]
+            region = res[1][2] if res[0] == "sheet" else None
+            ra = r @ axis; na = float(n @ axis)
+            c0 = float((C - P0) @ n) + ra*na
+            A = r @ n - ra*na
+            B = sgn*(np.cross(axis, r) @ n)
+            M = np.hypot(A, B)
+            hits = []             # (angle, point velocity at the hit) per sample that reaches the surface
+            for k in range(len(r)):
+                if M[k] < 1e-9 or abs(c0[k] + A[k]) < 1e-6: continue    # parallel / already on the plane
+                x = -c0[k]/M[k]
+                if abs(x) > 1: continue
+                phi = math.atan2(B[k], A[k]); dphi = math.acos(x)
+                cand = [t for t in ((phi + dphi) % (2*math.pi), (phi - dphi) % (2*math.pi)) if t > 1e-4]
+                if not cand: continue
+                t = min(cand)
+                if region is not None:             # a sketch only counts inside its closed regions
+                    RO, ru, rv, polys = region
+                    q = _rotate_about([Q[k]], C, axis, sgn*t)[0] - RO
+                    if sum(_pt_in_poly((float(q @ ru), float(q @ rv)), pl) for pl in polys) % 2 == 0:
+                        continue
+                vel = -A[k]*math.sin(t) + B[k]*math.cos(t)       # d(distance to plane)/d(angle)
+                hits.append((t, vel))
+            if not hits: return None
+            end, vel = max(hits)
+            reach = 1000.0 + 4*float(np.linalg.norm(r, axis=1).max())
+            return end, halfspace_box(P0, n if vel > 0 else -n, C, reach)
+        mesh = res[1][2]
+        lo, hi = _bbox(mesh[0]); pad = 1e-6
+        def inside(q):
+            return bool(np.all(q >= lo - pad) and np.all(q <= hi + pad)) and _point_in_mesh(q, mesh)
+        step = math.radians(3.0)
+        idx = np.arange(len(Q))[::max(1, len(Q)//12)]
+        pending = {int(k) for k in idx if not inside(Q[k])}
+        first = {}
+        for i in range(1, int(2*math.pi/step) + 1):
+            if not pending: break
+            P = _rotate_about(Q[sorted(pending)], C, axis, sgn*i*step)
+            for k, q in zip(sorted(pending), P):
+                if inside(q): first[k] = i*step; pending.discard(k)
+        if not first: return None
+        return max(first.values()), mesh
+
+    def _ring_surface_candidates(self, sk, Q, C, axis, objs, exclude, sel):
+        """Surfaces an automatic "up to surface" ring sweep can stop at, like the straight
+        extrusion: solid bodies, the coordinate planes and the closed regions of other
+        visible sketches. Bodies outside the axial span of the sweep are skipped."""
+        axial = (Q - C) @ axis
+        a_lo, a_hi = float(axial.min()) - 1e-6, float(axial.max()) + 1e-6
+        cands = []
+        for b in self._solid_bodies(objs, exclude):
+            bv = np.asarray(b["solid"][0], float)
+            ba = (bv - C) @ axis
+            if ba.max() < a_lo or ba.min() > a_hi: continue
+            cands.append(("face", (b["solid"][0], b["solid"][1],
+                                   (b["solid"][0], b["solid"][1], b.get("faces", [])))))
+        cands += [("plane", (np.zeros(3), np.array(n, float)))
+                  for n in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
+        for o in objs:
+            if o["type"] == "sketch" and o is not sel and entry_visible(o):
+                f = o["sketch"].frame
+                polys = [[p for e in lp for p in e["pts"][:-1]]
+                         for lp in o["sketch"].profile_loop_edges()]
+                if polys:
+                    O2, u2, v2, n2 = (np.asarray(a, float) for a in f)
+                    cands.append(("sheet", (O2, n2, (O2, u2, v2, polys))))
+        return cands
+
+    def _ring_surface_extent(self, sk, loops, C, axis, sides, objs, target,
+                             exclude=None, sel=None):
+        """Sweep of a ring extrusion up to the chosen target face or, without one, up to the
+        next surface in the sweep direction (see _ring_surface_candidates): (a0, a1, trim
+        tools) with angles in rad, or None. The profile is swept until its samples have all
+        reached the surface; the part beyond it is trimmed away by the tool."""
         O, u, v, w = sk.frame
         S2 = profile_samples(loops)
         Q = O + np.array([p[0] for p in S2])[:, None]*u + np.array([p[1] for p in S2])[:, None]*v
-        r = Q - C
+        if target:
+            res = self._resolve_target(target, objs)
+            if res is None: return None
+            cands = [res]
+        else:
+            cands = self._ring_surface_candidates(sk, Q, C, axis, objs, exclude, sel)
         ext = {}; tools = []
         for sgn in sides:
-            hits = []             # (angle, point velocity at the hit) per sample that reaches the surface
-            if res[0] == "plane":
-                P0, n = res[1]
-                ra = r @ axis; na = float(n @ axis)
-                c0 = float((C - P0) @ n) + ra*na
-                A = r @ n - ra*na
-                B = sgn*(np.cross(axis, r) @ n)
-                M = np.hypot(A, B)
-                for k in range(len(r)):
-                    if M[k] < 1e-9 or abs(c0[k] + A[k]) < 1e-6: continue    # parallel / already on the plane
-                    x = -c0[k]/M[k]
-                    if abs(x) > 1: continue
-                    phi = math.atan2(B[k], A[k]); dphi = math.acos(x)
-                    cand = [t for t in ((phi + dphi) % (2*math.pi), (phi - dphi) % (2*math.pi)) if t > 1e-4]
-                    if cand:
-                        t = min(cand)
-                        vel = -A[k]*math.sin(t) + B[k]*math.cos(t)       # d(distance to plane)/d(angle)
-                        hits.append((t, vel))
-                if hits:
-                    end, vel = max(hits)
-                    tool = halfspace_box(P0, n if vel > 0 else -n, C, 1000.0 + 4*float(np.linalg.norm(r, axis=1).max()))
-            else:
-                mesh = res[1][2]
-                step = math.radians(3.0)
-                idx = np.arange(len(Q))[::max(1, len(Q)//12)]
-                inside0 = [_point_in_mesh(Q[k], mesh) for k in idx]
-                pending = {int(k) for k, ins in zip(idx, inside0) if not ins}
-                first = {}
-                for i in range(1, int(2*math.pi/step) + 1):
-                    if not pending: break
-                    P = _rotate_about(Q[sorted(pending)], C, axis, sgn*i*step)
-                    for k, q in zip(sorted(pending), P):
-                        if _point_in_mesh(q, mesh): first[k] = i*step; pending.discard(k)
-                if first:
-                    hits = [(t, 0.0) for t in first.values()]; end = max(first.values()); tool = mesh
-            if hits:
-                ext[sgn] = end; tools.append(tool)
+            best = None
+            for res in cands:
+                hit = self._ring_sweep_hit(res, Q, C, axis, sgn)
+                if hit is not None and (best is None or hit[0] < best[0]):
+                    best = hit
+            if best is not None:
+                ext[sgn] = best[0]; tools.append(best[1])
         if not ext: return None
         a1 = ext.get(1, 0.0); a0 = -ext.get(-1, 0.0)
         if a1 - a0 < 1e-6: return None
@@ -25121,8 +25578,10 @@ class MainWindow(QMainWindow):
         ring {"axis" ("u" / "v" / "-u" / "-v"), "ref" ("center" / "outer" / "inner"),
         "radius", "angle", "rotation"}: sweep
         the profile about an axis parallel to the sketch's X or Y axis, `radius` from the profile
-        centre / outer edge / inner edge (a ring extrusion): the angle (deg) replaces the height,
-        to_surface sweeps up to the chosen target face. Optional rotation (deg, default 0) rotates
+        centre / outer edge / inner edge, or about a world axis ("x" / "y" / "z") through the
+        origin that lies in the sketch plane (a ring extrusion): the angle (deg) replaces the height,
+        to_surface sweeps up to the chosen target face, or without one up to the next surface in
+        the sweep direction. Optional rotation (deg, default 0) rotates
         the whole ring within the sketch plane about the profile bounding-box center.
         Returns (verts, tris, faces) or None."""
         sk=sel["sketch"]
@@ -25130,7 +25589,8 @@ class MainWindow(QMainWindow):
         if not loops: return None
         objs = objects if objects is not None else self.state["objects"]
         if ring is not None:
-            return self._build_ring(sel, sk, loops, ring, direction, to_surface, objs, target)
+            return self._build_ring(sel, sk, loops, ring, direction, to_surface, objs, target,
+                                    exclude=exclude)
         tools = []
         if to_surface:
             sides = (1, -1) if direction == "sym" else (-1,) if direction == "rev" else (1,)
@@ -25171,7 +25631,7 @@ class MainWindow(QMainWindow):
             mesh = csg_subtract(mesh, tools, label="")
         return mesh if mesh[1] else None
 
-    def _build_ring(self, sel, sk, loops, ring, direction, to_surface, objs, target):
+    def _build_ring(self, sel, sk, loops, ring, direction, to_surface, objs, target, exclude=None):
         """_build_extrusion for a ring extrusion (see there). Sets self._last_ext = (start angle
         in rad, swept angle in deg)."""
         try:
@@ -25193,7 +25653,7 @@ class MainWindow(QMainWindow):
                                              float(ring.get("radius", 10.0)), ring.get("ref", "center"))
         except ValueError as ex:
             self._last_ring_error = str(ex); self._st(str(ex)); self._last_ring = None; return None
-        self._last_ring = (key, radius, ring_profile_extent(loops, key)[1])
+        self._last_ring = (key, radius, ring_profile_extent(loops, key, sk.frame)[1])
         helical = bool(ring.get("helical", False))
         height = float(ring.get("height", 20.0)) if helical else 0.0
         turns = float(ring.get("turns", 1.0)) if helical else 1.0
@@ -25208,7 +25668,8 @@ class MainWindow(QMainWindow):
         tools = []
         if to_surface:
             sides = (1, -1) if direction == "sym" else (-1,) if direction == "rev" else (1,)
-            r = self._ring_surface_extent(sk, loops, C, axis, sides, objs, target)
+            r = self._ring_surface_extent(sk, loops, C, axis, sides, objs, target,
+                                          exclude=exclude, sel=sel)
             if r is None: return None
             a0, a1, tools = r
         else:
@@ -25730,8 +26191,7 @@ class MainWindow(QMainWindow):
             self.cb_ext_extent.blockSignals(True); self.cb_ext_extent.setCurrentIndex(0)
             self.cb_ext_extent.blockSignals(False)
         self.cb_ext_extent.setItemText(self.cb_ext_extent.findData("dist"), "Angle" if ring else "Distance")
-        self.cb_ext_extent.setItemText(self.cb_ext_extent.findData("surface"),
-                                       "Face" if ring else "Surface")
+        self.cb_ext_extent.setItemText(self.cb_ext_extent.findData("surface"), "Surface")
         extent = self.cb_ext_extent.currentData() or "dist"
         helical = ring and self.chk_ring_helical.isChecked()
         surface_item = self.cb_ext_extent.model().item(self.cb_ext_extent.findData("surface"))
@@ -25744,6 +26204,9 @@ class MainWindow(QMainWindow):
             extent = "dist"
         self.lbl_ext_height.setVisible(not ring); self.sp_h.setVisible(not ring)
         self.w_ring.setVisible(ring)
+        sketch_axis = self.cb_ring_axis.currentData() not in RING_WORLD_AXES
+        self.cb_ring_ref.setEnabled(sketch_axis)            # a world axis fixes the radius
+        self.sp_ring_r.setEnabled(sketch_axis)
         self.sp_h.setEnabled(extent == "dist")
         self.sp_ring_angle.setVisible(not helical)
         self.lbl_ring_angle.setVisible(not helical)
@@ -25757,7 +26220,6 @@ class MainWindow(QMainWindow):
         t = self._ext_target
         self.lbl_ext_target.setText(
             f"Target: face {t['face']} of {t['entry']['name']}" if t and t.get("entry") is not None else
-            "Target: click a face in the 3D view to choose it" if ring else
             "Target: next surface (automatic) — click a face in the 3D view to choose it")
 
     def _set_ext_target(self, target):
@@ -25793,7 +26255,8 @@ class MainWindow(QMainWindow):
                                        if not (o.get("preview") and o.get("parent") is sel)]
                 self._apply_cuts(); self.view3d.update()
             if props["to_surface"] and not (props["ring"] and self._last_ring is None):
-                self._st("No face chosen or reached in the sweep direction" if props["ring"] else
+                self._st("No surface reached in the sweep direction (extrusion, sketch or "
+                         "coordinate plane, or the chosen face)" if props["ring"] else
                          "No surface found in the extrusion direction (extrusion, sketch plane or "
                          "coordinate plane)")
             return
@@ -26601,6 +27064,8 @@ class MainWindow(QMainWindow):
         if self.state["mode"] != MODE_NORMAL: self._cancel_sketch()
         if self._ext_pending is not None: self._cancel_extrude()
         if self._assembly_dialog is not None:
+            # the project save question was already answered (the assembly is part of it)
+            self._assembly_dialog._force_close = True
             self._assembly_dialog.close(); self._assembly_dialog = None
 
     def _file_new(self):
@@ -27087,7 +27552,30 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".obj"): path += ".obj"
         return self._save_to(path)
 
+    def _close_open_sketch(self):
+        """Closing the program from the sketcher: ask to cancel the sketch first. Returns
+        False if the user keeps sketching (the program stays open)."""
+        mode = self.state.get("mode")
+        if mode == MODE_SELSURFACE:
+            self._cancel_surface_pick()
+        elif mode == MODE_SELPLANE:
+            self._cancel_sketch()
+        elif mode == MODE_SKETCH and self.state.get("active_sketch") is not None:
+            question = ("Cancel editing this sketch? Its changes are discarded." if self._edit_entry
+                        else "Cancel the current sketch?")
+            if QMessageBox.question(self, "Cancel sketch", question,
+                                    QMessageBox.Yes | QMessageBox.No,
+                                    QMessageBox.No) != QMessageBox.Yes:
+                return False
+            self._cancel_sketch()
+        return True
+
     def closeEvent(self, e):
+        if not self._close_open_sketch():
+            e.ignore(); return
+        # an open assembly window asks about its own unsaved changes first (Cancel keeps it)
+        if self._assembly_dialog is not None and not self._assembly_dialog.close():
+            e.ignore(); return
         if self._maybe_save():
             if self._assembly_dialog is not None:
                 self._assembly_dialog.close()

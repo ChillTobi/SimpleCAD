@@ -4728,8 +4728,13 @@ def _manifold_csg(V, T, tri_face, cutters, cutter_ids, union):
                 if f["tris"]: ctf[np.asarray(f["tris"], int)] = fi
             bodies.append(solid(cv, ct, ci, ctf))
         if any(body is None for body in bodies): return None
-        result = _m3.Manifold.batch_boolean(
-            bodies, _m3.OpType.Add if union else _m3.OpType.Subtract).to_mesh64()
+        solid_result = _m3.Manifold.batch_boolean(
+            bodies, _m3.OpType.Add if union else _m3.OpType.Subtract)
+        if solid_result.status() != _m3.Error.NoError: return None
+        # A valid empty result (e.g. a tool lying completely inside the envelope it is
+        # clipped against) is an answer, not a failure: re-running it in the BSP is slow.
+        if solid_result.is_empty(): return [], [], []
+        result = solid_result.to_mesh64()
     except Exception as ex:
         _dbg(f"manifold3d boolean failed, using BSP: {ex}")
         return None
@@ -4780,7 +4785,8 @@ def csg_subtract(base, cutters, label="cut ", union=False):
         return _mesh_is_closed(r[1]) and vol_ok
 
     res = _manifold_csg(V, T, tri_face, cutters, ids, union)
-    if res is not None and not valid(res): res = None
+    # an empty Manifold subtraction is exact (the cutters swallow the whole base)
+    if res is not None and (union or res[1]) and not valid(res): res = None
     if res is None and len(far):
         res = _csg_run(base, cutters, ids, np.nonzero(near)[0], tri_face,
                        (V, T[far], [(-1, int(tri_face[k])) for k in far]), union=union)

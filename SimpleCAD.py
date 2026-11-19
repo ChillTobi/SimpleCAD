@@ -323,7 +323,8 @@ def _apply_dark_theme(app):
             padding: 2px 18px 2px 5px; min-height: 22px; max-width: 63px;
         }
         QInputDialog QDoubleSpinBox, QDoubleSpinBox#sketchDimension {
-            min-width: 9em; max-width: 16777215px;
+            min-width: 9em; max-width: 4000px;   /* lifts the 63px cap; padding + border must stay
+                                                   below Qt's 16777215 limit, or Qt warns */
         }
         QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
             subcontrol-origin: border; width: 16px;
@@ -447,7 +448,11 @@ def _json_default(obj):
     """JSON encoder default for NumPy arrays and scalars."""
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-    if isinstance(obj, (np.floating, np.integer)):
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)          # keep indices (faces, edges) integral in the file
+    if isinstance(obj, np.floating):
         return float(obj)
     return float(obj)
 
@@ -1996,6 +2001,25 @@ class Sketch:
         for group in self.text_groups: used |= group.vertices()
         return used
 
+    def _known_geometry(self):
+        """Every geometry object a constraint may legally refer to."""
+        return (set(self.vertices) | self.used_vertices() | set(self.segments) |
+                set(self.circles) | set(self.arcs) | set(self.ellipses))
+
+    def missing_refs(self, c, known=None):
+        """Geometry referenced by constraint c that is no longer part of this sketch."""
+        if known is None: known = self._known_geometry()
+        return {o for o in constraint_refs(c) if o is not None and o not in known}
+
+    def prune_dangling_constraints(self):
+        """Drop constraints that refer to deleted geometry (they cannot be solved or
+        saved). Returns the number of constraints removed."""
+        known = self._known_geometry()
+        keep = [c for c in self.constraints if not self.missing_refs(c, known)]
+        dropped = len(self.constraints) - len(keep)
+        if dropped: self.constraints = keep
+        return dropped
+
     def _edge_records(self):
         recs = [{"kind": "line", "a": s.v0, "b": s.v1, "pts": [s.v0.xy(), s.v1.xy()]}
                 for s in self.segments if not s.construction]
@@ -2512,6 +2536,9 @@ class Sketch:
     def try_add_constraint(self, c, prefer_lock=()):
         """Add c only if it removes at least one DOF (i.e. is not redundant / dependent on
         existing constraints) and can be satisfied. Returns (ok, message)."""
+        if self.missing_refs(c):        # e.g. a stale pick from before an undo / trim / delete
+            _dbg(f"try_add_constraint: rejected {type(c).__name__}, geometry no longer in sketch")
+            return False, "refers to geometry that no longer exists — pick it again"
         if isinstance(c, CDistance) and not c.driving:
             self.constraints.append(c)            # information only: never constrains
             return True, "information only"
@@ -11868,6 +11895,9 @@ def text_contours(text, font_family="Arial", font_size=12.0,
 
 def sketch_to_dict(sk):
     """Serialise a sketch (geometry + constraints) to plain JSON-able data."""
+    dropped = sk.prune_dangling_constraints()     # never let a stale reference break undo / save
+    if dropped:
+        _dbg(f"sketch_to_dict: dropped {dropped} constraint(s) referring to deleted geometry")
     for v in sk.used_vertices():
         if v not in sk.vertices: sk.vertices.append(v)
     vid = {v: i for i, v in enumerate(sk.vertices)}
@@ -22802,9 +22832,25 @@ class MainWindow(QMainWindow):
         return underlays
 
     def _project_sketch_level(self, active_sketch, underlay):
+        """Project the sketches of one underlying level into active_sketch as fixed references.
+        A level that was projected before is refreshed: references that still match are kept
+        (constraints on them stay valid), new geometry is added and geometry that no longer
+        exists in the source sketches is removed — so editing an underlying sketch (e.g. a
+        changed wall thickness) shows up here instead of the outline from creation time."""
         level = underlay["level"]
-        if level in active_sketch.reference_generated_levels:
-            return
+        refresh = level in active_sketch.reference_generated_levels
+
+        def generated(element):
+            # projected sketch geometry of this level; face outline references are refreshed
+            # separately (_refresh_face_references) and are never removed here
+            return getattr(element, "reference_level", None) == level and \
+                not hasattr(element, "reference_boundary")
+
+        stale = {key: [e for e in getattr(active_sketch, key) if e.reference and generated(e)]
+                 for key in ("segments", "circles")} if refresh else {}
+        stale_points = [p for p in active_sketch.points_free if p.locked and generated(p)] \
+            if refresh else []
+        kept = set()
         projected = copy.copy(active_sketch)
         for key in ("vertices", "segments", "circles", "arcs", "ellipses",
                     "points_free", "text_groups", "constraints"):
@@ -22837,6 +22883,7 @@ class MainWindow(QMainWindow):
                              {candidate.v0, candidate.v1} == {segment.v0, segment.v1}), None)
             target = existing if existing is not None else segment
             target.reference_level = level
+            kept.add(target)
             if existing is None:
                 active_sketch.segments.append(segment)
         for circle in projected.circles:
@@ -22848,13 +22895,39 @@ class MainWindow(QMainWindow):
                              abs(candidate.radius - circle.radius) < 1e-5), None)
             target = existing if existing is not None else circle
             target.reference_level = level
+            kept.add(target)
             if existing is None:
                 active_sketch.circles.append(circle)
         for point in projected.points_free:
+            kept.add(mapped[point])
             if mapped[point] not in active_sketch.points_free:
                 active_sketch.points_free.append(mapped[point])
-        active_sketch.reference_generated_levels.append(level)
+        if refresh:
+            MainWindow._drop_stale_references(active_sketch, level, stale, stale_points, kept)
+        else:
+            active_sketch.reference_generated_levels.append(level)
         active_sketch._an_key = None
+
+    @staticmethod
+    def _drop_stale_references(sk, level, stale, stale_points, kept):
+        """Remove projected references of a level that the fresh projection did not reproduce.
+        Anything a constraint still uses is left in place rather than breaking the constraint."""
+        used = set()
+        for c in sk.constraints:
+            used |= constraint_refs(c)
+        gone = {e for items in stale.values() for e in items if e not in kept and e not in used}
+        gone_points = {p for p in stale_points if p not in kept and p not in used}
+        if not (gone or gone_points):
+            return
+        before = sk.used_vertices()
+        sk.segments = [s for s in sk.segments if s not in gone]
+        sk.circles = [c for c in sk.circles if c not in gone]
+        sk.points_free = [p for p in sk.points_free if p not in gone_points]
+        orphans = {v for v in before - sk.used_vertices()
+                   if v.locked and getattr(v, "reference_level", None) == level and v not in used}
+        sk.vertices = [v for v in sk.vertices if v not in orphans]
+        _dbg(f"{sk.name}: refreshed level {level:+g} mm, removed {len(gone)} stale reference "
+             f"element(s) and {len(gone_points)} point(s)")
 
     def _populate_sketch_levels(self, sk, underlays):
         self.sketch_levels.blockSignals(True)

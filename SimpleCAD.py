@@ -207,7 +207,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QPushButton, QFrame, QInputDialog, QListWidget, QListWidgetItem, QMenu, QScrollArea,
     QShortcut, QFormLayout, QColorDialog, QDialog, QDialogButtonBox, QPlainTextEdit, QToolButton,
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QKeySequenceEdit, QTabWidget, QStyle,
-    QComboBox, QMenuBar, QSizePolicy, QGridLayout, QAbstractItemView, QProgressBar
+    QComboBox, QMenuBar, QSizePolicy, QGridLayout, QAbstractItemView, QProgressBar, QHeaderView
 )
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QByteArray, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
@@ -460,6 +460,14 @@ from OpenGL.GLU import *
 from PyQt5.QtOpenGL import QGLFormat, QGLWidget
 
 # ── constants ─────────────────────────────────────────────────────────────────
+# Sketches under the same body in the object explorer as the edited sketch (display only):
+SIBLING_SAME_HEIGHT  = (255, 225, 60, 235)    # same physical height: bright yellow
+SIBLING_OTHER_HEIGHT = (175, 145, 30, 220)    # physically lower / higher: darker yellow
+# 3-D face highlighting (RGBA 0..1): light green under the cursor, darker green when selected
+FACE_HOVER_FILL       = (0.55, 1.0, 0.55, 0.8)
+FACE_HOVER_OUTLINE    = (0.75, 1.0, 0.75, 1.0)
+FACE_SELECTED_FILL    = (0.15, 0.62, 0.22, 0.85)
+FACE_SELECTED_OUTLINE = (0.05, 0.42, 0.12, 1.0)
 DEFAULT_GRID = 10.0
 DEFAULT_SNAP = 5.0
 DEFAULT_SHORTCUTS = {
@@ -1470,6 +1478,12 @@ def face_reference_sketch(face, frame):
         element.reference_boundary = index
     return sk
 
+def _tag_reference_source(element, source, kind, index):
+    """Remember which source-sketch element a projected reference was made from, so a later
+    refresh moves this reference (and everything constrained to it) instead of replacing it."""
+    if index is not None:
+        element.reference_source = (str(source.name), kind, int(index))
+
 def project_sketch_segments(source, target):
     """Add source sketch lines to a face sketch as fixed reference segments."""
     origin, axis_u, axis_v, _ = (np.asarray(axis, float) for axis in target.frame)
@@ -1481,7 +1495,8 @@ def project_sketch_segments(source, target):
     boundary_a = np.asarray([segment.v0.xy() for segment in boundary], dtype=float).reshape(-1, 2)
     boundary_b = np.asarray([segment.v1.xy() for segment in boundary], dtype=float).reshape(-1, 2)
     mapped_vertices = {}
-    for segment in source.segments:
+    vertex_index = {vertex: i for i, vertex in enumerate(source.vertices)}
+    for segment_index, segment in enumerate(source.segments):
         if segment.reference:
             continue
         a, b = project(segment.v0), project(segment.v1)
@@ -1495,20 +1510,25 @@ def project_sketch_segments(source, target):
         va = mapped_vertices.get(segment.v0)
         if va is None:
             va = Vertex(*a, locked=True)
+            _tag_reference_source(va, source, "v", vertex_index.get(segment.v0))
             mapped_vertices[segment.v0] = va
             target.vertices.append(va)
         vb = mapped_vertices.get(segment.v1)
         if vb is None:
             vb = Vertex(*b, locked=True)
+            _tag_reference_source(vb, source, "v", vertex_index.get(segment.v1))
             mapped_vertices[segment.v1] = vb
             target.vertices.append(vb)
         if va is not vb:
-            target.segments.append(Segment(va, vb, reference=True))
+            projected = Segment(va, vb, reference=True)
+            _tag_reference_source(projected, source, "s", segment_index)
+            target.segments.append(projected)
 
 def project_sketch_points(source, target):
     """Project standalone source points into a face sketch as fixed reference points."""
     origin, axis_u, axis_v, _ = (np.asarray(axis, float) for axis in target.frame)
     projected = 0
+    vertex_index = {vertex: i for i, vertex in enumerate(source.vertices)}
     for point in source.points_free:
         if point.locked:
             continue
@@ -1522,6 +1542,7 @@ def project_sketch_points(source, target):
                 projected += 1
             continue
         vertex = Vertex(*xy, locked=True)
+        _tag_reference_source(vertex, source, "v", vertex_index.get(point))
         target.vertices.append(vertex)
         target.points_free.append(vertex)
         projected += 1
@@ -1534,7 +1555,8 @@ def project_sketch_circles(source, target):
         np.asarray(axis, dtype=float) for axis in target.frame)
     if abs(float(source_normal @ target_normal)) < 1.0 - 1e-6:
         return
-    for circle in source.circles:
+    vertex_index = {vertex: i for i, vertex in enumerate(source.vertices)}
+    for circle_index, circle in enumerate(source.circles):
         if circle.reference:
             continue
         center = np.asarray(source.to3d(circle.center.xy()), dtype=float) - target_origin
@@ -1548,8 +1570,11 @@ def project_sketch_circles(source, target):
                        if v.locked and math.dist(v.xy(), xy) < 1e-6), None)
         if vertex is None:
             vertex = Vertex(*xy, locked=True)
+            _tag_reference_source(vertex, source, "v", vertex_index.get(circle.center))
             target.vertices.append(vertex)
-        target.circles.append(Circle(vertex, circle.radius, reference=True))
+        projected = Circle(vertex, circle.radius, reference=True)
+        _tag_reference_source(projected, source, "c", circle_index)
+        target.circles.append(projected)
 
 def project_sketch_curves(source, target):
     """Project source arcs and non-parallel circles as fixed polylines."""
@@ -6366,6 +6391,7 @@ class View3D(QGLWidget):
         self._press_pos = None
         self._arc_last_ang = None
         self._dim_hits  = []      # [(constraint, kind, data, text polygon, dim-line pts)] from last paint
+        self._con_glyphs = []     # [(constraint, kind, data)] clickable constraint symbols
         self._drag_dim  = None    # dimension being repositioned
         self._drag_origin = None  # {vertex: (x,y)} at drag start
         self._drag_start_mm = None
@@ -7547,9 +7573,9 @@ class View3D(QGLWidget):
                               face["planar"] or self._mode == MODE_SELSURFACE
                 highlight_depth(stack_level, True)
                 glDepthFunc(GL_LEQUAL)
-                glColor4f(1.0, 0.95, 0.35, 0.20) if planar_pick else glColor4f(1.0, 0.4, 0.4, 0.9)
+                glColor4f(*FACE_HOVER_FILL) if planar_pick else glColor4f(1.0, 0.4, 0.4, 0.9)
                 self._draw_face_triangles(entry, hot_fi)
-                glColor4f(1.0, 1.0, 1.0, 1.0); glLineWidth(2.5)
+                glColor4f(*FACE_HOVER_OUTLINE); glLineWidth(2.5)
                 self._draw_face_outline(entry, hot_fi)
                 glDepthFunc(GL_LESS)
                 highlight_depth(stack_level, False)
@@ -7562,9 +7588,9 @@ class View3D(QGLWidget):
                 glEnable(GL_LIGHTING)
                 highlight_depth(stack_level, True)
                 glDepthFunc(GL_LEQUAL)
-                glColor4f(0.6, 0.8, 1.0, 0.9)
+                glColor4f(*FACE_SELECTED_FILL)
                 self._draw_face_triangles(entry, _sf[1])
-                glColor4f(0.0, 0.5, 1.0, 1.0); glLineWidth(3.0)
+                glColor4f(*FACE_SELECTED_OUTLINE); glLineWidth(3.0)
                 self._draw_face_outline(entry, _sf[1])
                 glDepthFunc(GL_LESS)
                 highlight_depth(stack_level, False)
@@ -8148,7 +8174,10 @@ class View3D(QGLWidget):
 
     def _paint_sketch(self, p, sk):
         sv = self.state.get("sketch_view_state", {})
-        levels = {item["level"]: item for item in sv.get("underlays", [])}
+        levels = {item["level"]: item for item in sv.get("underlays", []) if not item.get("sibling")}
+        # clickable constraint symbols of this paint: [(constraint, kind, data)] with kind
+        # "rect" (data: QRectF) or "ring" (data: (centre QPointF, inner px, outer px))
+        self._con_glyphs = []
 
         def visible(geometry):
             level = getattr(geometry, "reference_level", None)
@@ -8195,6 +8224,7 @@ class View3D(QGLWidget):
 
         hv_marks = {c.seg: ("H" if isinstance(c, CHorizontal) else "V")
                     for c in sk.constraints if isinstance(c, (CHorizontal, CVertical))}
+        hv_constraint = {c.seg: c for c in sk.constraints if isinstance(c, (CHorizontal, CVertical))}
 
         # segments
         ctool        = sv.get("ctool", CTOOL_NONE)
@@ -8223,6 +8253,8 @@ class View3D(QGLWidget):
                 mid=self.to_px(seg.midpoint())
                 p.setFont(QFont("Arial",7))
                 p.drawText(mid.toPoint(), f" {hv_marks[seg]}")
+                self._con_glyphs.append((hv_constraint[seg], "rect",
+                                         QRectF(mid.x() + 1, mid.y() - 10, 11, 12)))
             elif not defined and not seg.construction:
                 mid=self.to_px(seg.midpoint())
                 p.setPen(QColor(255,80,80)); p.setFont(QFont("Arial",8))
@@ -8232,7 +8264,9 @@ class View3D(QGLWidget):
                 if isinstance(c,CPerpendicular):
                     for sa,sb in [(c.seg_a,c.seg_b),(c.seg_b,c.seg_a)]:
                         if sa is seg:
-                            self._draw_perp_mark(p, sa, sb)
+                            rect = self._draw_perp_mark(p, sa, sb)
+                            if rect is not None:
+                                self._con_glyphs.append((c, "rect", rect))
 
         # circles
         for ci, circ in enumerate(sk.circles):
@@ -8346,6 +8380,7 @@ class View3D(QGLWidget):
             p.setPen(QPen(QColor(255,110,255),1.5)); p.setBrush(Qt.NoBrush)
             p.drawEllipse(pp, 7, 7)
             p.drawLine(QPointF(pp.x()-ux*12, pp.y()-uy*12), QPointF(pp.x()+ux*12, pp.y()+uy*12))
+            self._con_glyphs.append((c, "ring", (pp, 4.5, 10.0)))
         for c in sk.constraints:
             if not isinstance(c, CPointOnCurve): continue
             pp = self.to_px(c.vertex.xy()); cp = self.to_px(c.curve.center.xy())
@@ -8354,6 +8389,7 @@ class View3D(QGLWidget):
             p.setPen(QPen(QColor(255,110,255),1.5)); p.setBrush(Qt.NoBrush)
             p.drawEllipse(pp, 7, 7)
             p.drawLine(QPointF(pp.x()-ux*12, pp.y()-uy*12), QPointF(pp.x()+ux*12, pp.y()+uy*12))
+            self._con_glyphs.append((c, "ring", (pp, 4.5, 10.0)))
 
         # dimensions (technical drawing style, user-movable)
         self._paint_dimensions(p, sk)
@@ -8517,7 +8553,7 @@ class View3D(QGLWidget):
         for g in constraint_refs(c):
             level = getattr(g, "reference_level", None)
             if level is not None and not any(
-                    item["level"] == level and item["visible"]
+                    item["level"] == level and item["visible"] and not item.get("sibling")
                     for item in self.state.get("sketch_view_state", {}).get("underlays", [])):
                 continue
             p.setPen(glow)
@@ -8848,10 +8884,11 @@ class View3D(QGLWidget):
         shared = None
         if sa.v1 is sb.v0: shared = sa.v1
         elif sa.v0 is sb.v1: shared = sa.v0
-        if not shared: return
+        if not shared: return None
         pp=self.to_px(shared.xy())
         p.setPen(QPen(QColor(180,180,255),1)); p.setBrush(Qt.NoBrush)
         p.drawRect(int(pp.x()-4),int(pp.y()-4),8,8)
+        return QRectF(pp.x()-6, pp.y()-6, 12, 12)       # hit area of the mark
 
     def _paint_hud(self, p):
         sk = self.state.get("active_sketch")
@@ -9178,6 +9215,34 @@ class View3D(QGLWidget):
                 if seg_dist_px(px.x(), px.y(), a.x(), a.y(), b.x(), b.y()) < 4:
                     return (c, kind, data)
         return None
+
+    def _con_glyph_at(self, px):
+        """Constraint whose drawn symbol (H/V letter, perpendicular square, point-on ring)
+        is under the cursor, or None."""
+        for c, kind, data in reversed(self._con_glyphs):
+            if kind == "rect" and data.contains(px):
+                return c
+            if kind == "ring":
+                centre, inner, outer = data
+                if inner <= math.hypot(px.x()-centre.x(), px.y()-centre.y()) <= outer:
+                    return c
+        return None
+
+    def _select_constraint_in_list(self, sk, c):
+        """Mark constraint c in the panel's constraint list (it then glows in the drawing)."""
+        mw = self._main_window
+        if mw is None or sk is None or c not in sk.constraints:
+            return
+        panel = mw.sketch_panel
+        panel.refresh(sk)                    # the list mirrors sk.constraints row by row
+        row = sk.constraints.index(c)
+        if panel.lst_con.currentRow() != row:
+            panel.lst_con.setCurrentRow(row)
+        else:
+            panel._on_con_row(row)
+        item = panel.lst_con.item(row)
+        if item is not None:
+            panel.lst_con.scrollToItem(item)
 
     def _dim_pick(self, sk, px):
         """Dimension under the cursor: its text always wins; its lines only when no sketch
@@ -9642,7 +9707,16 @@ class View3D(QGLWidget):
         if hit is not None:
             self._drag_dim = hit; self._rband_start = None
             sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["_sel_segs"] = []
+            self._select_constraint_in_list(sk, hit[0])
             self._sel_info = f"{describe_constraint(sk, hit[0])}  — drag to move, double-click to edit"
+            self.sigSelInfo.emit(self._sel_info); self.update(); return
+        # other constraint symbols select their constraint (a vertex right under the cursor wins)
+        glyph = self._con_glyph_at(px) if self._near_vtx(sk, px, thr=4.0) is None else None
+        if glyph is not None:
+            self._rband_start = None
+            sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["_sel_segs"] = []
+            self._select_constraint_in_list(sk, glyph)
+            self._sel_info = describe_constraint(sk, glyph)
             self.sigSelInfo.emit(self._sel_info); self.update(); return
         # single-item selection
         vi = self._near_vtx(sk, px, thr=6.0)
@@ -10990,7 +11064,7 @@ class View3D(QGLWidget):
             return False
         levels = sv.get("underlays", [])
         return any(item["level"] == level and item["visible"] and item["reference"]
-                   for item in levels)
+                   and not item.get("sibling") for item in levels)
 
     def _near_arc(self, sk, px, thr=12.0):
         """Return index of the arc whose curve is within thr px of px."""
@@ -11372,7 +11446,7 @@ class SketchPanel(QFrame):
         self.lst_con.currentRowChanged.connect(self._on_con_row)
         self.lst_con.itemDoubleClicked.connect(
             lambda it: self.sigConstraintEdit.emit(self.lst_con.row(it)))
-        lay.addWidget(self.lst_con)
+        lay.addWidget(self.lst_con, 1)          # takes all spare height of the panel
         row=QHBoxLayout()
         self.btn_con_del=QPushButton("🗑 Remove"); self.btn_con_del.setEnabled(False)
         self.btn_con_del.setToolTip("Remove the selected constraint")
@@ -11386,10 +11460,13 @@ class SketchPanel(QFrame):
         self.lbl_issues.setStyleSheet("color:#ff6060;font-size:10px;"); lay.addWidget(self.lbl_issues)
         self.lbl_sel=QLabel(""); self.lbl_sel.setWordWrap(True)
         self.lbl_sel.setStyleSheet("color:#80c8ff;font-size:10px;"); lay.addWidget(self.lbl_sel)
+        # Accept / Cancel sit at the bottom of the panel (the constraint list stretches above)
+        lay.addWidget(self._sep())
+        buttons=QHBoxLayout()
         self.btn_accept=QPushButton("✔ Accept"); self.btn_accept.setEnabled(False)
-        self.btn_accept.clicked.connect(self.sigAccept); lay.addWidget(self.btn_accept)
+        self.btn_accept.clicked.connect(self.sigAccept); buttons.addWidget(self.btn_accept)
         self.btn_cancel=QPushButton("✖ Cancel"); self.btn_cancel.clicked.connect(self.sigCancel)
-        lay.addWidget(self.btn_cancel); lay.addStretch()
+        buttons.addWidget(self.btn_cancel); lay.addLayout(buttons)
 
     def _sep(self):
         f=QFrame(); f.setFrameShape(QFrame.HLine); f.setFrameShadow(QFrame.Sunken); return f
@@ -11423,6 +11500,9 @@ class SketchPanel(QFrame):
         self.lst_con.clear()
         for _, text in sig: self.lst_con.addItem(text)
         row = self._con_ids.index(cur_id) if cur_id in self._con_ids else -1
+        pending, self._pending_row = getattr(self, "_pending_row", None), None
+        if row < 0 and pending is not None and self._con_ids:
+            row = min(pending, len(self._con_ids) - 1)   # after a removal: the one below it
         self.lst_con.setCurrentRow(row)
         self.lst_con.blockSignals(False)
         self._on_con_row(row)
@@ -11952,7 +12032,12 @@ def sketch_to_dict(sk):
                       if hasattr(element, "reference_level")}
                 for key, elements in (("vertices", sk.vertices), ("segments", sk.segments),
                                       ("circles", sk.circles), ("arcs", sk.arcs),
-                                      ("ellipses", sk.ellipses))}}
+                                      ("ellipses", sk.ellipses))},
+            "reference_sources": {
+                key: {str(i): list(element.reference_source) for i, element in enumerate(elements)
+                      if hasattr(element, "reference_source")}
+                for key, elements in (("vertices", sk.vertices), ("segments", sk.segments),
+                                      ("circles", sk.circles))}}
 
 def sketch_from_dict(d):
     return sketch_fill(Sketch(d["plane"], name=d["name"], frame=d["frame"]), d)
@@ -11976,6 +12061,10 @@ def sketch_fill(sk, d):
         elements = getattr(sk, key)
         for index, level in d.get("reference_levels", {}).get(key, {}).items():
             elements[int(index)].reference_level = level
+    for key in ("vertices", "segments", "circles"):
+        elements = getattr(sk, key)
+        for index, source in d.get("reference_sources", {}).get(key, {}).items():
+            elements[int(index)].reference_source = (str(source[0]), str(source[1]), int(source[2]))
     sk.points_free = [V[i] for i in d["points_free"]]
     sk.text_groups = []
     for group in d.get("text_groups", []):
@@ -19144,9 +19233,15 @@ class MainWindow(QMainWindow):
         self._dock_sketch_levels.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
         self.sketch_levels = QTreeWidget()
         self.sketch_levels.setColumnCount(2)
-        self.sketch_levels.setHeaderLabels(["Level / sketch", "Reference"])
+        self.sketch_levels.setHeaderLabels(["Level / sketch", "Ref"])
+        self.sketch_levels.headerItem().setToolTip(1, "Use the level as constraint reference")
         self.sketch_levels.setToolTip(
             "Toggle level visibility and allow visible underlying levels as constraint references.")
+        header = self.sketch_levels.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)     # sketch names get the room
+        header.setSectionResizeMode(1, QHeaderView.Fixed)       # just the reference checkbox
+        self.sketch_levels.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sketch_levels.itemChanged.connect(self._on_sketch_level_changed)
         self._dock_sketch_levels.setWidget(self.sketch_levels)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._dock_sketch_levels)
@@ -22789,8 +22884,14 @@ class MainWindow(QMainWindow):
         sk.legacy_reference_levels = False
 
     def _collect_sketch_underlays(self, active_sketch):
+        """Parallel sketches grouped by height relative to active_sketch. Sketches that hang
+        off the same body in the object explorer (siblings, e.g. two sketches on faces of one
+        extrusion) form their own groups: shown in yellow — bright on the same height, darker
+        when physically lower/higher — and never usable as references."""
         origin, axis_u, axis_v, normal = (
             np.asarray(axis, dtype=float) for axis in active_sketch.frame)
+        sketch_parent = getattr(self, "_sketch_parent", None)
+        explorer_parent = sketch_parent[0] if sketch_parent else None
         levels = {}
         for entry in self.state.get("objects", []):
             if entry.get("type") != "sketch" or entry.get("preview") or \
@@ -22813,23 +22914,34 @@ class MainWindow(QMainWindow):
                      for points, _ in sketch_polylines(source)]
             own_points = [point.xy() for point in source.points_free if not point.locked]
             points = project(own_points).tolist() if own_points else []
-            item = levels.setdefault(level, {"level": level, "entries": [], "paths": [],
-                                             "points": [], "visible": True,
-                                             "reference": False})
+            sibling = explorer_parent is not None and entry.get("parent") is explorer_parent
+            item = levels.setdefault((level, sibling), {"level": level, "entries": [], "paths": [],
+                                                        "points": [], "visible": True,
+                                                        "reference": False, "sibling": sibling})
             item["entries"].append(entry)
             item["paths"].extend(paths)
             item["points"].extend(points)
-        underlays = [levels[level] for level in sorted(levels, reverse=True)]
+        underlays = [levels[key] for key in sorted(levels, key=lambda k: (-k[0], k[1]))]
+        physical = [item for item in underlays if not item["sibling"]]
         for side in (-1, 1):
-            ordered = sorted((item for item in underlays if item["level"] * side > 0),
+            ordered = sorted((item for item in physical if item["level"] * side > 0),
                              key=lambda item: abs(item["level"]))
             for index, item in enumerate(ordered):
                 factor = 1.0 - 0.55 * index / max(1, len(ordered) - 1)
                 base = (190, 150, 255) if side < 0 else (245, 90, 90)
                 item["color"] = tuple(int(value * factor) for value in base) + (230,)
-        if 0.0 in levels:
-            levels[0.0]["color"] = (225, 170, 95, 210)
+        if (0.0, False) in levels:
+            levels[(0.0, False)]["color"] = (225, 170, 95, 210)
+        for item in underlays:
+            if item["sibling"]:
+                item["color"] = SIBLING_SAME_HEIGHT if item["level"] == 0 else SIBLING_OTHER_HEIGHT
         return underlays
+
+    @staticmethod
+    def _reference_underlays(underlays):
+        """{level: underlay} of the groups whose geometry can be projected / referenced
+        (sibling sketches from the object explorer are display-only)."""
+        return {item["level"]: item for item in underlays if not item.get("sibling")}
 
     def _project_sketch_level(self, active_sketch, underlay):
         """Project the sketches of one underlying level into active_sketch as fixed references.
@@ -22847,9 +22959,12 @@ class MainWindow(QMainWindow):
                 not hasattr(element, "reference_boundary")
 
         stale = {key: [e for e in getattr(active_sketch, key) if e.reference and generated(e)]
-                 for key in ("segments", "circles")} if refresh else {}
-        stale_points = [p for p in active_sketch.points_free if p.locked and generated(p)] \
-            if refresh else []
+                 for key in ("segments", "circles")}
+        stale_points = [p for p in active_sketch.points_free if p.locked and generated(p)]
+        # A face sketch gets its profile sketch projected when it is created (_on_face_selected)
+        # without the level being recorded — such existing projections must be refreshed too,
+        # otherwise the outline from creation time stays next to the current one.
+        refresh = refresh or any(stale.values()) or bool(stale_points)
         kept = set()
         projected = copy.copy(active_sketch)
         for key in ("vertices", "segments", "circles", "arcs", "ellipses",
@@ -22864,13 +22979,41 @@ class MainWindow(QMainWindow):
         # A supporting face can already contain the projected outline. Reuse those
         # references so its explorer level controls the same geometry that is picked.
         mapped = {}
+        moved = False
         text_vertices = active_sketch.text_vertices()
+        outline = [e for e in active_sketch.segments + active_sketch.circles + active_sketch.arcs
+                   if hasattr(e, "reference_boundary")]
+        outline_vertices = {v for e in outline for v in
+                            ((e.v0, e.v1) if isinstance(e, Segment) else
+                             (e.center,) if isinstance(e, Circle) else (e.center, e.v_start, e.v_end))}
+
+        def same_source(candidate, element):
+            key = getattr(element, "reference_source", None)
+            return key is not None and getattr(candidate, "reference_source", None) == key and \
+                getattr(candidate, "reference_level", None) == level
+
+        def adopt(target, element):
+            # an older reference found by position learns its source, so the next refresh can
+            # move it; face outline geometry is driven by the face and is never re-linked
+            if hasattr(element, "reference_source") and not hasattr(target, "reference_boundary") \
+                    and target not in outline_vertices:
+                target.reference_source = element.reference_source
+
         for vertex in projected.vertices:
             existing = next((candidate for candidate in active_sketch.vertices
-                             if candidate.locked and
-                             getattr(candidate, "reference_level", level) == level and
-                             candidate not in text_vertices and
-                             math.dist(candidate.xy(), vertex.xy()) < 1e-5), None)
+                             if candidate.locked and candidate not in outline_vertices and
+                             same_source(candidate, vertex)), None)
+            if existing is not None and math.dist(existing.xy(), vertex.xy()) > 1e-9:
+                existing.x, existing.y = vertex.x, vertex.y      # the source moved: follow it
+                moved = True
+            if existing is None:
+                existing = next((candidate for candidate in active_sketch.vertices
+                                 if candidate.locked and
+                                 getattr(candidate, "reference_level", level) == level and
+                                 candidate not in text_vertices and
+                                 math.dist(candidate.xy(), vertex.xy()) < 1e-5), None)
+                if existing is not None:
+                    adopt(existing, vertex)
             mapped[vertex] = existing if existing is not None else vertex
             mapped[vertex].reference_level = level
             if existing is None:
@@ -22878,9 +23021,17 @@ class MainWindow(QMainWindow):
         for segment in projected.segments:
             segment.v0, segment.v1 = mapped[segment.v0], mapped[segment.v1]
             existing = next((candidate for candidate in active_sketch.segments
-                             if candidate.reference and
-                             getattr(candidate, "reference_level", level) == level and
-                             {candidate.v0, candidate.v1} == {segment.v0, segment.v1}), None)
+                             if candidate.reference and same_source(candidate, segment)), None)
+            if existing is not None and {existing.v0, existing.v1} != {segment.v0, segment.v1}:
+                existing.v0, existing.v1 = segment.v0, segment.v1
+                moved = True
+            if existing is None:
+                existing = next((candidate for candidate in active_sketch.segments
+                                 if candidate.reference and
+                                 getattr(candidate, "reference_level", level) == level and
+                                 {candidate.v0, candidate.v1} == {segment.v0, segment.v1}), None)
+                if existing is not None:
+                    adopt(existing, segment)
             target = existing if existing is not None else segment
             target.reference_level = level
             kept.add(target)
@@ -22889,10 +23040,19 @@ class MainWindow(QMainWindow):
         for circle in projected.circles:
             circle.center = mapped[circle.center]
             existing = next((candidate for candidate in active_sketch.circles
-                             if candidate.reference and
-                             getattr(candidate, "reference_level", level) == level and
-                             candidate.center is circle.center and
-                             abs(candidate.radius - circle.radius) < 1e-5), None)
+                             if candidate.reference and same_source(candidate, circle)), None)
+            if existing is not None and (existing.center is not circle.center or
+                                         abs(existing.radius - circle.radius) > 1e-9):
+                existing.center, existing.radius = circle.center, circle.radius
+                moved = True
+            if existing is None:
+                existing = next((candidate for candidate in active_sketch.circles
+                                 if candidate.reference and
+                                 getattr(candidate, "reference_level", level) == level and
+                                 candidate.center is circle.center and
+                                 abs(candidate.radius - circle.radius) < 1e-5), None)
+                if existing is not None:
+                    adopt(existing, circle)
             target = existing if existing is not None else circle
             target.reference_level = level
             kept.add(target)
@@ -22903,22 +23063,69 @@ class MainWindow(QMainWindow):
             if mapped[point] not in active_sketch.points_free:
                 active_sketch.points_free.append(mapped[point])
         if refresh:
-            MainWindow._drop_stale_references(active_sketch, level, stale, stale_points, kept)
-        else:
+            moved |= MainWindow._drop_stale_references(active_sketch, level, stale,
+                                                       stale_points, kept)
+        if level not in active_sketch.reference_generated_levels:
             active_sketch.reference_generated_levels.append(level)
+        if moved and not active_sketch.solve():     # geometry constrained to the references follows
+            _dbg(f"{active_sketch.name}: constraints cannot follow the refreshed level {level:+g} mm")
         active_sketch._an_key = None
+
+    @staticmethod
+    def _release_unreferenceable_levels(sk, underlays):
+        """A height that now only holds sibling sketches (same body in the object explorer)
+        cannot be referenced: drop geometry projected from it earlier and untag the face
+        outline, which then stays visible / pickable like an ordinary face reference."""
+        available = {item["level"] for item in underlays if not item.get("sibling")}
+        display_only = {item["level"] for item in underlays if item.get("sibling")} - available
+        if not display_only:
+            return
+        keys = ("vertices", "segments", "circles", "arcs", "ellipses")
+        if not any(getattr(e, "reference_level", None) in display_only
+                   for key in keys for e in getattr(sk, key)):
+            return
+        used = set()
+        for c in sk.constraints:
+            used |= constraint_refs(c)
+        released = lambda e: getattr(e, "reference_level", None) in display_only
+        projected = lambda e: e.reference and released(e) and not hasattr(e, "reference_boundary")
+        gone = {e for e in sk.segments + sk.circles if projected(e) and e not in used}
+        gone_points = {p for p in sk.points_free if p.locked and released(p) and p not in used}
+        before = sk.used_vertices()
+        sk.segments = [s for s in sk.segments if s not in gone]
+        sk.circles = [c for c in sk.circles if c not in gone]
+        sk.points_free = [p for p in sk.points_free if p not in gone_points]
+        orphans = {v for v in before - sk.used_vertices()
+                   if v.locked and released(v) and v not in used}
+        sk.vertices = [v for v in sk.vertices if v not in orphans]
+        for key in keys:                       # whatever stays is no longer tied to that level
+            for element in getattr(sk, key):
+                if released(element):
+                    del element.reference_level
+        sk.reference_generated_levels = [lv for lv in sk.reference_generated_levels
+                                         if lv not in display_only]
+        sk._an_key = None
+        _dbg(f"{sk.name}: level(s) {sorted(display_only)} only hold sketches of the same body; "
+             f"removed {len(gone)} projected reference(s)")
 
     @staticmethod
     def _drop_stale_references(sk, level, stale, stale_points, kept):
         """Remove projected references of a level that the fresh projection did not reproduce.
         Anything a constraint still uses is left in place rather than breaking the constraint."""
-        used = set()
-        for c in sk.constraints:
-            used |= constraint_refs(c)
+        def used_refs():
+            refs = set()
+            for c in sk.constraints:
+                refs |= constraint_refs(c)
+            return refs
+
+        used = used_refs()
+        retargeted = MainWindow._retarget_stale_segments(sk, stale.get("segments", []), kept, used)
+        if retargeted:
+            used = used_refs()
         gone = {e for items in stale.values() for e in items if e not in kept and e not in used}
         gone_points = {p for p in stale_points if p not in kept and p not in used}
         if not (gone or gone_points):
-            return
+            return retargeted
         before = sk.used_vertices()
         sk.segments = [s for s in sk.segments if s not in gone]
         sk.circles = [c for c in sk.circles if c not in gone]
@@ -22928,6 +23135,68 @@ class MainWindow(QMainWindow):
         sk.vertices = [v for v in sk.vertices if v not in orphans]
         _dbg(f"{sk.name}: refreshed level {level:+g} mm, removed {len(gone)} stale reference "
              f"element(s) and {len(gone_points)} point(s)")
+        return retargeted
+
+    @staticmethod
+    def _retarget_stale_segments(sk, stale, kept, used):
+        """Older projected lines carry no source link, so a changed source line is reprojected
+        as a new line while constraints still hold the old one. Move such constraints to the
+        replacement: lines are grouped by direction and side of the origin and paired by their
+        distance from it (outer ↔ outer, inner ↔ inner). Ambiguous groups are left alone."""
+        old = [s for s in stale if s not in kept and s in used]
+        if not old:
+            return False
+
+        def signature(s):
+            d = np.subtract(s.v1.xy(), s.v0.xy()); length = float(np.hypot(*d))
+            if length < 1e-9:
+                return None
+            d = d / length
+            if d[0] < -1e-9 or (abs(d[0]) <= 1e-9 and d[1] < 0):
+                d = -d
+            offset = float(np.array((-d[1], d[0])) @ np.asarray(s.v0.xy(), float))
+            return (round(float(d[0]), 6), round(float(d[1]), 6), offset > 0), abs(offset)
+
+        preexisting = set(stale)
+        new = [s for s in kept if isinstance(s, Segment) and not hasattr(s, "reference_boundary")
+               and s not in used]
+        pairs = []
+        for pool in ([s for s in new if s not in preexisting], new):   # freshly added lines first
+            groups = {}
+            for kind, items in ((0, old), (1, pool)):
+                for s in items:
+                    sig = signature(s)
+                    if sig is not None:
+                        groups.setdefault(sig[0], ([], []))[kind].append((sig[1], s))
+            pairs = []
+            for olds, news in groups.values():
+                if olds and len(olds) == len(news):
+                    pairs += list(zip((s for _, s in sorted(olds, key=lambda t: t[0])),
+                                      (s for _, s in sorted(news, key=lambda t: t[0]))))
+            if pairs:
+                break
+        if not pairs:
+            return False
+        replace = {}
+        for o, n in pairs:
+            same_way = float(np.subtract(o.v1.xy(), o.v0.xy()) @ np.subtract(n.v1.xy(), n.v0.xy())) > 0
+            replace[o] = n
+            replace.setdefault(o.v0, n.v0 if same_way else n.v1)
+            replace.setdefault(o.v1, n.v1 if same_way else n.v0)
+        def swap(value):
+            if not isinstance(value, (Vertex, Segment)):
+                return value
+            return replace.get(value, value)
+
+        for c in sk.constraints:
+            for attr, value in list(vars(c).items()):
+                if isinstance(value, tuple):
+                    setattr(c, attr, tuple(swap(item) for item in value))
+                else:
+                    setattr(c, attr, swap(value))
+        _dbg(f"{sk.name}: moved constraints from {len(pairs)} outdated reference line(s) "
+             f"to their current position")
+        return True
 
     def _populate_sketch_levels(self, sk, underlays):
         self.sketch_levels.blockSignals(True)
@@ -22938,29 +23207,51 @@ class MainWindow(QMainWindow):
             level = item["level"]
             label = "Same level" if level == 0 else \
                     ("Below" if level < 0 else "Above") + f" ({level:+g} mm)"
+            if item.get("sibling"):
+                label = "Same body" + ("" if level == 0 else f" ({level:+g} mm)")
             row = QTreeWidgetItem([label, ""])
             row.setData(0, Qt.UserRole, level)
+            row.setData(0, Qt.UserRole + 1, bool(item.get("sibling")))
             row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
             row.setCheckState(0, Qt.Checked)
             row.setForeground(0, QColor(*item["color"]))
-            if level < 0:
+            if item.get("sibling"):      # display only: no reference checkbox
+                row.setToolTip(0, "Sketch on the same body in the object explorer — "
+                                  "shown for orientation, cannot be used as reference")
+            elif level < 0:
                 row.setCheckState(1, Qt.Checked if item["reference"] else Qt.Unchecked)
             self.sketch_levels.addTopLevelItem(row)
             for entry in item["entries"]:
                 row.addChild(QTreeWidgetItem([entry["name"], ""]))
             row.setExpanded(True)
         self.sketch_levels.blockSignals(False)
+        MainWindow._fit_sketch_level_columns(self.sketch_levels)
+
+    @staticmethod
+    def _fit_sketch_level_columns(tree):
+        """Reference column: only the checkbox plus a small margin; the level / sketch column
+        gets the rest, and the panel is made wide enough to show every name in full."""
+        style = tree.style()
+        indicator = style.pixelMetric(QStyle.PM_IndicatorWidth, None, tree)
+        header_text = tree.fontMetrics().horizontalAdvance(tree.headerItem().text(1))
+        ref_width = max(indicator, header_text) + 14
+        tree.header().resizeSection(1, ref_width)
+        names = tree.sizeHintForColumn(0)
+        frame = 2 * tree.frameWidth() + tree.verticalScrollBar().sizeHint().width()
+        tree.setMinimumWidth(names + ref_width + frame + 6)
 
     def _on_sketch_level_changed(self, row, column):
         level = row.data(0, Qt.UserRole)
         if level is None:
             return
         underlays = self.state.get("sketch_view_state", {}).get("underlays", [])
-        item = next((item for item in underlays if item["level"] == level), None)
+        sibling = bool(row.data(0, Qt.UserRole + 1))
+        item = next((item for item in underlays if item["level"] == level and
+                     bool(item.get("sibling")) == sibling), None)
         if item is None:
             return
         item["visible"] = row.checkState(0) == Qt.Checked
-        if level < 0:
+        if level < 0 and not sibling:
             item["reference"] = row.checkState(1) == Qt.Checked
             if item["reference"]:
                 self._sketch_commit()
@@ -23044,8 +23335,9 @@ class MainWindow(QMainWindow):
         solid_underlay = self._collect_solid_underlay(sk)
         parent = self._sketch_parent[0] if self._sketch_parent else None
         direct_source = parent.get("parent") if parent is not None else None
+        self._release_unreferenceable_levels(sk, underlays)
         for item in underlays:
-            if item["level"] < 0:
+            if item["level"] < 0 and not item.get("sibling"):
                 item["reference"] = any(entry is direct_source for entry in item["entries"]) or \
                     any(getattr(element, "reference_level", None) == item["level"]
                         for key in ("vertices", "segments", "circles", "arcs", "ellipses")
@@ -23224,6 +23516,8 @@ class MainWindow(QMainWindow):
         text = describe_constraint(sk, c)
         sk.remove_constraint(c)
         self.state["sketch_view_state"]["hl_constraint"] = None
+        self.sketch_panel._pending_row = row        # keep marking: move on to the next one below
+        self.sketch_panel.refresh(sk)
         self._sketch_commit()
         self._st(f"Removed constraint: {text}")
         self.view3d.update()
@@ -23862,7 +24156,11 @@ class MainWindow(QMainWindow):
             for child in entry_children(entry, objects):
                 if child["type"] == "sketch":
                     fi = child.get("face")
-                    if fi is not None and 0 <= fi < len(faces) and faces[fi]["planar"]:
+                    # a face index that now names a non-parallel face (renumbered faces) is
+                    # re-resolved after the cuts by _rebind_face_sketches instead
+                    if fi is not None and 0 <= fi < len(faces) and faces[fi]["planar"] and \
+                            "frame" in faces[fi] and float(np.asarray(faces[fi]["frame"][3], float) @
+                                                          np.asarray(child["sketch"].frame[3], float)) > 1.0 - 1e-6:
                         previous_face = previous_faces[fi] if previous_faces is not None and \
                             0 <= fi < len(previous_faces) else None
                         self._refresh_face_references(child["sketch"], faces[fi], previous_face)
@@ -25185,8 +25483,190 @@ class MainWindow(QMainWindow):
                     tagged = dict(match); tagged["_entry"] = src
                     refreshed.append(tagged)
             self._feat_chains = refreshed
+        # faces created by cuts only exist now; sketches on them may need their face re-found
+        if hasattr(self, "_rebind_face_sketches") and not getattr(self, "_rebinding_faces", False):
+            self._rebind_face_sketches()
         if progress is not None:
             progress(100)
+
+    def _rebind_face_sketches(self):
+        """Keep sketches on the face they were drawn on. Sketches refer to their face by index;
+        when the body is rebuilt with a different face count (e.g. a changed wall thickness adds
+        or removes cut faces) the index can point at another face, and cut faces are only known
+        after _apply_cuts. Re-find the face by plane / position and update the face outline."""
+        active = self.state.get("active_sketch")
+        changed = []
+        for entry in self.state["objects"]:
+            parent, index = entry.get("parent"), entry.get("face")
+            if entry.get("type") != "sketch" or entry.get("preview") or index is None or \
+                    parent is None or parent.get("type") not in ("extrusion", "imported") or \
+                    entry["sketch"] is active:
+                continue
+            sk, faces = entry["sketch"], parent.get("faces") or []
+            match = MainWindow._match_sketch_face(sk, faces, index)
+            if match is None:
+                continue
+            if match == index and MainWindow._face_outline_current(sk, faces[index]):
+                continue
+            backup, backup_frame = sketch_to_dict(sk), sk.frame
+            try:
+                MainWindow._move_sketch_to_face(self, sk, faces[match])
+            except ValueError as ex:
+                sketch_fill(sk, backup); sk.frame = backup_frame
+                _dbg(f"{entry['name']}: could not follow its face ({ex})")
+                continue
+            if match != index:
+                _dbg(f"{entry['name']}: face index {index} → {match} after the body was rebuilt")
+            entry["face"] = match
+            changed.append(entry)
+        dependants = [e for e in changed if entry_children(e, self.state["objects"])]
+        if dependants:
+            self._rebinding_faces = True
+            try:
+                for entry in dependants:
+                    self._regenerate(entry)
+                self._apply_cuts()
+            finally:
+                self._rebinding_faces = False
+
+    @staticmethod
+    def _outline_points(sk):
+        """3D points of the face outline references of a sketch (None if it has none)."""
+        points = [sk.to3d(v.xy()) for e in sk.segments if hasattr(e, "reference_boundary")
+                  for v in (e.v0, e.v1)]
+        points += [sk.to3d(e.center.xy()) for e in sk.circles + sk.arcs
+                   if hasattr(e, "reference_boundary")]
+        return np.asarray(points, float) if points else None
+
+    @staticmethod
+    def _match_sketch_face(sk, faces, index):
+        """Index of the planar face sk lies on: the stored index while that face is still
+        parallel to the sketch, otherwise the parallel face nearest to the sketch's outline."""
+        origin, _, _, normal = (np.asarray(a, float) for a in sk.frame)
+
+        def parallel(face):
+            return face.get("planar") and "frame" in face and \
+                float(np.asarray(face["frame"][3], float) @ normal) > 1.0 - 1e-6
+
+        candidates = [i for i, face in enumerate(faces) if parallel(face)]
+        if not candidates:
+            return None
+        outline = MainWindow._outline_points(sk)
+        if outline is None and 0 <= index < len(faces) and parallel(faces[index]):
+            return index                          # nothing to compare: trust the stored face
+        anchor = outline.mean(axis=0) if outline is not None else origin
+        count = sum(1 for e in sk.segments + sk.circles + sk.arcs if hasattr(e, "reference_boundary"))
+
+        def cost(i):
+            face = faces[i]
+            pts = [p for prim in face.get("boundary", []) for p in
+                   ((prim[1], prim[2]) if prim[0] == "line" else (prim[1],))]
+            centre = np.asarray(pts, float).mean(axis=0) if pts else np.asarray(face["frame"][0], float)
+            offset = abs(float((np.asarray(face["frame"][0], float) - origin) @ normal))
+            value = float(np.linalg.norm(centre - anchor)) + 10.0 * offset
+            if count and len(face.get("boundary", [])) != count:
+                value += 50.0                     # a different outline topology is a poor match
+            if i == index:
+                value -= 5.0                      # keep the stored face when it is a close call
+            return value
+
+        return min(candidates, key=cost)
+
+    @staticmethod
+    def _face_outline_current(sk, face):
+        """True if the face outline references of sk sit where the face's boundary is."""
+        frame = rotated_face_frame(face["frame"], sk.face_rotation)
+        projected = face_reference_sketch(face, frame)
+        current = {(type(e), e.reference_boundary): e
+                   for e in projected.segments + projected.circles + projected.arcs}
+        for e in sk.segments + sk.circles + sk.arcs:
+            if not hasattr(e, "reference_boundary"):
+                continue
+            other = current.get((type(e), e.reference_boundary))
+            if other is None:
+                return False
+            mine = [e.v0, e.v1] if isinstance(e, Segment) else [e.center]
+            theirs = [other.v0, other.v1] if isinstance(other, Segment) else [other.center]
+            if isinstance(e, Segment):
+                forward = all(np.linalg.norm(np.subtract(sk.to3d(a.xy()), projected.to3d(b.xy()))) < 1e-5
+                              for a, b in zip(mine, theirs))
+                backward = all(np.linalg.norm(np.subtract(sk.to3d(a.xy()), projected.to3d(b.xy()))) < 1e-5
+                               for a, b in zip(mine, reversed(theirs)))
+                if not (forward or backward):
+                    return False
+            elif np.linalg.norm(np.subtract(sk.to3d(mine[0].xy()), projected.to3d(theirs[0].xy()))) > 1e-5 \
+                    or (isinstance(e, Circle) and abs(e.radius - other.radius) > 1e-5):
+                return False
+        return True
+
+    def _move_sketch_to_face(self, sk, face):
+        """Put sk on face (parallel to it), keeping the sketch's own axes so that its geometry
+        does not shift, and move the face outline references onto the face's boundary."""
+        origin, u, v, normal = (np.asarray(a, float) for a in sk.frame)
+        face_origin = np.asarray(face["frame"][0], float)
+        new_origin = origin + float((face_origin - origin) @ normal) * normal
+        c, s = sk.face_rotation                       # undo the rotation applied to face frames
+        frame = (new_origin, c*u - s*v, s*u + c*v, normal)
+        target = dict(face, frame=frame)
+        projected = face_reference_sketch(target, (new_origin, u, v, normal))
+        old_c = MainWindow._outline_points(sk)
+        new_pts = [p for e in projected.segments for p in (e.v0.xy(), e.v1.xy())] + \
+                  [e.center.xy() for e in projected.circles + projected.arcs]
+        if old_c is not None and new_pts:
+            old_c = old_c.mean(axis=0)
+            new_c = np.mean([projected.to3d(p) for p in new_pts], axis=0)
+            for kind in ("segments", "circles", "arcs"):
+                mine = [e for e in getattr(sk, kind) if hasattr(e, "reference_boundary")]
+                theirs = getattr(projected, kind)
+                if not mine:
+                    continue
+                if len(mine) != len(theirs):
+                    raise ValueError("the face outline has a different number of edges")
+
+                def anchor(element, sketch, centre):
+                    if isinstance(element, Segment):
+                        point = (np.asarray(sketch.to3d(element.v0.xy())) +
+                                 np.asarray(sketch.to3d(element.v1.xy()))) / 2
+                    else:
+                        point = np.asarray(sketch.to3d(element.center.xy()))
+                    return point - centre
+
+                def direction(element, sketch):
+                    if not isinstance(element, Segment):
+                        return None
+                    d = np.subtract(sketch.to3d(element.v1.xy()), sketch.to3d(element.v0.xy()))
+                    return d / max(float(np.linalg.norm(d)), 1e-12)
+
+                # Boundary outlines keep their edge order when a face only changes size, so
+                # pair them by the best cyclic rotation / reversal of that order (a nearest-
+                # position match would mix up the short edges of a resized notch).
+                mine.sort(key=lambda e: e.reference_boundary)
+                theirs = sorted(theirs, key=lambda e: e.reference_boundary)
+                a_pos = [anchor(e, sk, old_c) for e in mine]
+                b_pos = [anchor(e, projected, new_c) for e in theirs]
+                a_dir = [direction(e, sk) for e in mine]
+                b_dir = [direction(e, projected) for e in theirs]
+                n = len(mine); best = None
+                for reverse in (False, True):
+                    for shift in range(n):
+                        order = [((-i if reverse else i) + shift) % n for i in range(n)]
+                        cost = 0.0
+                        for i, j in enumerate(order):
+                            cost += float(np.linalg.norm(a_pos[i] - b_pos[j]))
+                            if a_dir[i] is not None and abs(float(a_dir[i] @ b_dir[j])) < 0.99:
+                                cost += 1000.0        # edges must keep their direction
+                        if best is None or cost < best[0]:
+                            best = (cost, order)
+                for i, j in enumerate(best[1]):
+                    a, b = mine[i], theirs[j]
+                    if isinstance(a, Segment):
+                        da = np.subtract(sk.to3d(a.v1.xy()), sk.to3d(a.v0.xy()))
+                        db = np.subtract(projected.to3d(b.v1.xy()), projected.to3d(b.v0.xy()))
+                        if float(da @ db) < 0:
+                            a.v0, a.v1 = a.v1, a.v0
+                    a.reference_boundary = b.reference_boundary
+        sk.frame = (new_origin, u, v, normal)
+        MainWindow._refresh_face_references(self, sk, target)
 
     def _ext_params(self):
         extent = self.cb_ext_extent.currentData() or "dist"

@@ -13,7 +13,7 @@ Edit (incl. Measure and the configurable Settings) · View · Help.
 Measure tool (toolbar "Measure" / Edit → Measure): click edges and corners of the solids (any
 number); lengths, the relations between edges (connected / same face / parallel / perpendicular
 with 3-D and 2-D XY values) and, for corners, the 3-D distance, ΔX / ΔY / ΔZ and angles are shown
-in the status bar and in the Measurement panel below the object explorer. Measured edges and
+in the status bar and in the Measurement panel on the right (shown with the Measure tool). Measured edges and
 corners are highlighted in the inverted colour of their body. RMB on a measured
 item removes it, RMB elsewhere (or Esc) clears the measurement.
 Toolbars: 1st row Undo / Redo; 2nd row New Sketch / Surface / Cut Surface / Extrude / Ring Extrusion /
@@ -140,7 +140,46 @@ Workflow:
     DIN 406-11; the title block carries the general tolerances (ISO 2768).
     Rotate the model in XYZ quarter-turns, position cuts by clicking a projection, and place
     entered dimensions between two picked points. The drawing is saved as a child of the extrusion.
-    Select the drawing and choose Technical Drawing again to export it as PDF or SVG.
+    The editor shows the sheet like the sketcher (dark background and grid; thin lines of constant
+    pixel width: visible edges dark yellow, hidden lines dashed blue, centre / cutting-plane lines
+    dash-dot violet, dimensions light green; white hover glow, orange selection). Hidden lines
+    are shown by default and can be switched off per view (Views tab → Show hidden lines).
+    Length / angle dimensions snap to points first. A length always takes two picks: point →
+    point, point ↔ line (perpendicular distance) or two parallel lines; an edge's length is
+    dimensioned by picking its two end points. Dragging the number slides it along its
+    dimension line and moves the line (with its extension lines) sideways, as in the sketcher;
+    past an end the dimension line is continued under the number. A dimension clicked on
+    the sheet is selected in the Dimensions list and vice versa; Delete removes it (on the sheet
+    or in the list). Wheel zooms, the middle mouse button pans, the
+    right mouse button cancels the tool or deselects, Home fits the sheet. Grid / Snap work as in
+    the sketcher (sheet mm, saved with the drawing): placing and dragging views puts their top-
+    left corner on the snap grid (alignment with another view wins), dragged dimensions keep
+    whole snap steps from the part. The editor is a window like the main and assembly windows
+    (dark title bar, File / Edit / View / Tools menus, two icon toolbar rows, status bar with
+    Finish Drawing / Cancel). Views, Dimensions and Sheet are dock panels, tabbed on the right:
+    each can be dragged to the left or right, closed and shown again (View menu, Panels
+    button); their layout is kept while the program runs. The icon toolbars hold
+    the views, dimensions, Import (title block logo) and Export (PDF / SVG). Exports are always
+    black on a white sheet. Select the drawing and choose Technical Drawing again to export it too.
+    Sheets A2, A3, A4 and A5 in landscape or portrait (Sheet panel → Format, with the scale) with
+    the frame, reference grid and title block of DIN EN ISO 5457; Auto scale fits the sheet.
+    Undo / Redo (toolbar, Edit menu, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) step through every change
+    of the drawing (a drag is one step; grid / snap and the panel layout are not part of it),
+    as long as the editor is open. The status bar names the
+    drawn extrusion and its size. A part can have several cut sections A-A, B-B, … (Views panel
+    → Sections: Add / Rotate 90° / Remove, plane and offset; or the Cut tool: click a projected
+    view). Each is marked by its cutting line in the other views and can be placed as its own
+    section view (Section View tool places the selected one). Drag a cutting line to move that
+    cut (live, on the snap step); right-click it to rotate it by 90° in that view or delete it.
+    Older drawings with one section open with it as A-A. A section view shows the centre line
+    (thin dash-dot, 2 mm beyond the contour) of every hole or boss the cut runs through
+    lengthwise. Centre lines (circle crosses, hole axes) are references for length dimensions
+    like edges (point ↔ centre line, centre line ↔ parallel edge or centre line); part geometry
+    wins where both are equally near, and Radius / Diameter ignore them.
+    The isometric view shows only the shaded part (no edges, nothing to pick; the
+    DXF export, which holds no pictures, gives its edges instead). Export: PDF, SVG or
+    DXF (AutoCAD R12, mm; layers OUTLINE / THIN / HIDDEN / CENTER / FRAME / TEXT; the shaded
+    isometric picture is left out, its edges are kept).
     Assembly (toolbar button right of Technical Drawing, also in the File / Edit menus) opens a
     window of its own with a 3-D view, a component explorer and an Alignments panel. Add parts takes
     parent solids of the project (everything built on them comes along); Import adds STEP / STL /
@@ -240,12 +279,12 @@ from PyQt5.QtWidgets import (
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QKeySequenceEdit, QTabWidget, QStyle,
     QComboBox, QMenuBar, QSizePolicy, QGridLayout, QAbstractItemView, QProgressBar, QHeaderView
 )
-from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QByteArray, QSize, QSizeF, QDir, pyqtSignal, QTimer,
+from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QByteArray, QBuffer, QMarginsF, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
                           QLocale, QEventLoop, QEvent, QtCriticalMsg, QtFatalMsg)
 from PyQt5.QtGui import (QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath,
                          QTransform, QCursor, QPolygonF, QKeySequence, QPixmap, QIcon,
-                         QPalette, QPdfWriter, QImage, QFontInfo, QPicture)
+                         QPalette, QPdfWriter, QImage, QFontInfo, QPicture, QPageSize)
 from PyQt5.QtSvg import QSvgGenerator
 import numpy as np
 import qt_modern_style
@@ -6557,7 +6596,7 @@ class View3D(QGLWidget):
         self._fps_timer = QTimer(self)
         self._fps_timer.setTimerType(Qt.PreciseTimer)
         self._fps_timer.setInterval(16)
-        self._fps_timer.timeout.connect(self.update)
+        self._fps_timer.timeout.connect(self._fps_tick)
         self._pending_buffer_deletes = []
         # hover / picking state
         self._hover3d   = None    # ("axis",i)|("origin",None)|("plane",name)|("face",(e,fi))|("sketch",e)
@@ -6939,6 +6978,14 @@ class View3D(QGLWidget):
         if self._pending_buffer_deletes:
             glDeleteBuffers(len(self._pending_buffer_deletes), self._pending_buffer_deletes)
             self._pending_buffer_deletes.clear()
+
+    def _fps_tick(self):
+        """Continuous redraw of the frame-rate display. Paused while a mouse button is held
+        outside the 3-D view (dragging a panel divider, dock edge, toolbar or scroll bar), so
+        the constant rendering does not make those drags sluggish."""
+        if QApplication.mouseButtons() != Qt.NoButton and not self.underMouse():
+            return
+        self.update()
 
     def set_show_fps(self, enabled):
         self.show_fps = bool(enabled)
@@ -11703,6 +11750,62 @@ class ToggleListWidget(QListWidget):
             self.clearSelection(); self.setCurrentRow(-1)
 
 
+def _enlarge_tool_button(button, size=None):
+    """Icon as large as the button allows: the button keeps its size, its inner padding goes and
+    the icon takes the inside (button height minus the 1 px border and 1 px air)."""
+    button.ensurePolished()
+    size = size or button.sizeHint()
+    button.setFixedSize(size)
+    button.setStyleSheet(button.styleSheet() + "QToolButton{padding:0px;}")
+    side = max(16, min(size.width(), size.height()) - 4)
+    button.setIconSize(QSize(side, side))
+    button.setProperty("_enlarged_icon", True)
+
+
+def enlarge_toolbar_icons(toolbar):
+    """Large icons on all buttons of a toolbar, the buttons keeping their normal size.
+    A tool button placed directly in a QToolBar always paints with the toolbar's icon size, so
+    every icon action gets a button of its own in a small container (it follows the action's
+    visibility, enabled and checked state; its shortcuts stay active in the window). Tool
+    buttons inside widget groups of the toolbar are enlarged in place."""
+    size = None
+    for action in list(toolbar.actions()):
+        button = toolbar.widgetForAction(action)
+        if action.isSeparator() or not isinstance(button, QToolButton) or \
+                button.parentWidget() is not toolbar or button.icon().isNull():
+            continue
+        if size is None:
+            button.ensurePolished()
+            size = button.sizeHint()                  # the normal button of this toolbar
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        own_button = button.defaultAction() is action  # an action's own toolbar button
+        if own_button:
+            own = QToolButton(container)
+            own.setDefaultAction(action)
+            own.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            own.setAutoRaise(button.autoRaise())
+            layout.addWidget(own)
+        item = toolbar.insertWidget(action, container)
+        toolbar.removeAction(action)       # (a widget action releases its widget here)
+        if not own_button:                             # a tool button added as a widget
+            own = button
+            own.setParent(container)
+            layout.addWidget(own)
+            own.show()
+        _enlarge_tool_button(own, size)
+        if action.shortcuts() and toolbar.window() is not None:
+            toolbar.window().addAction(action)        # keep its keyboard shortcut working
+        action.changed.connect(lambda item=item, action=action: item.setVisible(action.isVisible()))
+        item.setVisible(action.isVisible())
+    for button in toolbar.findChildren(QToolButton):     # buttons inside widget groups
+        if button.parentWidget() is toolbar or button.property("_enlarged_icon") or \
+                button.icon().isNull() or button.toolButtonStyle() != Qt.ToolButtonIconOnly:
+            continue
+        _enlarge_tool_button(button)
+
+
 class ToolbarGroupScroll(QScrollArea):
     def __init__(self, group, parent=None):
         super().__init__(parent)
@@ -12593,13 +12696,58 @@ def _drawing_view_frame(normal, up_hint):
 
 DRAWING_PAGE_W, DRAWING_PAGE_H = 2376.0, 1680.0      # A2 landscape, 4 page units per mm
 DRAWING_UNITS_PER_MM = 4.0
+# ISO 216 sheets (landscape size in mm) with the DIN EN ISO 5457 reference grid (50 mm fields)
+DRAWING_SHEETS = {"A2": (594, 420, (12, 8)), "A3": (420, 297, (8, 6)),
+                  "A4": (297, 210, (6, 4)), "A5": (210, 148, (4, 3))}
+
+
+def _drawing_sheet(options):
+    """Sheet of a drawing: {"name", "orientation", "w", "h" (page units), "zones" (columns,
+    rows)}; A2 landscape unless the options name another size."""
+    name = str(options.get("sheet", "A2")).upper()
+    if name not in DRAWING_SHEETS:
+        name = "A2"
+    orientation = "portrait" if options.get("orientation") == "portrait" else "landscape"
+    width, height, zones = DRAWING_SHEETS[name]
+    if orientation == "portrait":
+        width, height, zones = height, width, (zones[1], zones[0])
+    return {"name": name, "orientation": orientation, "w": width * DRAWING_UNITS_PER_MM,
+            "h": height * DRAWING_UNITS_PER_MM, "zones": zones}
+
+
+_DRAWING_PAGE = _drawing_sheet({})                 # sheet of the drawing being painted
 DRAWING_STD_SCALES = (50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001)   # ISO 5455
+# scales offered in the editor: the ISO 5455 ones plus every whole step from 10:1 to 1:10
+# ("Auto" still picks an ISO 5455 preferred scale)
+DRAWING_SELECTABLE_SCALES = (50, 20) + tuple(range(10, 1, -1)) + (1,) + \
+    tuple(1.0 / n for n in range(2, 11)) + (0.05, 0.02, 0.01, 0.005, 0.002, 0.001)
 DRAWING_INK = "#1b1f24"
+# Colours of a drawing by line role. Exported / printed drawings are black on a white sheet with
+# the line widths of DIN ISO 128. The editor shows the sheet in the sketcher's style: visible
+# edges dark yellow, hidden lines like (dashed) support geometry, centre and cutting-plane lines
+# like (dash-dot) reference geometry and dimensions in the sketcher's dimension colour; its lines
+# are thin and keep their pixel width at any zoom ("line_scale" = screen px per page unit of
+# width). None = not painted.
+DRAWING_PRINT_COLORS = {
+    "sheet": "#ffffff", "visible": DRAWING_INK, "hidden": DRAWING_INK, "centre": DRAWING_INK,
+    "dimension": DRAWING_INK, "text": DRAWING_INK, "frame": DRAWING_INK, "label": "#5c6269",
+    "hatch": DRAWING_INK, "section_fill": "#ffffff", "label_back": "#ffffff", "iso_tint": None,
+    "line_scale": None}
+DRAWING_SCREEN_COLORS = {
+    "sheet": None, "visible": "#d2a01e", "hidden": "#508cff", "centre": "#be96ff",
+    "dimension": "#aaf0aa", "text": "#e2e5e9", "frame": "#8a93a0", "label": "#858b95",
+    "hatch": "#a0d2a01e", "section_fill": "#1c1c20", "label_back": "#dc1c1c20",
+    "iso_tint": (0.5, 0.8, 1.0), "line_scale": 0.75}
+_DRAWING_COLORS = DRAWING_PRINT_COLORS          # palette of the drawing being painted
+
+
+def _drawing_color(role):
+    value = _DRAWING_COLORS.get(role)
+    return QColor(value) if value else QColor(0, 0, 0, 0)
 DRAWING_MIN_CIRCLE_POINTS = 16
 DRAWING_THICK, DRAWING_THIN = 2.0, 1.0                  # DIN ISO 128-24, line group 0.5 (0.5 / 0.25 mm)
 DRAWING_FRAME_LINE, DRAWING_FIELD_LINE = 2.8, 1.4       # DIN EN ISO 5457: frame 0.7 mm, grid / title block fields 0.35 mm
 DRAWING_BORDER = (80.0, 40.0, 40.0, 40.0)               # DIN EN ISO 5457: left 20 mm (filing margin), others 10 mm
-DRAWING_GRID_ZONES = (12, 8)                            # DIN EN ISO 5457 reference grid of an A2 sheet (columns, rows)
 DRAWING_TEXT_SMALL, DRAWING_TEXT, DRAWING_TEXT_LARGE = 10.0, 14.0, 20.0   # DIN EN ISO 3098-0: 2.5 / 3.5 / 5 mm lettering
 DRAWING_DIM_OFFSET = 40.0                               # DIN 406-11: first dimension line 10 mm from the outline
 DRAWING_FONT_FAMILIES = ("ISOCPEUR", "Osifont", "ISO 3098", "Arial")   # type B lettering when installed
@@ -13364,6 +13512,12 @@ class _DrawingPlacement:
         self.rect = QRectF(left, top, float(size[0]), float(size[1]))
         self.reserved = {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
         self.hz, self.vt, self.circles = [], [], []
+        self.centre_lines = []     # drawn centre lines [((u, v), (u, v))]: dimension references
+
+    def add_centre_cross(self, u, v, radius):
+        """Centre lines of a circle as drawn by _paint_centre_mark (2 mm beyond the contour)."""
+        reach = radius + 9.0 / self.scale
+        self.centre_lines += [((u - reach, v), (u + reach, v)), ((u, v - reach), (u, v + reach))]
 
     def point(self, u, v):
         return QPointF(self.rect.left() + (u - self.low[0]) * self.scale,
@@ -13375,8 +13529,13 @@ class _DrawingPlacement:
         return QRectF(top_left.x(), top_left.y(), extent * self.scale, extent * self.scale)
 
 
-def _drawing_pen(width, pattern=None):
-    pen = QPen(QColor(DRAWING_INK), width, Qt.SolidLine, Qt.FlatCap, Qt.RoundJoin)
+def _drawing_pen(width, pattern=None, role="dimension"):
+    line_scale = _DRAWING_COLORS.get("line_scale")
+    if line_scale:              # on screen: thin cosmetic lines, the same pixel width at any zoom
+        width = max(1.0, width * line_scale)
+    pen = QPen(_drawing_color(role), width, Qt.SolidLine, Qt.FlatCap, Qt.RoundJoin)
+    if line_scale:
+        pen.setCosmetic(True)
     if pattern:
         pen.setDashPattern(pattern)
     return pen
@@ -13445,7 +13604,7 @@ def _paint_aligned_dimension_text(painter, font, centre, vector, text, gap=4.0, 
     painter.translate(centre)
     painter.rotate(angle)
     painter.setFont(font)
-    painter.setPen(QColor(DRAWING_INK) if ink is None else ink)
+    painter.setPen(_drawing_color("dimension") if ink is None else ink)
     painter.drawText(QPointF(-width / 2, -gap), text)
     painter.restore()
     cap = metrics.capHeight()
@@ -13476,7 +13635,7 @@ def _paint_arrow(painter, tip, direction, length=14.0, ink=None):
     base = QPointF(tip.x() - d[0] * length, tip.y() - d[1] * length)
     painter.save()
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor(DRAWING_INK) if ink is None else ink)
+    painter.setBrush(_drawing_color("dimension") if ink is None else ink)
     painter.drawPolygon(QPolygonF([tip, QPointF(base.x() - d[1] * half, base.y() + d[0] * half),
                                    QPointF(base.x() + d[1] * half, base.y() - d[0] * half)]))
     painter.restore()
@@ -13604,7 +13763,7 @@ def _paint_chain(painter, metrics, place, values, side, overall=True):
 def _paint_centre_mark(painter, centre, radius):
     """Thin chain centre lines crossing a circle, 2 mm beyond its contour (DIN ISO 128-24)."""
     reach = radius + 9
-    painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN))
+    painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
     painter.drawLine(QPointF(centre.x() - reach, centre.y()), QPointF(centre.x() + reach, centre.y()))
     painter.drawLine(QPointF(centre.x(), centre.y() - reach), QPointF(centre.x(), centre.y() + reach))
 
@@ -13654,33 +13813,47 @@ def _drawing_cut_sides(place, cut_normal):
     return ("top", "bottom") if vertical else ("left", "right")
 
 
-def _paint_cut_line(painter, metrics, place, cut_normal, letter):
-    """Cutting plane (DIN ISO 128-40): thin chain line, thick end strokes, sight arrows."""
+def _drawing_cut_trace(right, up, low, high, cut_normal, offset, margin=0.0):
+    """End points (view u, v) of the trace of the section plane (cut_normal · p = offset) across a
+    view with the axes right / up and the bounds low / high, `margin` beyond the bounds; None
+    if the plane is not seen edge-on in that view."""
+    cut_normal = np.asarray(cut_normal, dtype=float)
+    cr, cu = float(cut_normal @ np.asarray(right)), float(cut_normal @ np.asarray(up))
+    if cr * cr + cu * cu < 0.75:                    # the plane faces the viewer
+        return None
+    if abs(cr) >= abs(cu):                          # a (near) vertical line
+        return [((offset - v * cu) / cr, v) for v in (low[1] - margin, high[1] + margin)]
+    return [(u, (offset - u * cr) / cu) for u in (low[0] - margin, high[0] + margin)]
+
+
+def _paint_cut_line(painter, metrics, place, cut_normal, letter, offset=0.0):
+    """Cutting plane (DIN ISO 128-40) at its offset: thin chain line, thick end strokes, sight
+    arrows."""
     view = place.view
     sides = _drawing_cut_sides(place, cut_normal)
     if sides is None:
         return
     cr, cu = float(cut_normal @ view["right"]), float(cut_normal @ view["up"])
-    margin = 24 / place.scale
-    if sides[0] == "top":
-        ends = (place.point(0, place.low[1] - margin), place.point(0, place.high[1] + margin))
-    else:
-        ends = (place.point(place.low[0] - margin, 0), place.point(place.high[0] + margin, 0))
+    trace = _drawing_cut_trace(view["right"], view["up"], place.low, place.high, cut_normal,
+                               offset, 24 / place.scale)
+    if trace is None:
+        return
+    ends = tuple(place.point(u, v) for u, v in trace)
     sight = np.array((-cr, cu), dtype=float)
     sight /= np.linalg.norm(sight)
     along = np.array((ends[0].x() - ends[1].x(), ends[0].y() - ends[1].y()))
     along /= np.linalg.norm(along)
-    painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN))
+    painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
     painter.drawLine(*ends)
     for end, inward in ((ends[0], -along), (ends[1], along)):
         stroke = QPointF(end.x() + inward[0] * 30, end.y() + inward[1] * 30)
-        painter.setPen(_drawing_pen(DRAWING_THICK))
+        painter.setPen(_drawing_pen(DRAWING_THICK, role="centre"))
         painter.drawLine(end, stroke)
         tip = QPointF(end.x() + sight[0] * 34, end.y() + sight[1] * 34)
-        painter.setPen(_drawing_pen(DRAWING_THIN))
+        painter.setPen(_drawing_pen(DRAWING_THIN, role="centre"))
         painter.drawLine(end, tip)
-        _paint_arrow(painter, tip, sight)
-        painter.setPen(_drawing_pen(1))
+        _paint_arrow(painter, tip, sight, ink=_drawing_color("centre"))
+        painter.setPen(_drawing_pen(1, role="centre"))
         painter.drawText(QPointF(tip.x() + sight[0] * 18 - metrics.horizontalAdvance(letter) / 2,
                                  tip.y() + sight[1] * 18 + 6), letter)
 
@@ -13696,10 +13869,10 @@ def _paint_section_fill(painter, place, loops):
             path.lineTo(point)
         path.closeSubpath()
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("white"))
+    painter.setBrush(_drawing_color("section_fill"))
     painter.drawPath(path)
     painter.setBrush(Qt.NoBrush)
-    painter.setPen(_drawing_pen(DRAWING_THIN))
+    painter.setPen(_drawing_pen(DRAWING_THIN, role="hatch"))
     bounds = path.boundingRect()
     level, end = bounds.left() + bounds.top(), bounds.right() + bounds.bottom()
     while level <= end:
@@ -13715,19 +13888,21 @@ def _paint_section_fill(painter, place, loops):
         for i in range(0, len(hits) - 1, 2):
             painter.drawLine(hits[i], hits[i + 1])
         level += 14
-    painter.setPen(_drawing_pen(DRAWING_THICK))
+    painter.setPen(_drawing_pen(DRAWING_THICK, role="visible"))
     painter.drawPath(path)
 
 
-def _drawing_shaded_image(view, face_normals):
-    """Flat-shaded raster of the isometric view from its id buffer (no triangle seams)."""
+def _drawing_shaded_image(view, face_normals, tint=None):
+    """Flat-shaded raster of the isometric view from its id buffer (no triangle seams); grey,
+    or tinted with an (r, g, b) solid colour for the on-screen sheet."""
     frame = np.column_stack((view["right"], view["up"], view["normal"]))
     light = np.array((-0.35, 0.55, 0.75))
     light /= np.linalg.norm(light)
-    tones = np.append(90 + 155 * np.clip((face_normals @ frame) @ light, 0, 1), 0).astype(np.uint8)
+    tones = np.append(90 + 155 * np.clip((face_normals @ frame) @ light, 0, 1), 0)
     ids = view["ids"]
     rgba = np.empty(ids.shape + (4,), dtype=np.uint8)
-    rgba[..., :3] = tones[ids][..., None]
+    colour = np.ones(3) if tint is None else np.clip(np.asarray(tint, dtype=float), 0.0, 1.0)
+    rgba[..., :3] = (tones[:, None] * colour[None, :]).astype(np.uint8)[ids]
     rgba[..., 3] = np.where(ids >= 0, 255, 0)
     height, width = ids.shape
     return QImage(rgba.data, width, height, width * 4, QImage.Format_RGBA8888).copy()
@@ -13746,36 +13921,38 @@ def _paint_projection_symbol(painter, right_edge, middle_y, first_angle=True):
         cone_left = circle_x + big + gap
         cone_right = cone_left + length
     painter.save()
-    painter.setPen(_drawing_pen(DRAWING_THIN))
+    painter.setPen(_drawing_pen(DRAWING_THIN, role="text"))
     painter.drawPolygon(QPolygonF([QPointF(cone_left, middle_y - big), QPointF(cone_right, middle_y - small),
                                    QPointF(cone_right, middle_y + small), QPointF(cone_left, middle_y + big)]))
     painter.drawEllipse(QPointF(circle_x, middle_y), big, big)
     painter.drawEllipse(QPointF(circle_x, middle_y), small, small)
-    painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN))
+    painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
     painter.drawLine(QPointF(min(cone_left, circle_x - big) - 6, middle_y),
                      QPointF(max(cone_right, circle_x + big) + 6, middle_y))
     painter.restore()
 
 
 def _paint_sheet_frame(painter):
-    """DIN EN ISO 5457 / ISO 216 A2 sheet: frame, centring marks and reference grid."""
+    """DIN EN ISO 5457 / ISO 216 sheet (the current A2 … A5 sheet): frame, centring marks and
+    reference grid."""
+    page_w, page_h = _DRAWING_PAGE["w"], _DRAWING_PAGE["h"]
     left, top, right, bottom = DRAWING_BORDER
     x0, y0 = left, top
-    x1, y1 = DRAWING_PAGE_W - right, DRAWING_PAGE_H - bottom
+    x1, y1 = page_w - right, page_h - bottom
     painter.save()
     painter.setBrush(Qt.NoBrush)
-    painter.setPen(_drawing_pen(DRAWING_FRAME_LINE))
+    painter.setPen(_drawing_pen(DRAWING_FRAME_LINE, role="frame"))
     painter.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
     # centring marks (0.5 mm): from the sheet edge to 5 mm inside the frame
-    painter.setPen(_drawing_pen(2.0))
-    mid_x, mid_y = DRAWING_PAGE_W / 2, DRAWING_PAGE_H / 2
+    painter.setPen(_drawing_pen(2.0, role="frame"))
+    mid_x, mid_y = page_w / 2, page_h / 2
     painter.drawLine(QPointF(mid_x, 0), QPointF(mid_x, y0 + 20))
-    painter.drawLine(QPointF(mid_x, DRAWING_PAGE_H), QPointF(mid_x, y1 - 20))
+    painter.drawLine(QPointF(mid_x, page_h), QPointF(mid_x, y1 - 20))
     painter.drawLine(QPointF(0, mid_y), QPointF(x0 + 20, mid_y))
-    painter.drawLine(QPointF(DRAWING_PAGE_W, mid_y), QPointF(x1 - 20, mid_y))
+    painter.drawLine(QPointF(page_w, mid_y), QPointF(x1 - 20, mid_y))
     # reference grid: 5 mm ticks outside the frame; numbers along the long sides, letters along the short ones
-    columns, rows = DRAWING_GRID_ZONES
-    painter.setPen(_drawing_pen(DRAWING_FIELD_LINE))
+    columns, rows = _DRAWING_PAGE["zones"]
+    painter.setPen(_drawing_pen(DRAWING_FIELD_LINE, role="frame"))
     painter.setFont(_drawing_font(DRAWING_TEXT))
     strip = 20.0
     for index in range(columns + 1):
@@ -13786,7 +13963,7 @@ def _paint_sheet_frame(painter):
         y = y0 + (y1 - y0) * index / rows
         painter.drawLine(QPointF(x0, y), QPointF(x0 - strip, y))
         painter.drawLine(QPointF(x1, y), QPointF(x1 + strip, y))
-    painter.setPen(QColor(DRAWING_INK))
+    painter.setPen(_drawing_color("frame"))
     for index in range(columns):
         cell_x = x0 + (x1 - x0) * index / columns
         cell_w = (x1 - x0) / columns
@@ -13806,14 +13983,16 @@ DRAWING_TITLE_W, DRAWING_TITLE_H = 720.0, 200.0         # DIN EN ISO 5457 / ISO 
 
 
 def _paint_title_block(painter, options, scale_text):
-    x = DRAWING_PAGE_W - DRAWING_BORDER[2] - DRAWING_TITLE_W
-    y = DRAWING_PAGE_H - DRAWING_BORDER[3] - DRAWING_TITLE_H
-    width, height = DRAWING_TITLE_W, DRAWING_TITLE_H
+    # 180 mm wide; on a sheet whose frame is narrower (A5 portrait) it takes the frame's width
+    width = min(DRAWING_TITLE_W, _DRAWING_PAGE["w"] - DRAWING_BORDER[0] - DRAWING_BORDER[2])
+    height = DRAWING_TITLE_H
+    x = _DRAWING_PAGE["w"] - DRAWING_BORDER[2] - width
+    y = _DRAWING_PAGE["h"] - DRAWING_BORDER[3] - height
     first_angle = options.get("projection", "third") != "third"
     painter.save()
     painter.setBrush(Qt.NoBrush)
-    painter.setPen(_drawing_pen(DRAWING_FIELD_LINE))
-    logo_width = 160.0
+    painter.setPen(_drawing_pen(DRAWING_FIELD_LINE, role="frame"))
+    logo_width = 160.0 * width / DRAWING_TITLE_W
     logo_rect = QRectF(x, y, logo_width, height)
     painter.drawRect(logo_rect)
     logo = options.get("logo")
@@ -13842,29 +14021,29 @@ def _paint_title_block(painter, options, scale_text):
     label_font = _drawing_font(DRAWING_TEXT_SMALL)
     for row_index, row in enumerate(rows):
         row_y = y + row_index * row_height
-        painter.setPen(_drawing_pen(DRAWING_FIELD_LINE))
+        painter.setPen(_drawing_pen(DRAWING_FIELD_LINE, role="frame"))
         painter.drawLine(QPointF(info_x, row_y), QPointF(x + width, row_y))
         cursor = info_x
         for label, value, share, value_height in row:
             cell_width = info_width * share
-            painter.setPen(_drawing_pen(DRAWING_FIELD_LINE))
+            painter.setPen(_drawing_pen(DRAWING_FIELD_LINE, role="frame"))
             painter.drawLine(QPointF(cursor, row_y), QPointF(cursor, row_y + row_height))
             painter.setFont(label_font)
-            painter.setPen(QColor("#5c6269"))
+            painter.setPen(_drawing_color("label"))
             painter.drawText(QPointF(cursor + 6, row_y + 6 + DRAWING_TEXT_SMALL), label)
             if value is None:
-                painter.setPen(QColor(DRAWING_INK))
+                painter.setPen(_drawing_color("text"))
                 _paint_projection_symbol(painter, cursor + cell_width - 14, row_y + row_height / 2 + 6,
                                          first_angle)
             else:
                 value_font = _drawing_font(value_height)
                 painter.setFont(value_font)
-                painter.setPen(QColor(DRAWING_INK))
+                painter.setPen(_drawing_color("text"))
                 painter.drawText(QPointF(cursor + 6, row_y + row_height - 6),
                                  QFontMetricsF(value_font).elidedText(
                                      str(value), Qt.ElideRight, int(cell_width - 12)))
             cursor += cell_width
-    painter.setPen(_drawing_pen(DRAWING_FRAME_LINE))
+    painter.setPen(_drawing_pen(DRAWING_FRAME_LINE, role="frame"))
     painter.drawRect(QRectF(x, y, width, height))
     painter.restore()
 
@@ -13898,52 +14077,153 @@ def _prepare_technical_drawing(vertices, triangles, options):
              for name, frame in frames.items()}
     iso_frame = _drawing_view_frame(normal + right + up, up)
     iso = _drawing_project(V, T, topology, *iso_frame, resolution=iso_resolution, want_ids=True)
+    return V, T, topology, frames, views, iso
 
-    section = None
-    if options.get("section"):
-        section_offset = float(options.get("cut_offset", 0.0))
-        if not math.isfinite(section_offset):
-            raise ValueError("The section offset must be a finite measurement.")
-        name = ("front", "top", "right")[int(options.get("section_view", 0))]
-        s_right, s_up, s_normal = frames[name]
-        sv, st = _drawing_clip(V, T, s_normal, section_offset)
-        s_topology = _drawing_topology(sv, st)
-        section = {"name": name, "normal": s_normal, "topology": s_topology,
-                   "view": _drawing_project(sv, st, s_topology, s_right, s_up, s_normal),
-                   "loops": _drawing_section_loops(
-                       sv, s_topology, s_normal, s_right, s_up, section_offset)}
-    return V, T, topology, frames, views, iso, section
+
+DRAWING_SECTION_PLANES = ("front", "top", "right")      # a cut is parallel to one of these views
+DRAWING_SECTION_PLANE_TEXT = ("parallel to the front view", "parallel to the top view",
+                              "parallel to the right side view")
+
+
+def _drawing_sections(options):
+    """Cut sections of a drawing: [{"letter", "plane" (0 front / 1 top / 2 right), "offset"}].
+    Drawings from before several sections were possible ("section", "section_view",
+    "cut_offset") give one section A-A."""
+    sections = []
+    if isinstance(options.get("sections"), list):
+        for item in options["sections"]:
+            if not isinstance(item, dict):
+                continue
+            letter = str(item.get("letter", "")).strip().upper()[:1]
+            offset = float(item.get("offset", 0.0))
+            if not letter.isalpha() or not math.isfinite(offset) or \
+                    any(section["letter"] == letter for section in sections):
+                continue
+            sections.append({"letter": letter, "offset": offset,
+                             "plane": min(2, max(0, int(item.get("plane", 0))))})
+    elif options.get("section"):
+        offset = float(options.get("cut_offset", 0.0))
+        sections.append({"letter": "A", "offset": offset if math.isfinite(offset) else 0.0,
+                         "plane": min(2, max(0, int(options.get("section_view", 0))))})
+    return sections
+
+
+def _section_view_letter(name, sections):
+    """Letter of the section a placed view shows ("section-B"; the old "section" is the first)."""
+    if name == "section":
+        return sections[0]["letter"] if sections else None
+    if isinstance(name, str) and name.startswith("section-"):
+        return name[len("section-"):]
+    return None
+
+
+def _drawing_section_axes(topology, normal, offset, right, up, tolerance):
+    """Centre lines [(start (u, v), end (u, v))] in a section view of the holes and bosses the
+    cut runs through lengthwise: circular rims whose axis lies in the cut plane and that the
+    plane passes through. Rims on one axis (both ends of a bore, counterbores) give one line
+    from the first to the last rim."""
+    normal = np.asarray(normal, dtype=float)
+    groups = []
+    for circle in topology.get("circles", ()):
+        axis = np.asarray(circle["axis"], dtype=float)
+        length = float(np.linalg.norm(axis))
+        if length <= 1e-12:
+            continue
+        axis = axis / length
+        centre = np.asarray(circle["center"], dtype=float)
+        radius = float(circle["radius"])
+        if abs(float(axis @ normal)) > 1e-3:              # axis not lying in the cut plane
+            continue
+        if abs(float(centre @ normal) - offset) >= radius - tolerance:   # plane misses the bore
+            continue
+        for group in groups:
+            offset_vector = centre - group["point"]
+            if abs(abs(float(group["axis"] @ axis)) - 1.0) < 1e-6 and \
+                    float(np.linalg.norm(np.cross(offset_vector, group["axis"]))) <= tolerance:
+                group["t"].append(float(offset_vector @ group["axis"]))
+                break
+        else:
+            groups.append({"axis": axis, "point": centre, "t": [0.0]})
+    right, up = np.asarray(right, dtype=float), np.asarray(up, dtype=float)
+    lines = []
+    for group in groups:
+        low, high = min(group["t"]), max(group["t"])
+        if high - low <= tolerance:                       # a single rim: no length to show
+            continue
+        a = group["point"] + group["axis"] * low
+        b = group["point"] + group["axis"] * high
+        lines.append(((float(a @ right), float(a @ up)), (float(b @ right), float(b @ up))))
+    return lines
+
+
+def _prepare_drawing_section(V, T, frames, plane, offset):
+    """Section through the part parallel to one of the main views at `offset`; computed on its
+    own so that moving a cut does not project all the other views again."""
+    if not math.isfinite(offset):
+        raise ValueError("The section offset must be a finite measurement.")
+    name = DRAWING_SECTION_PLANES[plane]
+    s_right, s_up, s_normal = frames[name]
+    sv, st = _drawing_clip(V, T, s_normal, offset)
+    s_topology = _drawing_topology(sv, st)
+    return {"name": name, "plane": plane, "normal": s_normal, "topology": s_topology,
+            "offset": offset,
+            "view": _drawing_project(sv, st, s_topology, s_right, s_up, s_normal),
+            "loops": _drawing_section_loops(sv, s_topology, s_normal, s_right, s_up, offset)}
 
 
 def _draw_technical_drawing(painter, vertices, triangles, options):
-    """Render projected views from a cached geometry package and editable sheet layout."""
+    """Render projected views from a cached geometry package and editable sheet layout, in the
+    palette options["_colors"] (default: black on white, as exported and printed)."""
+    global _DRAWING_COLORS, _DRAWING_PAGE
+    previous = _DRAWING_COLORS, _DRAWING_PAGE
+    _DRAWING_COLORS = options.get("_colors") or DRAWING_PRINT_COLORS
+    _DRAWING_PAGE = _drawing_sheet(options)
+    try:
+        return _render_technical_drawing(painter, vertices, triangles, options)
+    finally:
+        _DRAWING_COLORS, _DRAWING_PAGE = previous
+
+
+def _render_technical_drawing(painter, vertices, triangles, options):
     cache = options.get("_geometry_cache")
     front = tuple(float(value) for value in options["front"])
     rotation = tuple(float(value) for value in options.get("rotation", (0, 0, 0)))
-    geometry_key = (id(vertices), id(triangles), front, rotation,
-                    bool(options.get("section")), int(options.get("section_view", 0)),
-                    float(options.get("cut_offset", 0.0)), _drawing_wants_left(options),
+    geometry_key = (id(vertices), id(triangles), front, rotation, _drawing_wants_left(options),
                     int(options.get("_projection_resolution", 900)),
                     int(options.get("_isometric_resolution", 1200)))
     if cache is not None and cache.get("key") == geometry_key:
-        V, T, topology, frames, views, iso, section = cache["geometry"]
+        V, T, topology, frames, views, iso = cache["geometry"]
     else:
         geometry = _prepare_technical_drawing(vertices, triangles, options)
-        V, T, topology, frames, views, iso, section = geometry
+        V, T, topology, frames, views, iso = geometry
         if cache is not None:
             cache.clear()
-            cache.update(key=geometry_key, geometry=geometry)
+            cache.update(key=geometry_key, geometry=geometry, sections={})
+    # sections are cached one by one: moving or adding a cut computes only that section
+    section_cache = cache.setdefault("sections", {}) if cache is not None else {}
+    sections, used = [], set()
+    for item in _drawing_sections(options):
+        section_key = (item["plane"], round(float(item["offset"]), 6))
+        used.add(section_key)
+        if section_key not in section_cache:
+            section_cache[section_key] = _prepare_drawing_section(
+                V, T, frames, item["plane"], float(item["offset"]))
+        sections.append(dict(section_cache[section_key], letter=item["letter"]))
+    for section_key in [key for key in section_cache if key not in used]:
+        del section_cache[section_key]
+    section = sections[0] if sections else None    # the automatic layout shows the first one
 
     painter.save()
     page_scale = options.get("_page_scale")
+    page_w, page_h = _DRAWING_PAGE["w"], _DRAWING_PAGE["h"]
     if page_scale is None:
-        painter.scale(painter.device().width() / DRAWING_PAGE_W,
-                      painter.device().height() / DRAWING_PAGE_H)
+        painter.scale(painter.device().width() / page_w, painter.device().height() / page_h)
     else:
         painter.scale(float(page_scale), float(page_scale))
     painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setRenderHint(QPainter.TextAntialiasing, True)
-    painter.fillRect(QRectF(0, 0, DRAWING_PAGE_W, DRAWING_PAGE_H), QColor("white"))
+    if _DRAWING_COLORS.get("sheet"):
+        painter.fillRect(QRectF(0, 0, page_w, page_h), _drawing_color("sheet"))
     _paint_sheet_frame(painter)
     painter.setBrush(Qt.NoBrush)
     metrics = QFontMetricsF(_drawing_font(DRAWING_TEXT))
@@ -13959,30 +14239,39 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
     side_name = "left" if first_angle else "right"
     (fw, fh), (_, td), (rd, _) = (size_of(views[n]) for n in ("front", "top", "right"))
     area_x, area_y, area_w, area_h = 90.0, 90.0, 1450.0, 1300.0
-    fit = min((area_w - 390) / (fw + rd), (area_h - 410) / (fh + td))
+    # "Auto" scale: the three main views fit the drawing area of the sheet (the A2 layout's
+    # proportions applied to the current sheet size)
+    sx, sy = page_w / DRAWING_PAGE_W, page_h / DRAWING_PAGE_H
+    fit = min((area_w - 390) * sx / (fw + rd), (area_h - 410) * sy / (fh + td))
     scale = _drawing_nice_scale(fit)
     manual_layout = "view_placements" in options
     if options.get("scale_ratio"):
         scale = float(options["scale_ratio"]) * DRAWING_UNITS_PER_MM      # ISO 5455 preferred scale
     elif manual_layout and float(options.get("view_scale", 1.0)) != 1.0:
         scale = _drawing_nice_scale(scale * float(options["view_scale"]))
+    section_places = []                # (section, placement) of every section view on the sheet
     if manual_layout:
         places = {}
         for index, record in enumerate(options.get("view_placements", [])):
             name = record.get("name")
             view = views.get(name)
+            shown = None
+            letter = _section_view_letter(name, sections)
             if name == "isometric":
                 view = iso
-            elif name == "section" and section is not None:
-                view = section["view"]
+            elif letter is not None:
+                shown = next((item for item in sections if item["letter"] == letter), None)
+                view = shown["view"] if shown is not None else None
+                name = f"section-{letter}"
             if view is None:
                 continue
             place = _DrawingPlacement(view, float(record["x"]), float(record["y"]), scale)
             place.record_index = index
             places[name] = place
+            if shown is not None:
+                section_places.append((shown, place))
         iso_place = places.get("isometric")
-        section_place = places.get("section")
-        section_scale = section_place.scale if section_place is not None else None
+        section_place = section_scale = None        # (automatic layout only)
     else:
         total_w = 130 + (rd + fw) * scale + 130 + 130
         total_h = 130 + (fh + td) * scale + 130 + 150
@@ -14017,6 +14306,7 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
             section_place = _DrawingPlacement(
                 section["view"], column_x + 130 + (avail_w - s_w * section_scale) / 2,
                 700.0 + 60 + (avail_h - s_h * section_scale) / 2, section_scale)
+            section_places.append((section, section_place))
 
     def collect(place, topo, segment_sets):
         place.circles = _drawing_view_circles(topo, place.view)
@@ -14082,10 +14372,15 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
         if name not in places:
             continue
         place = places[name]
+        record_index = getattr(place, "record_index", None)
+        record = options["view_placements"][record_index] \
+            if manual_layout and record_index is not None else {}
         painter.save()
-        painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_DASH))
-        painter.drawPath(_drawing_segments_path(place, place.view["hidden"]))
-        painter.setPen(_drawing_pen(DRAWING_THICK * float(options.get("_thick_scale", 1.0))))
+        if record.get("hidden_lines", True):          # hidden lines can be switched off per view
+            painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_DASH, "hidden"))
+            painter.drawPath(_drawing_segments_path(place, place.view["hidden"]))
+        painter.setPen(_drawing_pen(DRAWING_THICK * float(options.get("_thick_scale", 1.0)),
+                                    role="visible"))
         painter.drawPath(_drawing_segments_path(place, place.view["visible"]))
         painter.restore()
         painter.setFont(_drawing_font(DRAWING_TEXT))
@@ -14096,59 +14391,87 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
                 if circle["kind"] == "circle" and circle["visible"]:
                     _paint_centre_mark(painter, place.point(circle["u"], circle["v"]),
                                        circle["radius"] * place.scale)
-        cut_sides = _drawing_cut_sides(place, section["normal"]) \
-            if section and section["name"] != name else None
-        for side in cut_sides or ():
+                    place.add_centre_cross(circle["u"], circle["v"], circle["radius"])
+        # cutting lines of all sections whose plane this view shows edge-on
+        cuts = [item for item in sections if item["name"] != name and
+                _drawing_cut_sides(place, item["normal"]) is not None]
+        for side in set(side for item in cuts for side in _drawing_cut_sides(place, item["normal"])):
             place.reserved[side] += 36
         for side in ("bottom", "left", "right", "top"):
             if (name, side) in chains:
                 painter.setFont(_drawing_font(DRAWING_TEXT))
                 values, overall = chains[(name, side)]
                 _paint_chain(painter, metrics, place, values, side, overall)
-        if cut_sides:
+        for item in cuts:
             painter.setFont(_drawing_font(DRAWING_TEXT_LARGE, True))
             _paint_cut_line(painter, QFontMetricsF(_drawing_font(DRAWING_TEXT_LARGE, True)), place,
-                            section["normal"], "A")
+                            item["normal"], item["letter"], item["offset"])
 
     if iso_place is not None:
         painter.save()
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        if "_image" not in iso:
-            iso["_image"] = _drawing_shaded_image(iso, topology["normals"])
-        painter.drawImage(iso_place.image_rect(), iso["_image"])
-        painter.setPen(_drawing_pen(DRAWING_THIN))
-        painter.drawPath(_drawing_segments_path(iso_place, iso["visible"]))
+        tint = _DRAWING_COLORS.get("iso_tint")
+        image_key = "_image" if tint is None else ("_image", tuple(tint))
+        if image_key not in iso:
+            iso[image_key] = _drawing_shaded_image(iso, topology["normals"], tint)
+        # the isometric view shows the shaded part only; its edges are drawn just where no
+        # picture can be shown (DXF)
+        painter.drawImage(iso_place.image_rect(), iso[image_key])
+        if options.get("_iso_edges"):
+            painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+            painter.drawPath(_drawing_segments_path(iso_place, iso["visible"]))
         painter.restore()
 
-    if section and section_place is not None:
+    for shown, shown_place in section_places:
         painter.save()
-        painter.setPen(_drawing_pen(DRAWING_THICK * float(options.get("_thick_scale", 1.0))))
-        painter.drawPath(_drawing_segments_path(section_place, section["view"]["visible"]))
-        _paint_section_fill(painter, section_place, section["loops"])
+        painter.setPen(_drawing_pen(DRAWING_THICK * float(options.get("_thick_scale", 1.0)),
+                                    role="visible"))
+        painter.drawPath(_drawing_segments_path(shown_place, shown["view"]["visible"]))
+        _paint_section_fill(painter, shown_place, shown["loops"])
+        # centre lines of holes (and bosses) the cut runs through lengthwise (DIN ISO 128)
+        painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
+        for start, end in _drawing_section_axes(
+                topology, shown["normal"], shown["offset"], shown["view"]["right"],
+                shown["view"]["up"], max(topology["span"] * 1e-3, 1e-6)):
+            a, b = shown_place.point(*start), shown_place.point(*end)
+            along = np.array((b.x() - a.x(), b.y() - a.y()))
+            length = float(np.linalg.norm(along))
+            if length < 1.0:
+                continue
+            along *= 8.0 / length                       # 2 mm beyond the contour at each end
+            painter.drawLine(QPointF(a.x() - along[0], a.y() - along[1]),
+                             QPointF(b.x() + along[0], b.y() + along[1]))
+            reach = np.subtract(end, start)
+            reach = reach / float(np.linalg.norm(reach)) * 8.0 / shown_place.scale
+            shown_place.centre_lines.append((tuple(np.subtract(start, reach)),
+                                             tuple(np.add(end, reach))))
         painter.restore()
         if manual_layout:
-            for circle in _drawing_view_circles(section["topology"], section["view"]):
+            for circle in _drawing_view_circles(shown["topology"], shown["view"]):
                 if circle["kind"] == "circle" and circle["visible"]:
-                    _paint_centre_mark(painter, section_place.point(circle["u"], circle["v"]),
-                                       circle["radius"] * section_place.scale)
+                    _paint_centre_mark(painter, shown_place.point(circle["u"], circle["v"]),
+                                       circle["radius"] * shown_place.scale)
+                    shown_place.add_centre_cross(circle["u"], circle["v"], circle["radius"])
         else:
             painter.setFont(_drawing_font(DRAWING_TEXT))
-            _paint_circles(painter, metrics, section_place)
-            _paint_chain(painter, metrics, section_place,
-                         _drawing_extras(section_place.hz, reference.hz, tolerance), "bottom", False)
-            _paint_chain(painter, metrics, section_place,
-                         _drawing_extras(section_place.vt, reference.vt, tolerance), "left", False)
-        painter.setPen(_drawing_pen(DRAWING_THIN))
+            _paint_circles(painter, metrics, shown_place)
+            _paint_chain(painter, metrics, shown_place,
+                         _drawing_extras(shown_place.hz, reference.hz, tolerance), "bottom", False)
+            _paint_chain(painter, metrics, shown_place,
+                         _drawing_extras(shown_place.vt, reference.vt, tolerance), "left", False)
+        painter.setPen(_drawing_pen(DRAWING_THIN, role="text"))
         painter.setFont(_drawing_font(DRAWING_TEXT_LARGE, True))
-        label = "A-A"
-        if abs(section_scale - scale) > 1e-6:
-            label += f" ({_drawing_scale_text(section_scale)})"
-        painter.drawText(QPointF(section_place.rect.left(),
-                                 section_place.rect.bottom() + section_place.reserved["bottom"] + 30), label)
+        label = f"{shown['letter']}-{shown['letter']}"
+        if abs(shown_place.scale - scale) > 1e-6:
+            label += f" ({_drawing_scale_text(shown_place.scale)})"
+        painter.drawText(QPointF(shown_place.rect.left(),
+                                 shown_place.rect.bottom() + shown_place.reserved["bottom"] + 30), label)
 
     dimension_hits = []
     for dimension_index, dimension in enumerate(options.get("dimensions", [])):
         place = places.get(dimension.get("view"))
+        if place is None and dimension.get("view") == "section" and sections:   # older drawings
+            place = places.get(f"section-{sections[0]['letter']}")
         if place is None:
             continue
         kind = dimension.get("type", "length")
@@ -14192,7 +14515,7 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
             if np.linalg.norm(text_offset) > 28.0:
                 painter.drawLine(anchor, label_point)
             painter.setFont(_drawing_font(14))
-            painter.setPen(QColor(DRAWING_INK))
+            painter.setPen(_drawing_color("dimension"))
             painter.drawText(label_point, label_text)
             label_width = QFontMetricsF(_drawing_font(14)).horizontalAdvance(label_text)
             dimension_hits.append({"index": dimension_index,
@@ -14224,7 +14547,8 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
             edge = place.point(*edge_values)
             label_rect = _paint_radial_dimension(
                 painter, center, edge, value_text, kind == "diameter", 1.0,
-                QColor(DRAWING_INK), QColor("white"), _drawing_font(DRAWING_TEXT), DRAWING_THIN,
+                _drawing_color("dimension"), _drawing_color("label_back"),
+                _drawing_font(DRAWING_TEXT), DRAWING_THIN,
                 dimension.get("text_offset", (0.0, 0.0)),
                 float(dimension.get("leader_length", 16.0)))
             dimension_hits.append({"index": dimension_index, "x": label_rect.x(),
@@ -14273,10 +14597,18 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
                              min(max(midpoint.y(), label_rect.top()), label_rect.bottom()))
             painter.setPen(_drawing_pen(DRAWING_THIN))
             painter.drawLine(midpoint, target)
-            painter.fillRect(label_rect, QColor("white"))
-            painter.setPen(QColor(DRAWING_INK))
+            painter.fillRect(label_rect, _drawing_color("label_back"))
+            painter.setPen(_drawing_color("dimension"))
             painter.drawText(label_rect, Qt.AlignCenter, label)
         else:
+            shift = float(dimension.get("text_shift", 0.0))
+            if abs(shift) > length / 2:
+                # text moved past an end of the dimension line: the line is continued under it
+                reach = (abs(shift) + label_width / 2 + 4) * (1.0 if shift > 0 else -1.0)
+                painter.setPen(_drawing_pen(DRAWING_THIN))
+                painter.drawLine(end if shift > 0 else start,
+                                 QPointF(midpoint.x() + vector[0] * reach,
+                                         midpoint.y() + vector[1] * reach))
             # text parallel to the dimension line, 1 mm above it, readable from the bottom or the right
             label_rect = _paint_dimension_label(
                 painter, font, midpoint, vector, normal, label,
@@ -14295,14 +14627,23 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
             "width": place.rect.width(), "height": place.rect.height(),
             "low": place.low.tolist(), "high": place.high.tolist(), "scale": place.scale,
             "right": place.view["right"].tolist(), "up": place.view["up"].tolist(),
-            "pick_points": place.view.get("pick_points", np.zeros((0, 2))),
-            "pick_segments": place.view.get("pick_segments", np.zeros((0, 2, 2))),
-            "pick_curves": place.view.get("pick_curves", []),
-            "pick_arcs": place.view.get("pick_arcs", []),
+            # nothing to pick in the shaded isometric view (no edge highlighting there)
+            "pick_points": place.view.get("pick_points", np.zeros((0, 2)))
+                           if name != "isometric" else np.zeros((0, 2)),
+            "pick_segments": place.view.get("pick_segments", np.zeros((0, 2, 2)))
+                             if name != "isometric" else np.zeros((0, 2, 2)),
+            "pick_curves": place.view.get("pick_curves", []) if name != "isometric" else [],
+            "pick_arcs": place.view.get("pick_arcs", []) if name != "isometric" else [],
+            # drawn centre lines (circle crosses, hole axes): references for dimensions
+            "centre_lines": np.asarray(place.centre_lines, dtype=float).reshape(-1, 2, 2),
         })
-    cut_name = ("front", "top", "right")[int(options.get("section_view", 0))]
-    return {"placements": layout_records, "cut_normal": frames[cut_name][2].tolist(),
-            "dimension_hits": dimension_hits}
+    return {"placements": layout_records, "dimension_hits": dimension_hits,
+            # the normals of the three section planes (front / top / right) and every section
+            "plane_normals": [frames[name][2].tolist() for name in DRAWING_SECTION_PLANES],
+            "sections": [{"letter": item["letter"], "name": item["name"], "plane": item["plane"],
+                          "offset": item["offset"], "normal": item["normal"].tolist()}
+                         for item in sections],
+            "page": dict(_DRAWING_PAGE)}
 
 
 def _read_stl_mesh(path, progress=None):
@@ -15435,11 +15776,29 @@ def profile_samples(loops, n_grid=9, max_edge_pts=96):
     return out
 
 class TechnicalDrawingCanvas(QWidget):
+    """Drawing sheet editor in the look of the sketcher: dark background with its grid, geometry
+    and dimensions in the sketcher's colours, white hover glow, orange selection and the
+    sketcher's snap markers. Wheel zooms at the cursor, the middle mouse button pans, the right
+    mouse button cancels the current tool or deselects, Home fits the sheet."""
     sheetEdited = pyqtSignal()
     viewSelected = pyqtSignal(object)
     dimensionPlaced = pyqtSignal(object)
-    cutPlaced = pyqtSignal(float)
+    cutPlaced = pyqtSignal(int, float)            # Cut tool: new section (plane, offset)
+    cutMoved = pyqtSignal(str, float)             # section letter, offset (live while dragged)
+    cutRotated = pyqtSignal(str, int, float)      # section letter, new plane, offset
+    sectionRemoveRequested = pyqtSignal(str)
     statusChanged = pyqtSignal(str)
+    dimensionSelected = pyqtSignal(int)           # index in the dimension list, -1 = none
+    dimensionRemoveRequested = pyqtSignal(int)
+
+    DESK_COL = QColor(18, 18, 21)                 # around the sheet
+    BACK_COL = QColor(28, 28, 32)                 # sketcher background
+    GRID_MINOR, GRID_MAJOR = QColor(38, 38, 38), QColor(60, 60, 60)    # sketcher grid
+    DIM_COL = QColor(170, 240, 170)               # sketcher dimension colour
+    HOT_COL = QColor(255, 255, 255)               # hovered / dragged dimension
+    SELECT_COL = QColor(255, 120, 0)              # sketcher selection
+    GLOW_COL = QColor(255, 255, 255, 70)          # sketcher hover glow
+    ZOOM_RANGE = (0.3, 20.0)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -15469,6 +15828,47 @@ class TechnicalDrawingCanvas(QWidget):
         self._dimensions = []
         self._dimension_drag = None
         self._hover_dimension = None
+        self.selected_dimension = None
+        self._cursor_pos = None
+        self.page_w, self.page_h, self.sheet_name = DRAWING_PAGE_W, DRAWING_PAGE_H, "A2"
+        self._hover_cut = None          # cutting-plane trace under the cursor {view, ends, ...}
+        self._cut_drag = None
+        # grid and snap in sheet millimetres, as in the sketcher
+        self.grid_mm = DEFAULT_GRID
+        self.snap_mm = DEFAULT_SNAP
+        self.snap_enabled = True
+
+    def set_grid(self, grid_mm=None, snap_mm=None, snap_enabled=None):
+        if grid_mm is not None:
+            self.grid_mm = max(1.0, float(grid_mm))
+        if snap_mm is not None:
+            self.snap_mm = max(0.1, float(snap_mm))
+        if snap_enabled is not None:
+            self.snap_enabled = bool(snap_enabled)
+        self.update()
+
+    def _snap(self, value):
+        """A page coordinate or distance on the snap step (sheet mm), when snapping is on."""
+        if not self.snap_enabled:
+            return float(value)
+        step = self.snap_mm * DRAWING_UNITS_PER_MM
+        return float(round(float(value) / step) * step)
+
+    def select_dimension(self, index):
+        """Highlight a dimension (from the dimension list); None / -1 clears it."""
+        index = index if isinstance(index, int) and 0 <= index < len(self._dimensions) else None
+        if index != self.selected_dimension:
+            self.selected_dimension = index
+            self.update()
+
+    def _set_selected_dimension(self, index):
+        self.select_dimension(index)
+        self.dimensionSelected.emit(-1 if self.selected_dimension is None else self.selected_dimension)
+
+    def fit_sheet(self):
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self.update()
 
     def set_sheet(self, image, layout, view_placements, dimensions=None):
         # a QPicture is replayed as vectors at screen resolution; a QImage is a ready-made raster
@@ -15477,8 +15877,16 @@ class TechnicalDrawingCanvas(QWidget):
         self._sheet_cache = None
         self._pixmap = QPixmap() if self._picture is not None else QPixmap.fromImage(image)
         self._layout = layout
+        page = layout.get("page")
+        if page:
+            if (page["w"], page["h"]) != (self.page_w, self.page_h):
+                self._sheet_cache = None
+            self.page_w, self.page_h = float(page["w"]), float(page["h"])
+            self.sheet_name = f"{page['name']} {page['orientation']}"
         self.view_placements = view_placements
         self._dimensions = dimensions if dimensions is not None else []
+        if self.selected_dimension is not None and self.selected_dimension >= len(self._dimensions):
+            self.selected_dimension = None
         self.update()
 
     def set_mode(self, mode=None, view=None):
@@ -15507,10 +15915,10 @@ class TechnicalDrawingCanvas(QWidget):
         self.sheetEdited.emit()
 
     def _sheet_rect(self):
-        bounds = self.rect().adjusted(8, 8, -8, -8)
+        bounds = self.rect().adjusted(16, 44, -16, -16)       # status lines above the sheet
         if bounds.width() <= 0 or bounds.height() <= 0:
             return QRectF()
-        page_aspect = DRAWING_PAGE_W / DRAWING_PAGE_H
+        page_aspect = self.page_w / self.page_h
         width, height = bounds.width(), bounds.height()
         if width / height > page_aspect:
             width = height * page_aspect
@@ -15525,13 +15933,13 @@ class TechnicalDrawingCanvas(QWidget):
         old_rect = self._sheet_rect()
         if old_rect.width() <= 0 or old_rect.height() <= 0:
             return
-        page_point = np.array(((event.pos().x() - old_rect.left()) / old_rect.width() * DRAWING_PAGE_W,
-                               (event.pos().y() - old_rect.top()) / old_rect.height() * DRAWING_PAGE_H))
+        page_point = np.array(((event.pos().x() - old_rect.left()) / old_rect.width() * self.page_w,
+                               (event.pos().y() - old_rect.top()) / old_rect.height() * self.page_h))
         factor = 1.15 ** (event.angleDelta().y() / 120.0)
-        self._zoom = min(6.0, max(0.5, self._zoom * factor))
+        self._zoom = min(self.ZOOM_RANGE[1], max(self.ZOOM_RANGE[0], self._zoom * factor))
         new_rect = self._sheet_rect()
-        mapped = QPointF(new_rect.left() + page_point[0] / DRAWING_PAGE_W * new_rect.width(),
-                         new_rect.top() + page_point[1] / DRAWING_PAGE_H * new_rect.height())
+        mapped = QPointF(new_rect.left() + page_point[0] / self.page_w * new_rect.width(),
+                         new_rect.top() + page_point[1] / self.page_h * new_rect.height())
         self._pan += event.pos() - mapped
         self.update()
         event.accept()
@@ -15540,19 +15948,29 @@ class TechnicalDrawingCanvas(QWidget):
         rect = self._sheet_rect()
         if not rect.contains(screen_point) or rect.width() <= 0 or rect.height() <= 0:
             return None
-        return np.array(((screen_point.x() - rect.left()) / rect.width() * DRAWING_PAGE_W,
-                         (screen_point.y() - rect.top()) / rect.height() * DRAWING_PAGE_H), dtype=float)
+        return np.array(((screen_point.x() - rect.left()) / rect.width() * self.page_w,
+                         (screen_point.y() - rect.top()) / rect.height() * self.page_h), dtype=float)
 
-    def _hit_view(self, page_point):
+    def _hit_view(self, page_point, margin_px=0.0):
+        """View under a page point; `margin_px` screen pixels around each view also count, so
+        outline edges and corners can be picked from just outside the view. While a dimension
+        has its first point, the view of that point wins where views overlap."""
         if page_point is None:
             return None
+        margin = margin_px * self.page_w / max(self._sheet_rect().width(), 1.0)
+        prefer = self._dimension_points[0]["view"] \
+            if self.mode == "dimension" and self._dimension_points else None
+        found = None
         for info in reversed(self._layout.get("placements", [])):
-            rect = QRectF(info["x"], info["y"], info["width"], info["height"])
+            rect = QRectF(info["x"], info["y"], info["width"], info["height"]).adjusted(
+                -margin, -margin, margin, margin)
             if rect.contains(QPointF(*page_point)):
                 index = info.get("record_index")
                 if isinstance(index, int) and 0 <= index < len(self.view_placements):
-                    return info, self.view_placements[index]
-        return None
+                    if prefer is None or info.get("name") == prefer:
+                        return info, self.view_placements[index]
+                    found = found or (info, self.view_placements[index])
+        return found
 
     def _hit_dimension(self, page_point):
         if page_point is None:
@@ -15566,15 +15984,19 @@ class TechnicalDrawingCanvas(QWidget):
         return None
 
     def _paint_dimensions_overlay(self, painter, sheet_rect):
-        scale_x = sheet_rect.width() / DRAWING_PAGE_W
-        scale_y = sheet_rect.height() / DRAWING_PAGE_H
+        scale_x = sheet_rect.width() / self.page_w
+        scale_y = sheet_rect.height() / self.page_h
         scale = min(scale_x, scale_y)
-        font = _drawing_font(max(6.0, DRAWING_TEXT * scale))
+        # ISO lettering height on the sheet, but never smaller than the sketcher's dimension text
+        font = _drawing_font(max(8.0, DRAWING_TEXT * scale))
         metrics = QFontMetricsF(font)
-        line_width = max(0.5, 0.9 * scale)           # thin lines, clearly lighter than the object outline
-        ink = QColor("#e8e9eb")
-        background = QColor("#1c1c20")
+        line_width = 1.0                              # thin as in the sketcher, at any zoom
+        ink = self.DIM_COL
+        background = QColor(28, 28, 32, 220)          # text box of the sketcher's dimensions
         hits = []
+        active = {self._hover_dimension}
+        if self._dimension_drag is not None:
+            active.add(self._dimension_drag["index"])
 
         def screen_page(point):
             return QPointF(sheet_rect.left() + point[0] * scale_x,
@@ -15619,12 +16041,15 @@ class TechnicalDrawingCanvas(QWidget):
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        painter.setPen(QPen(ink, line_width, Qt.SolidLine, Qt.FlatCap, Qt.RoundJoin))
         for index, dimension in enumerate(self._dimensions):
             info = next((item for item in self._layout.get("placements", [])
                          if item.get("name") == dimension.get("view")), None)
             if info is None:
                 continue
+            ink = self.HOT_COL if index in active else \
+                self.SELECT_COL if index == self.selected_dimension else self.DIM_COL
+            painter.setPen(QPen(ink, line_width, Qt.SolidLine, Qt.FlatCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
             kind = dimension.get("type", "length")
             points = dimension.get("points") or [dimension.get("a"), dimension.get("b")]
             if kind == "angle":
@@ -15740,6 +16165,15 @@ class TechnicalDrawingCanvas(QWidget):
                 painter.setPen(QPen(ink, line_width))
                 painter.drawLine(anchor, target)
             else:
+                shift = float(dimension.get("text_shift", 0.0))
+                if abs(shift) > length_page / 2:
+                    # number moved past an end: the dimension line runs on under it
+                    reach = (abs(shift) * scale + metrics.horizontalAdvance(text) / 2 + 4) * \
+                        (1.0 if shift > 0 else -1.0)
+                    painter.setPen(QPen(ink, line_width))
+                    painter.drawLine(end if shift > 0 else start,
+                                     QPointF(anchor.x() + direction_screen[0] * reach,
+                                             anchor.y() + direction_screen[1] * reach))
                 label_rect = _paint_dimension_label(
                     painter, font, anchor, direction_screen, np.array((-direction_screen[1], direction_screen[0])),
                     text, float(dimension.get("text_shift", 0.0)), float(dimension.get("text_lift", 0.0)),
@@ -15749,7 +16183,7 @@ class TechnicalDrawingCanvas(QWidget):
         self._layout["dimension_hits"] = hits
 
     @staticmethod
-    def _geometry_hit(page_point, info, tolerance):
+    def _geometry_hit(page_point, info, tolerance, include_centre_lines=True):
         view_point = TechnicalDrawingCanvas._view_point(page_point, info)
         best = None
         points = np.asarray(info.get("reference_points", ()), dtype=float).reshape(-1, 2)
@@ -15827,6 +16261,17 @@ class TechnicalDrawingCanvas(QWidget):
                             deviations = np.abs(direction[0] * offsets[:, 1] -
                                                  direction[1] * offsets[:, 0]) / length
                             best["linear"] = float(deviations.max()) <= max(tolerance * 0.25, 1e-6)
+        # centre lines (circle crosses, hole axes) are references for dimensions like edges, but
+        # with the lowest priority: only where they are clearly nearer than any part geometry
+        centre_lines = np.asarray(info.get("centre_lines", ()) if include_centre_lines else (),
+                                  dtype=float).reshape(-1, 2, 2)
+        if len(centre_lines):
+            distance, nearest, index = _projected_segments_hit(view_point, centre_lines)
+            best_distance = np.inf if best is None else \
+                float(np.linalg.norm(np.asarray(best["position"]) - view_point))
+            if distance <= tolerance and distance < best_distance - 0.5 * tolerance:
+                best = {"kind": "edge", "position": nearest, "segment": centre_lines[index],
+                        "reference": False, "centre_line": True}
         return best
 
     @staticmethod
@@ -15853,11 +16298,144 @@ class TechnicalDrawingCanvas(QWidget):
         return [float(info["low"][0] + (page_point[0] - info["x"]) / info["scale"]),
                 float(info["high"][1] - (page_point[1] - info["y"]) / info["scale"])]
 
+    def _cut_traces(self):
+        """Cutting-line traces of all sections in the projected views:
+        [{letter, plane, offset, view, info, ends (page), cr, cu}]."""
+        traces = []
+        for section in self._layout.get("sections", []):
+            normal = np.asarray(section["normal"], dtype=float)
+            for info in self._layout.get("placements", []):
+                if info.get("name") not in ("front", "top", "right", "left") or \
+                        info.get("name") == section["name"]:
+                    continue
+                ends = _drawing_cut_trace(info["right"], info["up"], info["low"], info["high"],
+                                          normal, float(section["offset"]),
+                                          24.0 / max(info["scale"], 1e-9))
+                if ends is None:
+                    continue
+                traces.append({"letter": section["letter"], "plane": section["plane"],
+                               "offset": float(section["offset"]),
+                               "view": info["name"], "info": info,
+                               "ends": [np.asarray(self._view_page_point(end, info)) for end in ends],
+                               "cr": float(normal @ np.asarray(info["right"])),
+                               "cu": float(normal @ np.asarray(info["up"]))})
+        return traces
+
+    def _section_offset(self, letter):
+        return next((float(section["offset"]) for section in self._layout.get("sections", [])
+                     if section["letter"] == letter), None)
+
+    def _edge_on_plane(self, info, prefer_vertical=True, exclude=None):
+        """Section plane (0 front / 1 top / 2 right) seen edge-on in a view: the one giving a
+        vertical cutting line (or horizontal), other than `exclude`."""
+        best = None
+        for plane, normal in enumerate(self._layout.get("plane_normals", [])):
+            if plane == exclude:
+                continue
+            normal = np.asarray(normal, dtype=float)
+            cr, cu = float(normal @ np.asarray(info["right"])), float(normal @ np.asarray(info["up"]))
+            if cr * cr + cu * cu < 0.75:
+                continue
+            score = abs(cr) if prefer_vertical else abs(cu)
+            if best is None or score > best[0]:
+                best = (score, plane)
+        return None if best is None else best[1]
+
+    def _plane_offset(self, plane, info, page_point):
+        """Offset of a section plane through a page point of a view."""
+        u, v = self._view_point(page_point, info)
+        world = np.asarray(info["right"]) * u + np.asarray(info["up"]) * v
+        return round(float(world @ np.asarray(self._layout["plane_normals"][plane])), 2)
+
+    def _cut_menu(self, trace, page_point, global_pos):
+        """Right-click on a cutting line: rotate the cut by 90° in this view or delete it."""
+        letter = trace["letter"]
+        menu = QMenu(self)
+        rotate = menu.addAction(QIcon(os.path.join(_LOG_DIR, "icons", "view_section.png")),
+                                f"Rotate {letter}-{letter} by 90°")
+        remove = menu.addAction(QIcon(os.path.join(_LOG_DIR, "icons", "delete_selected.png")),
+                                f"Delete section {letter}-{letter}")
+        chosen = menu.exec_(global_pos)
+        if chosen is rotate:
+            plane = self._edge_on_plane(trace["info"], abs(trace["cr"]) < abs(trace["cu"]),
+                                        exclude=trace["plane"])
+            if plane is not None:
+                self.cutRotated.emit(letter, plane,
+                                     self._plane_offset(plane, trace["info"], page_point))
+        elif chosen is remove:
+            self.sectionRemoveRequested.emit(letter)
+
+    def _hit_cut(self, page_point):
+        """Cutting-plane trace within 8 px of a page point, or None."""
+        if page_point is None:
+            return None
+        tolerance = 8.0 * self.page_w / max(self._sheet_rect().width(), 1.0)
+        for trace in self._cut_traces():
+            a, b = trace["ends"]
+            along = b - a
+            span = float(along @ along)
+            t = 0.0 if span <= 1e-12 else min(1.0, max(0.0, float((page_point - a) @ along) / span))
+            if float(np.linalg.norm(page_point - (a + along * t))) <= tolerance:
+                return trace
+        return None
+
+    def _cut_offset_at(self, trace, page_point):
+        """Offset of the section plane through a page point, on the snap step (sheet mm turned
+        into model mm by the view's scale) while snapping is on."""
+        u, v = self._view_point(page_point, trace["info"])
+        offset = u * trace["cr"] + v * trace["cu"]
+        if self.snap_enabled:
+            step = self.snap_mm * DRAWING_UNITS_PER_MM / max(trace["info"]["scale"], 1e-9)
+            offset = round(offset / step) * step
+        return round(float(offset), 2)              # as the Cut offset field shows it
+
+    def _dimension_geometry(self, page_point, info, tolerance):
+        """Geometry the dimension tools pick. For lengths and angles a point within reach wins
+        over the edge or curve it lies on (the sketcher's vertex snap), so clicking near a corner
+        starts a point-to-point dimension instead of instantly dimensioning the whole edge. An
+        edge length is only taken when the edge is clicked away from its end points."""
+        # centre lines are no use for radius / diameter (those need the circle itself)
+        geometry = self._geometry_hit(page_point, info, tolerance, include_centre_lines=
+                                      self.dimension_kind not in ("radius", "diameter"))
+        if geometry is None or geometry["kind"] == "point" or \
+                self.dimension_kind in ("radius", "diameter"):
+            return geometry
+        view_point = np.asarray(self._view_point(page_point, info), dtype=float)
+        best = None
+        for key, reference in (("reference_points", True), ("pick_points", False)):
+            points = np.asarray(info.get(key, ()), dtype=float).reshape(-1, 2)
+            if not len(points):
+                continue
+            distance, index = _projected_points_hit(view_point, points)
+            if distance <= 1.5 * tolerance and (best is None or distance < best[0]):
+                best = (distance, {"kind": "point", "position": points[index],
+                                   "reference": reference, "explicit_point": reference})
+        return best[1] if best is not None else geometry
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MiddleButton:
             self._pan_anchor = event.pos()
             self._pan_origin = QPointF(self._pan)
             self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.RightButton:
+            page_point = self._page_point(event.pos())
+            cut = self._hit_cut(page_point) if self.mode is None else None
+            if cut is not None:                      # cutting line: rotate by 90° / delete
+                self._cut_menu(cut, page_point, event.globalPos())
+                event.accept()
+                return
+            # as in the sketcher: abort the current tool, otherwise deselect
+            if self.mode is not None:
+                self.set_mode()
+            else:
+                self.selected = None
+                self._selected_geometry = None
+                self.viewSelected.emit(None)
+                self._set_selected_dimension(None)
+                self.statusChanged.emit("Ready")
+            self.update()
             event.accept()
             return
         if event.button() != Qt.LeftButton:
@@ -15870,6 +16448,9 @@ class TechnicalDrawingCanvas(QWidget):
             if dimension_hit is not None:
                 index = dimension_hit["index"]
                 dimension = self._dimensions[index]
+                self.selected = None
+                self._selected_geometry = None
+                self._set_selected_dimension(index)
                 drag = {"index": index, "start": page_point, "kind": dimension.get("type"),
                         "text_offset": np.asarray(
                             dimension.get("text_offset", (0.0, 0.0)), dtype=float)}
@@ -15882,29 +16463,37 @@ class TechnicalDrawingCanvas(QWidget):
                 self.setCursor(Qt.ClosedHandCursor)
                 self.update()
                 return
-        hit = self._hit_view(page_point)
+            self._set_selected_dimension(None)
+            cut = self._hit_cut(page_point)
+            if cut is not None:        # drag the cutting line to move the section through the part
+                self._cut_drag = cut
+                self.statusChanged.emit(f"Drag the cutting line {cut['letter']}-{cut['letter']}")
+                self.update()
+                return
+        hit = self._hit_view(page_point, 12.0 if self.mode == "dimension" else 0.0)
         if self.mode == "place_view":
             record = next((item for item in self.view_placements
                            if item.get("name") == self.active_view), None)
+            x, y = self._snap(page_point[0]), self._snap(page_point[1])   # top-left on the grid
             if record is None:
-                record = {"name": self.active_view, "x": float(page_point[0]),
-                          "y": float(page_point[1])}
+                record = {"name": self.active_view, "x": x, "y": y}
                 self.view_placements.append(record)
             else:
-                record["x"], record["y"] = map(float, page_point)
+                record["x"], record["y"] = x, y
             self.selected = record
             self.set_mode()
             self.sheetEdited.emit()
             self.viewSelected.emit(record)
             return
         if self.mode == "dimension":
-            if hit is None or hit[0]["name"] not in ("front", "top", "right", "left", "section"):
+            if hit is None or not (hit[0]["name"] in ("front", "top", "right", "left") or
+                                   hit[0]["name"].startswith("section")):
                 return
             info, _record = hit
-            tolerance = max(10.0 * DRAWING_PAGE_W /
+            tolerance = max(10.0 * self.page_w /
                             max(self._sheet_rect().width(), 1.0) / max(info["scale"], 1e-9),
                             8.0 / max(info["scale"], 1e-9))
-            geometry = self._geometry_hit(page_point, info, tolerance)
+            geometry = self._dimension_geometry(page_point, info, tolerance)
             if geometry is None:
                 self.statusChanged.emit("Select a highlighted sketch point or edge")
                 return
@@ -15931,38 +16520,11 @@ class TechnicalDrawingCanvas(QWidget):
                                  (center + direction * radius).tolist()]
                 self._emit_dimension(info["name"], kind, positions, value)
                 return
-            straight = geometry["kind"] == "edge" or (geometry["kind"] == "curve" and
-                                                      geometry.get("linear", False))
-            if kind == "length" and straight:
-                first, second = geometry["segment"] if "segment" in geometry else \
-                    (geometry["curve"][0], geometry["curve"][-1])
-                first, second = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
-                if self._dimension_points:
-                    # a picked point (e.g. a circle centre) measured to this line, perpendicular to it
-                    if self._dimension_points[0]["view"] != info["name"]:
-                        return
-                    anchor = np.asarray(self._dimension_points[0]["position"], dtype=float)
-                    along = second - first
-                    span = float(along @ along)
-                    if span <= 1e-18:
-                        return
-                    foot = first + along * float((anchor - first) @ along) / span
-                    distance = float(np.linalg.norm(anchor - foot))
-                    if distance <= 1e-9:
-                        self.statusChanged.emit("The point lies on the line")
-                        return
-                    self._emit_dimension(info["name"], kind, [anchor.tolist(), foot.tolist()], distance)
-                    return
-                positions = [first.tolist(), second.tolist()]
-                value = _dimension_measurement("length", geometry)["value"]
-                self._emit_dimension(info["name"], kind, positions, value)
+            if kind == "length":
+                self._pick_length(info["name"], geometry)
                 return
             if kind == "angle" and geometry["kind"] != "point":
                 self.statusChanged.emit("Select three sketch points for an angle")
-                return
-            if kind == "length" and geometry["kind"] == "curve":
-                self.statusChanged.emit(
-                    "Select a straight edge, two points, or a point (circle centre) and a line")
                 return
             point = {"view": info["name"], "position": position.tolist()}
             if self._dimension_points and self._dimension_points[0]["view"] != point["view"]:
@@ -15985,12 +16547,12 @@ class TechnicalDrawingCanvas(QWidget):
             if hit is None or hit[0]["name"] not in ("front", "top", "right", "left"):
                 return
             info, _record = hit
-            normal = self._layout.get("cut_normal")
-            if normal is None:
+            # a new section through the clicked point: a vertical cutting line in this view
+            # (right-click the line → Rotate by 90° for a horizontal one)
+            plane = self._edge_on_plane(info, prefer_vertical=True)
+            if plane is None:
                 return
-            u, v = self._view_point(page_point, info)
-            world_point = np.asarray(info["right"]) * u + np.asarray(info["up"]) * v
-            self.cutPlaced.emit(float(world_point @ np.asarray(normal)))
+            self.cutPlaced.emit(plane, self._plane_offset(plane, info, page_point))
             self.set_mode()
             return
         if hit is None:
@@ -15999,7 +16561,7 @@ class TechnicalDrawingCanvas(QWidget):
             self.update()
             return
         info, record = hit
-        tolerance = max(10.0 * DRAWING_PAGE_W /
+        tolerance = max(10.0 * self.page_w /
                         max(self._sheet_rect().width(), 1.0) / max(info["scale"], 1e-9),
                         8.0 / max(info["scale"], 1e-9))
         geometry = self._geometry_hit(page_point, info, tolerance)
@@ -16009,8 +16571,9 @@ class TechnicalDrawingCanvas(QWidget):
             self._selected_geometry = geometry
             self._drag_offset = None
             self.viewSelected.emit(record)
-            selection_name = {"point": "sketch point", "curve": "sketch curve",
-                              "edge": "drawing edge"}[geometry["kind"]]
+            selection_name = "centre line" if geometry.get("centre_line") else \
+                {"point": "sketch point", "curve": "sketch curve",
+                 "edge": "drawing edge"}[geometry["kind"]]
             self.statusChanged.emit(f"Selected {selection_name}")
             self.update()
             return
@@ -16023,8 +16586,8 @@ class TechnicalDrawingCanvas(QWidget):
 
     def _dimension_drag_frame(self, dimension):
         """Page-space frame a dimension is dragged in: the dimension line moves parallel to itself,
-        its text moves freely along / away from it, a radial leader turns about the centre and
-        grows or shrinks with the pointer."""
+        its text slides along it and takes the line along sideways, a radial leader turns about
+        the centre and grows or shrinks with the pointer."""
         info = next((item for item in self._layout.get("placements", [])
                      if item.get("name") == dimension.get("view")), None)
         points = dimension.get("points") or [dimension.get("a"), dimension.get("b")]
@@ -16057,16 +16620,22 @@ class TechnicalDrawingCanvas(QWidget):
         leader = float(dimension.get("leader_length", 16.0))
         return {"centre": centre, "radius": radius, "knee": centre + direction * (radius + leader)}
 
-    @staticmethod
-    def _drag_dimension_to(dimension, drag, page_point):
+    def _drag_dimension_to(self, dimension, drag, page_point):
+        """Move a dragged dimension; with snapping on, its distance from the geometry, the
+        position of its number and a leader's length move in whole snap steps."""
         kind = drag.get("kind") or "length"
         delta = page_point - drag["start"]
+        snap = self._snap
         if kind == "length" and "normal" in drag:
             if drag.get("part") == "text":
-                dimension["text_shift"] = float(drag["shift"] + delta @ drag["direction"])
-                dimension["text_lift"] = float(drag["lift"] + delta @ drag["normal"])
+                # as in the sketcher: the number stays on its dimension line and slides along it;
+                # moving it sideways carries the dimension line (and extension lines) with it
+                dimension["text_shift"] = snap(drag["shift"] + delta @ drag["direction"])
+                dimension["offset_distance"] = snap(drag["distance"] + drag["lift"] +
+                                                    delta @ drag["normal"])
+                dimension["text_lift"] = 0.0
             else:
-                dimension["offset_distance"] = float(drag["distance"] + delta @ drag["normal"])
+                dimension["offset_distance"] = snap(drag["distance"] + delta @ drag["normal"])
             dimension.pop("text_offset", None)
         elif kind in ("radius", "diameter") and "centre" in drag:
             knee = page_point - (drag["start"] - drag["knee"])
@@ -16074,12 +16643,80 @@ class TechnicalDrawingCanvas(QWidget):
             distance = float(np.linalg.norm(offset))
             if distance > 1e-6:
                 dimension["angle"] = math.atan2(-offset[1], offset[0])
-                dimension["leader_length"] = max(4.0, distance - drag["radius"])
+                dimension["leader_length"] = max(4.0, snap(distance - drag["radius"]))
                 dimension.pop("text_offset", None)
         elif kind == "angle" and "vertex" in drag and drag.get("part") != "text":
-            dimension["offset_distance"] = max(10.0, float(np.linalg.norm(page_point - drag["vertex"])))
+            dimension["offset_distance"] = max(
+                10.0, snap(float(np.linalg.norm(page_point - drag["vertex"]))))
         else:
             dimension["text_offset"] = (drag["text_offset"] + delta).tolist()
+
+    def _pick_length(self, view, geometry):
+        """Length dimensions always take two picks, as the sketcher's Length tool: point → point,
+        point → line or line → point (perpendicular distance), or two parallel lines (their
+        distance). A single click never creates a dimension; an edge's length is dimensioned by
+        picking its two end points."""
+        position = np.asarray(geometry["position"], dtype=float)
+        straight = geometry["kind"] == "edge" or (geometry["kind"] == "curve" and
+                                                  geometry.get("linear", False))
+        if geometry["kind"] == "curve" and not straight:
+            self.statusChanged.emit("Length: pick a point or a straight edge (not a curve)")
+            return
+        pick = {"view": view, "position": position.tolist()}
+        if straight:
+            ends = geometry["segment"] if "segment" in geometry else \
+                (geometry["curve"][0], geometry["curve"][-1])
+            pick["segment"] = [np.asarray(end, dtype=float).tolist() for end in ends]
+        if not self._dimension_points:
+            self._dimension_points.append(pick)
+            line = "centre line" if geometry.get("centre_line") else "line"
+            self.statusChanged.emit(
+                "Length: now pick the second point" if not straight else
+                f"Length: now pick a point (distance to this {line}) or a parallel line / "
+                "centre line")
+            self.update()
+            return
+        first = self._dimension_points[0]
+        if first["view"] != view:
+            self.statusChanged.emit("Length: pick the second element in the same view")
+            return
+
+        def foot_on(point, segment):
+            a, b = (np.asarray(end, dtype=float) for end in segment)
+            along = b - a
+            span = float(along @ along)
+            if span <= 1e-18:
+                return None
+            return a + along * float((point - a) @ along) / span
+
+        line_a, line_b = first.get("segment"), pick.get("segment")
+        start = np.asarray(first["position"], dtype=float)
+        if line_a is None and line_b is None:
+            positions = [start, position]
+        elif line_a is None or line_b is None:
+            point, line = (start, line_b) if line_a is None else (position, line_a)
+            foot = foot_on(point, line)
+            if foot is None:
+                return
+            positions = [point, foot]
+        else:
+            direction_a = np.subtract(line_a[1], line_a[0])
+            direction_b = np.subtract(line_b[1], line_b[0])
+            cross = float(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
+            norms = float(np.linalg.norm(direction_a) * np.linalg.norm(direction_b))
+            if norms <= 1e-18 or abs(cross) > 1e-3 * norms:
+                self.statusChanged.emit("Length: the two lines are not parallel - pick a point")
+                return
+            middle = (np.asarray(line_a[0], dtype=float) + np.asarray(line_a[1], dtype=float)) / 2
+            foot = foot_on(middle, line_b)
+            if foot is None:
+                return
+            positions = [middle, foot]
+        value = float(np.linalg.norm(positions[1] - positions[0]))
+        if value <= 1e-9:
+            self.statusChanged.emit("Length: pick two different elements")
+            return
+        self._emit_dimension(view, "length", [p.tolist() for p in positions], value)
 
     def _emit_dimension(self, view, kind, points, value):
         self.dimensionPlaced.emit({"view": view, "points": points,
@@ -16087,7 +16724,14 @@ class TechnicalDrawingCanvas(QWidget):
                                    "type": kind, "value": float(value)})
         self.set_mode()
 
+    def leaveEvent(self, event):
+        self._cursor_pos = None
+        self._hover_geometry = None
+        self.update()
+        super().leaveEvent(event)
+
     def mouseMoveEvent(self, event):
+        self._cursor_pos = QPointF(event.pos())
         if self._pan_anchor is not None:
             self._pan = self._pan_origin + QPointF(event.pos() - self._pan_anchor)
             self.update()
@@ -16102,35 +16746,44 @@ class TechnicalDrawingCanvas(QWidget):
             self._drag_dimension_to(dimension, drag, page_point)
             self.sheetEdited.emit()
             return
+        if self._cut_drag is not None:
+            page_point = self._page_point(event.pos())
+            if page_point is not None:
+                letter = self._cut_drag["letter"]
+                offset = self._cut_offset_at(self._cut_drag, page_point)
+                if offset != self._section_offset(letter):
+                    self.cutMoved.emit(letter, offset)
+                    self.statusChanged.emit(f"Cut {letter}-{letter} at {offset:g} mm")
+            return
         if self._drag_offset is None or self.selected is None:
             page_point = self._page_point(event.pos())
             dimension_hit = self._hit_dimension(page_point)
             hover_dimension = dimension_hit["index"] if dimension_hit is not None else None
-            if hover_dimension != self._hover_dimension:
+            hover_cut = self._hit_cut(page_point) if self.mode is None and \
+                hover_dimension is None else None
+            if hover_dimension != self._hover_dimension or \
+                    (hover_cut is None) != (self._hover_cut is None):
                 self._hover_dimension = hover_dimension
-                self.setCursor(Qt.PointingHandCursor if hover_dimension is not None else
-                              Qt.CrossCursor if self.mode else Qt.ArrowCursor)
+                self.setCursor(
+                    Qt.PointingHandCursor if hover_dimension is not None else
+                    (Qt.SizeHorCursor if abs(hover_cut["cr"]) >= abs(hover_cut["cu"])
+                     else Qt.SizeVerCursor) if hover_cut is not None else
+                    Qt.CrossCursor if self.mode else Qt.ArrowCursor)
                 self.update()
-            hit = self._hit_view(page_point)
+            self._hover_cut = hover_cut
+            hit = self._hit_view(page_point, 12.0 if self.mode == "dimension" else 0.0)
             geometry = None
             if hit is not None:
                 info = hit[0]
-                tolerance = max(10.0 * DRAWING_PAGE_W /
+                tolerance = max(10.0 * self.page_w /
                                 max(self._sheet_rect().width(), 1.0) / max(info["scale"], 1e-9),
                                 8.0 / max(info["scale"], 1e-9))
-                geometry = self._geometry_hit(page_point, info, tolerance)
+                geometry = self._dimension_geometry(page_point, info, tolerance) \
+                    if self.mode == "dimension" else self._geometry_hit(page_point, info, tolerance)
                 if geometry is not None:
                     geometry["view"] = info["name"]
-            key = None if geometry is None else (
-                geometry["view"], geometry["kind"], geometry["reference"],
-                tuple(np.round(geometry["position"], 6)))
-            previous = None if self._hover_geometry is None else (
-                self._hover_geometry["view"], self._hover_geometry["kind"],
-                self._hover_geometry["reference"],
-                tuple(np.round(self._hover_geometry["position"], 6)))
-            if key != previous:
-                self._hover_geometry = geometry
-                self.update()
+            self._hover_geometry = geometry
+            self.update()       # cheap: the sheet is cached; also refreshes the cursor read-out
             return
         page_point = self._page_point(event.pos())
         if page_point is None:
@@ -16154,8 +16807,13 @@ class TechnicalDrawingCanvas(QWidget):
                 if abs(nearest - position[axis]) <= snap_tolerance:
                     position[axis] = nearest
                     guides.append((axis, nearest))
-        self.selected["x"] = float(min(max(position[0], 60.0), DRAWING_PAGE_W - 60.0))
-        self.selected["y"] = float(min(max(position[1], 60.0), DRAWING_PAGE_H - 60.0))
+        # alignment with another view wins; otherwise the view's corner goes on the snap grid
+        aligned = {axis for axis, _value in guides}
+        for axis in (0, 1):
+            if axis not in aligned:
+                position[axis] = self._snap(position[axis])
+        self.selected["x"] = float(min(max(position[0], 60.0), self.page_w - 60.0))
+        self.selected["y"] = float(min(max(position[1], 60.0), self.page_h - 60.0))
         self._snap_guides = tuple(guides)
         self.sheetEdited.emit()
 
@@ -16173,9 +16831,22 @@ class TechnicalDrawingCanvas(QWidget):
                 self.sheetEdited.emit()
                 self.update()
                 return
+            if self._cut_drag is not None:
+                letter = self._cut_drag["letter"]
+                page_point = self._page_point(event.pos())
+                offset = self._cut_offset_at(self._cut_drag, page_point) if page_point is not None \
+                    else self._section_offset(letter)
+                self._cut_drag = None
+                if offset is not None:
+                    self.cutMoved.emit(letter, offset)
+                    self.statusChanged.emit(f"Cut {letter}-{letter} at {offset:g} mm")
+                self.sheetEdited.emit()
+                self.update()
+                return
             was_dragging = self._drag_offset is not None
             self._drag_offset = None
             self._drag_info = None
+            self._snap_guides = ()
             if was_dragging:
                 self.sheetEdited.emit()
 
@@ -16184,57 +16855,243 @@ class TechnicalDrawingCanvas(QWidget):
             self.set_mode()
             event.accept()
             return
+        if event.key() == Qt.Key_Home:
+            self.fit_sheet()
+            event.accept()
+            return
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            self.remove_selected()
+            if self.selected_dimension is not None:
+                self.dimensionRemoveRequested.emit(self.selected_dimension)
+            else:
+                self.remove_selected()
             event.accept()
             return
         super().keyPressEvent(event)
 
-    def _paint_sheet_picture(self, painter, rect):
-        """Replay the recorded sheet crisply at any zoom, shown as light ink on a dark sheet.
-        The result is cached per picture and size, so hover and pan repaints stay cheap."""
-        size = rect.size().toSize()
-        if size.isEmpty():
+    def _paint_grid(self, painter, rect):
+        """The sketcher's grid on the sheet: lines every `grid_mm`, every fifth one stronger, and
+        the snap dots while snapping is on. Lines that would come closer than 8 px are thinned
+        out in a 1-2-5 series and dots that dense are left out, as in the sketcher."""
+        visible = rect.intersected(QRectF(self.rect()))
+        if visible.isEmpty():
             return
-        key = (self._picture_serial, size.width(), size.height())
+        pixels_per_mm = rect.width() / self.page_w * DRAWING_UNITS_PER_MM
+        k = 1
+        for m in (2, 5, 2, 5):
+            if self.grid_mm * k * pixels_per_mm >= 8.0:
+                break
+            k *= m
+        while self.grid_mm * k * pixels_per_mm < 8.0:
+            k *= 10
+        step = self.grid_mm * k * pixels_per_mm
+        minor, major = [], []
+        for first, low, high, horizontal in ((rect.left(), visible.left(), visible.right(), False),
+                                             (rect.top(), visible.top(), visible.bottom(), True)):
+            for i in range(math.ceil((low - first) / step), math.floor((high - first) / step) + 1):
+                value = int(first + i * step) + 0.5
+                line = QLineF(visible.left(), value, visible.right(), value) if horizontal else \
+                    QLineF(value, visible.top(), value, visible.bottom())
+                (major if i % 5 == 0 else minor).append(line)
+        for colour, lines in ((self.GRID_MINOR, minor), (self.GRID_MAJOR, major)):
+            if lines:
+                painter.setPen(QPen(colour, 1))
+                painter.drawLines(lines)
+        snap_step = self.snap_mm * pixels_per_mm
+        if self.snap_enabled and snap_step >= 8.0:
+            i0, i1 = math.ceil((visible.left() - rect.left()) / snap_step), \
+                math.floor((visible.right() - rect.left()) / snap_step)
+            j0, j1 = math.ceil((visible.top() - rect.top()) / snap_step), \
+                math.floor((visible.bottom() - rect.top()) / snap_step)
+            if 0 < (i1 - i0 + 1) * (j1 - j0 + 1) <= 40000:
+                dot_pen = QPen(QColor(55, 55, 55), 2)
+                dot_pen.setCapStyle(Qt.RoundCap)
+                painter.setPen(dot_pen)
+                painter.drawPoints(QPolygonF([
+                    QPointF(rect.left() + i * snap_step, rect.top() + j * snap_step)
+                    for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)]))
+
+    def _sheet_layer(self, rect):
+        """The recorded sheet replayed as vectors into a transparent pixmap, crisp at any zoom and
+        device pixel ratio. At moderate zoom the whole sheet is cached so panning and hovering only
+        blit it; zoomed far in, only the visible part is rendered."""
+        view = QRectF(self.rect())
+        whole = rect.width() * rect.height() <= 3.0 * max(view.width() * view.height(), 1.0)
+        target = QRectF(rect) if whole else rect.intersected(view)
+        if target.width() < 1 or target.height() < 1:
+            return None
+        dpr = self.devicePixelRatioF()
+        key = (self._picture_serial, dpr, round(rect.width(), 2), round(rect.height(), 2))
+        if not whole:
+            key += (round(rect.left(), 2), round(rect.top(), 2), view.width(), view.height())
         if self._sheet_cache is None or self._sheet_cache[0] != key:
-            pixmap = QPixmap(size)
+            pixmap = QPixmap(max(1, math.ceil(target.width() * dpr)),
+                             max(1, math.ceil(target.height() * dpr)))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(Qt.transparent)
             sheet = QPainter(pixmap)
             sheet.setRenderHint(QPainter.Antialiasing, True)
             sheet.setRenderHint(QPainter.TextAntialiasing, True)
             sheet.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            sheet.fillRect(pixmap.rect(), QColor("white"))
-            sheet.scale(size.width() / DRAWING_PAGE_W, size.height() / DRAWING_PAGE_H)
+            sheet.translate(rect.left() - target.left(), rect.top() - target.top())
+            sheet.scale(rect.width() / self.page_w, rect.height() / self.page_h)
             sheet.drawPicture(0, 0, self._picture)
-            sheet.resetTransform()
-            sheet.setRenderHint(QPainter.Antialiasing, False)
-            for mode, colour in ((QPainter.CompositionMode_Difference, QColor(255, 255, 255)),
-                                 (QPainter.CompositionMode_Multiply, QColor(209, 209, 209)),
-                                 (QPainter.CompositionMode_Plus, QColor(28, 28, 32))):
-                sheet.setCompositionMode(mode)
-                sheet.fillRect(pixmap.rect(), colour)
             sheet.end()
-            self._sheet_cache = (key, pixmap)
-        painter.drawPixmap(rect.topLeft().toPoint(), self._sheet_cache[1])
+            self._sheet_cache = (key, pixmap, target.topLeft() - rect.topLeft())
+        _key, pixmap, offset = self._sheet_cache
+        return pixmap, rect.topLeft() + offset
+
+    def _placement(self, name):
+        return next((item for item in self._layout.get("placements", [])
+                     if item.get("name") == name), None)
+
+    def _stroke_geometry(self, painter, geometry, info, rect):
+        if geometry["kind"] == "curve":
+            painter.drawPolyline(QPolygonF([self._screen_point(point, info, rect)
+                                            for point in geometry["curve"]]))
+        elif geometry["kind"] == "edge":
+            first, second = geometry["segment"]
+            painter.drawLine(self._screen_point(first, info, rect),
+                             self._screen_point(second, info, rect))
+
+    def _paint_geometry_marks(self, painter, rect):
+        """Selected geometry in the sketcher's selection orange, the hovered one under its white
+        glow; while dimensioning also the sketcher's snap marker (square = point, ring = edge)."""
+        selected = self._selected_geometry
+        info = self._placement(selected["view"]) if selected is not None else None
+        if info is not None:
+            if selected["kind"] == "point":
+                centre = self._screen_point(selected["position"], info, rect)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(self.SELECT_COL)
+                painter.drawEllipse(centre, 4.0, 4.0)
+                painter.setPen(QPen(self.SELECT_COL, 1.5))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(centre, 7.0, 7.0)
+            else:
+                painter.setPen(QPen(self.SELECT_COL, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                painter.setBrush(Qt.NoBrush)
+                self._stroke_geometry(painter, selected, info, rect)
+        hover = self._hover_geometry
+        info = self._placement(hover["view"]) if hover is not None else None
+        if info is None:
+            return
+        position = self._screen_point(hover["position"], info, rect)
+        if hover["kind"] == "point":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.GLOW_COL)
+            painter.drawEllipse(position, 10.0, 10.0)
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(position, 7.0, 7.0)
+        else:
+            painter.setPen(QPen(self.GLOW_COL, 10, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            self._stroke_geometry(painter, hover, info, rect)
+        if self.mode == "dimension":
+            painter.setBrush(Qt.NoBrush)
+            if hover["kind"] == "point":
+                painter.setPen(QPen(QColor(255, 230, 0), 1.5))
+                painter.drawRect(QRectF(position.x() - 6, position.y() - 6, 12, 12))
+            else:
+                painter.setPen(QPen(QColor(255, 90, 255), 1.5))
+                painter.drawEllipse(position, 6.0, 6.0)
+
+    def _paint_dimension_picks(self, painter, rect):
+        """Points already picked for a dimension (the sketcher's first-pick glow) and a dashed
+        guide from the last one to the cursor."""
+        last = None
+        for point in self._dimension_points:
+            info = self._placement(point["view"])
+            if info is None:
+                continue
+            last = self._screen_point(point["position"], info, rect)
+            if point.get("segment") is not None:          # a picked line: glow along it
+                painter.setPen(QPen(QColor(255, 160, 0, 150), 9, Qt.SolidLine, Qt.RoundCap))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawLine(self._screen_point(point["segment"][0], info, rect),
+                                 self._screen_point(point["segment"][1], info, rect))
+                continue
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 160, 0, 170))
+            painter.drawEllipse(last, 9.0, 9.0)
+        painter.setBrush(Qt.NoBrush)
+        if last is not None and self._cursor_pos is not None:
+            painter.setPen(QPen(QColor(255, 120, 0, 160), 1, Qt.DashLine))
+            painter.drawLine(last, self._cursor_pos)
+
+    def _paint_hud(self, painter, rect):
+        """Status lines in the top left corner, as in the sketcher."""
+        painter.setFont(QFont("Arial", 9))
+        mode = {None: "select", "place_view": f"place {self.active_view or ''} view",
+                "dimension": f"{self.dimension_kind} dimension", "cut": "section cut"}.get(
+                    self.mode, str(self.mode))
+        snap = f"snap:{self.snap_mm:g}mm" if self.snap_enabled else "snap:off"
+        text = (f"{self.sheet_name} sheet  [{mode}]  {snap}  grid:{self.grid_mm:g}mm  "
+                f"zoom:{self._zoom * 100:.0f}%")
+        page = self._page_point(self._cursor_pos) if self._cursor_pos is not None else None
+        if page is not None:
+            text += (f"  cursor:{page[0] / DRAWING_UNITS_PER_MM:.1f},"
+                     f"{(self.page_h - page[1]) / DRAWING_UNITS_PER_MM:.1f}")
+        hints = {
+            None: ("Drag views, dimensions and cutting lines · right-click a cutting line: rotate "
+                   "90° / delete · wheel: zoom · middle mouse: pan · Home: fit sheet",
+                   QColor(170, 170, 170)),
+            "place_view": ("Click the sheet to place the view · Esc / right-click to cancel",
+                           QColor(80, 225, 240)),
+            "cut": ("Click a projected view to add a section cut there (right-click a cutting line "
+                    "to rotate it by 90°) · Esc / right-click to cancel",
+                    QColor(255, 80, 80)),
+            "dimension": ({"length": "Click two points, a point and a line, or two parallel lines "
+                                     "(edges and centre lines)",
+                           "radius": "Click a circular edge or arc",
+                           "diameter": "Click a circular edge or arc",
+                           "angle": "Click three points: the vertex first, then one on each leg"
+                           }.get(self.dimension_kind, "Click the geometry to dimension") +
+                          " · Esc / right-click to cancel", QColor(255, 80, 80)),
+        }
+        hint, colour = hints.get(self.mode, hints[None])
+        metrics = painter.fontMetrics()
+        width = max(metrics.horizontalAdvance(text), metrics.horizontalAdvance(hint)) + 16
+        painter.fillRect(QRectF(0, 0, width, 42), QColor(18, 18, 21, 200))   # readable when zoomed in
+        painter.setPen(QColor(200, 200, 200))
+        painter.drawText(8, 18, text)
+        painter.setPen(colour)
+        painter.drawText(8, 36, hint)
 
     def paintEvent(self, _event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#5b6065"))
+        painter.fillRect(self.rect(), self.DESK_COL)
         rect = self._sheet_rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            painter.end()
+            return
+        # the sheet: soft drop shadow, the sketcher's background and grid, then the drawing
+        for grow, alpha in ((7, 22), (4, 38), (2, 60)):
+            painter.fillRect(rect.adjusted(-grow + 3, -grow + 4, grow + 3, grow + 4), QColor(0, 0, 0, alpha))
+        painter.fillRect(rect, self.BACK_COL)
+        self._paint_grid(painter, rect)
+        painter.setPen(QPen(QColor(64, 70, 80), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(rect)
         if self._picture is not None:
-            self._paint_sheet_picture(painter, rect)
+            layer = self._sheet_layer(rect)
+            if layer is not None:
+                painter.drawPixmap(layer[1], layer[0])
         elif not self._pixmap.isNull():
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
             painter.drawPixmap(rect, self._pixmap, QRectF(self._pixmap.rect()))
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
         if not self._layout.get("placements"):
-            painter.setPen(QColor("#aab2bd"))
+            painter.setPen(QColor(170, 178, 189))
             painter.setFont(QFont("Arial", 12))
             painter.drawText(rect, Qt.AlignCenter,
-                             "Choose a view above, then click the sheet to place it")
+                             "Choose a view in the toolbar, then click the sheet to place it")
         self._paint_dimensions_overlay(painter, rect)
+        sx, sy = rect.width() / self.page_w, rect.height() / self.page_h
         if self._snap_guides:
-            painter.setPen(QPen(QColor("#1779c6"), 1, Qt.DashLine))
-            sx, sy = rect.width() / DRAWING_PAGE_W, rect.height() / DRAWING_PAGE_H
+            # alignment with another view: the sketcher's magenta "on a line" snap colour
+            painter.setPen(QPen(QColor(255, 90, 255, 200), 1, Qt.DashLine))
             for axis, value in self._snap_guides:
                 if axis == 0:
                     x = rect.left() + value * sx
@@ -16247,45 +17104,29 @@ class TechnicalDrawingCanvas(QWidget):
                 index = info.get("record_index")
                 if isinstance(index, int) and 0 <= index < len(self.view_placements) and \
                         self.view_placements[index] is self.selected:
-                    sx = rect.width() / DRAWING_PAGE_W
-                    sy = rect.height() / DRAWING_PAGE_H
-                    selected_rect = QRectF(rect.left() + info["x"] * sx,
-                                           rect.top() + info["y"] * sy,
-                                           info["width"] * sx, info["height"] * sy)
-                    painter.setPen(QPen(QColor("#1779c6"), 2, Qt.DashLine))
+                    frame = QRectF(rect.left() + info["x"] * sx, rect.top() + info["y"] * sy,
+                                   info["width"] * sx, info["height"] * sy).adjusted(-6, -6, 6, 6)
+                    painter.setPen(QPen(QColor(255, 120, 0, 200), 1, Qt.DashLine))
+                    painter.setBrush(QColor(255, 120, 0, 18))
+                    painter.drawRect(frame)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(self.SELECT_COL)
+                    for corner in (frame.topLeft(), frame.topRight(),
+                                   frame.bottomLeft(), frame.bottomRight()):
+                        painter.drawRect(QRectF(corner.x() - 3, corner.y() - 3, 6, 6))
                     painter.setBrush(Qt.NoBrush)
-                    painter.drawRect(selected_rect)
                     break
-        if self._hover_dimension is not None:
-            hit = next((item for item in self._layout.get("dimension_hits", [])
-                        if item.get("index") == self._hover_dimension), None)
-            if hit is not None:
-                sx, sy = rect.width() / DRAWING_PAGE_W, rect.height() / DRAWING_PAGE_H
-                highlight = QRectF(rect.left() + hit["x"] * sx, rect.top() + hit["y"] * sy,
-                                   hit["width"] * sx, hit["height"] * sy)
-                painter.setPen(QPen(QColor("#ffb54a"), 1.5, Qt.DashLine))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawRect(highlight)
-        geometry = self._hover_geometry or self._selected_geometry
-        if geometry is not None:
-            info = next((item for item in self._layout.get("placements", [])
-                         if item["name"] == geometry["view"]), None)
-            if info is not None:
-                color = QColor("#ffb54a") if geometry["reference"] else QColor("#38d9c0")
-                painter.setPen(QPen(color, 2.5))
-                painter.setBrush(Qt.NoBrush)
-                if geometry["kind"] == "point":
-                    point = self._screen_point(geometry["position"], info, rect)
-                    painter.setBrush(color)
-                    painter.drawEllipse(point, 5.0, 5.0)
-                    painter.setBrush(Qt.NoBrush)
-                elif geometry["kind"] == "curve":
-                    painter.drawPolyline(QPolygonF([
-                        self._screen_point(point, info, rect) for point in geometry["curve"]]))
-                else:
-                    first, second = geometry["segment"]
-                    painter.drawLine(self._screen_point(first, info, rect),
-                                     self._screen_point(second, info, rect))
+        self._paint_geometry_marks(painter, rect)
+        active_cut = self._cut_drag or self._hover_cut
+        if active_cut is not None:          # glow along the cutting line that is hovered / dragged
+            for trace in self._cut_traces():
+                if trace["view"] == active_cut["view"] and trace["letter"] == active_cut["letter"]:
+                    a, b = (QPointF(rect.left() + end[0] * sx, rect.top() + end[1] * sy)
+                            for end in trace["ends"])
+                    painter.setPen(QPen(self.GLOW_COL, 10, Qt.SolidLine, Qt.RoundCap))
+                    painter.drawLine(a, b)
+        self._paint_dimension_picks(painter, rect)
+        self._paint_hud(painter, rect)
         painter.end()
 
     @staticmethod
@@ -16293,11 +17134,10 @@ class TechnicalDrawingCanvas(QWidget):
         return (info["x"] + (position[0] - info["low"][0]) * info["scale"],
                 info["y"] + (info["high"][1] - position[1]) * info["scale"])
 
-    @classmethod
-    def _screen_point(cls, position, info, sheet_rect):
-        page_x, page_y = cls._view_page_point(position, info)
-        return QPointF(sheet_rect.left() + page_x / DRAWING_PAGE_W * sheet_rect.width(),
-                       sheet_rect.top() + page_y / DRAWING_PAGE_H * sheet_rect.height())
+    def _screen_point(self, position, info, sheet_rect):
+        page_x, page_y = self._view_page_point(position, info)
+        return QPointF(sheet_rect.left() + page_x / self.page_w * sheet_rect.width(),
+                       sheet_rect.top() + page_y / self.page_h * sheet_rect.height())
 
 
 def _drawing_source_mesh(entry, objects):
@@ -16313,15 +17153,360 @@ def _drawing_source_mesh(entry, objects):
     return verts, tris
 
 
+DRAWING_EXPORT_FILTERS = (("PDF document (*.pdf)", ".pdf"), ("SVG drawing (*.svg)", ".svg"),
+                          ("DXF drawing (*.dxf)", ".dxf"))
+
+
+def _ask_drawing_export_path(parent, suggested=""):
+    """Save dialog for a drawing; returns (path, ".pdf" | ".svg" | ".dxf") or (None, None)."""
+    path, selected_filter = QFileDialog.getSaveFileName(
+        parent, "Export Technical Drawing", suggested,
+        ";;".join(name for name, _extension in DRAWING_EXPORT_FILTERS))
+    if not path:
+        return None, None
+    extension = os.path.splitext(path)[1].lower()
+    if extension not in [ext for _name, ext in DRAWING_EXPORT_FILTERS]:
+        path += next((ext for name, ext in DRAWING_EXPORT_FILTERS if name == selected_filter), ".pdf")
+        extension = os.path.splitext(path)[1].lower()
+    return path, extension
+
+
+def write_technical_drawing(path, extension, mesh, options):
+    """Export a drawing as PDF, SVG or DXF (always black on a white sheet)."""
+    writer = {".pdf": write_technical_drawing_pdf, ".svg": write_technical_drawing_svg,
+              ".dxf": write_technical_drawing_dxf}.get(extension)
+    if writer is None:
+        raise ValueError(f"Unsupported drawing format: {extension}")
+    writer(path, mesh, options)
+
+
+def _drawing_svg_generator(sheet, output, title="SimpleCAD Technical Drawing"):
+    """SVG generator whose user units are the drawing's page units (0.25 mm)."""
+    generator = QSvgGenerator()
+    if isinstance(output, str):
+        generator.setFileName(output)
+    else:
+        generator.setOutputDevice(output)
+    generator.setResolution(int(round(25.4 * DRAWING_UNITS_PER_MM)))     # 1 unit = 0.25 mm
+    generator.setSize(QSize(int(round(sheet["w"])), int(round(sheet["h"]))))
+    generator.setViewBox(QRectF(0, 0, sheet["w"], sheet["h"]))
+    generator.setTitle(title)
+    return generator
+
+
+def write_technical_drawing_svg(path, mesh, options):
+    """SVG of the drawing in the size of its sheet, always black on a white sheet."""
+    options = dict(options, _colors=DRAWING_PRINT_COLORS, _page_scale=1.0)
+    generator = _drawing_svg_generator(_drawing_sheet(options), path)
+    painter = QPainter()
+    if not painter.begin(generator):
+        raise RuntimeError(f"Could not create SVG drawing:\n{path}")
+    try:
+        _draw_technical_drawing(painter, mesh[0], mesh[1], options)
+    finally:
+        painter.end()
+
+
+def write_technical_drawing_pdf(path, mesh, options):
+    """PDF of the drawing on its sheet (A2 … A5, landscape or portrait), black on white."""
+    options = dict(options, _colors=DRAWING_PRINT_COLORS)
+    sheet = _drawing_sheet(options)
+    writer = QPdfWriter(path)
+    writer.setResolution(150)
+    writer.setPageSize(QPageSize(QSizeF(sheet["w"] / DRAWING_UNITS_PER_MM,
+                                        sheet["h"] / DRAWING_UNITS_PER_MM),
+                                 QPageSize.Millimeter, f"{sheet['name']} {sheet['orientation']}",
+                                 QPageSize.ExactMatch))
+    writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+    painter = QPainter()
+    if not painter.begin(writer):
+        raise RuntimeError(f"Could not create PDF drawing:\n{path}")
+    try:
+        _draw_technical_drawing(painter, mesh[0], mesh[1], options)
+    finally:
+        painter.end()
+
+
+# DXF export: the drawing is rendered once more as SVG (page units, print palette) and its lines,
+# filled arrowheads, circles and texts are written as an AutoCAD R12 DXF in millimetres, sorted
+# into layers by line type. Pictures (the shaded isometric, a logo) are left out.
+DXF_LAYERS = (("OUTLINE", 7, "CONTINUOUS"), ("THIN", 7, "CONTINUOUS"),
+              ("HIDDEN", 5, "DASHED"), ("CENTER", 1, "CENTER"),
+              ("FRAME", 7, "CONTINUOUS"), ("TEXT", 7, "CONTINUOUS"))
+DXF_LINETYPES = (("CONTINUOUS", "Solid line", ()),
+                 ("DASHED", "Dashed __ __ __", (3.0, -0.75)),                 # DIN type 02.1
+                 ("CENTER", "Center ____ _ ____", (6.0, -0.75, 0.0, -0.75)))  # DIN type 04.1
+
+
+def _svg_matrix(text):
+    """3x3 matrix of an SVG transform attribute (matrix / translate / scale / rotate)."""
+    result = np.eye(3)
+    for name, values in re.findall(r"(\w+)\s*\(([^)]*)\)", text or ""):
+        numbers = [float(value) for value in re.split(r"[\s,]+", values.strip()) if value]
+        if name == "matrix" and len(numbers) == 6:
+            a, b, c, d, e, f = numbers
+            m = np.array(((a, c, e), (b, d, f), (0, 0, 1)))
+        elif name == "translate" and numbers:
+            m = np.array(((1, 0, numbers[0]), (0, 1, numbers[1] if len(numbers) > 1 else 0), (0, 0, 1)))
+        elif name == "scale" and numbers:
+            sy = numbers[1] if len(numbers) > 1 else numbers[0]
+            m = np.diag((numbers[0], sy, 1.0))
+        elif name == "rotate" and numbers:
+            t = math.radians(numbers[0])
+            m = np.array(((math.cos(t), -math.sin(t), 0), (math.sin(t), math.cos(t), 0), (0, 0, 1)))
+        else:
+            continue
+        result = result @ m
+    return result
+
+
+def _svg_path_polylines(d):
+    """Polylines (lists of (x, y)) of an absolute SVG path; curves are flattened."""
+    tokens = re.findall(r"[MLHVCSQTZmlhvcsqtz]|-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", d or "")
+    polylines, current, command, index = [], [], None, 0
+    position = start = (0.0, 0.0)
+
+    def number():
+        nonlocal index
+        value = float(tokens[index])
+        index += 1
+        return value
+
+    while index < len(tokens):
+        token = tokens[index]
+        if token.isalpha():
+            command = token
+            index += 1
+            if command in "Zz":
+                if current:
+                    current.append(start)
+                    polylines.append(current)
+                current = []
+                position = start
+            continue
+        if command in ("M", "m"):
+            if len(current) > 1:
+                polylines.append(current)
+            x, y = number(), number()
+            position = (x, y) if command == "M" else (position[0] + x, position[1] + y)
+            start, current = position, [position]
+            command = "L" if command == "M" else "l"
+        elif command in ("L", "l"):
+            x, y = number(), number()
+            position = (x, y) if command == "L" else (position[0] + x, position[1] + y)
+            current.append(position)
+        elif command in ("H", "h", "V", "v"):
+            value = number()
+            if command == "H":   position = (value, position[1])
+            elif command == "h": position = (position[0] + value, position[1])
+            elif command == "V": position = (position[0], value)
+            else:                position = (position[0], position[1] + value)
+            current.append(position)
+        elif command in ("C", "c", "Q", "q"):
+            count = 3 if command in "Cc" else 2
+            points = [(number(), number()) for _ in range(count)]
+            if command.islower():
+                points = [(position[0] + x, position[1] + y) for x, y in points]
+            control = [position] + points
+            for step in range(1, 9):
+                t = step / 8.0
+                if count == 3:
+                    weights = ((1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3)
+                else:
+                    weights = ((1 - t) ** 2, 2 * t * (1 - t), t * t)
+                current.append((sum(w * p[0] for w, p in zip(weights, control)),
+                                sum(w * p[1] for w, p in zip(weights, control))))
+            position = points[-1]
+        else:                                   # unsupported command: skip its numbers
+            index += 1
+    if len(current) > 1:
+        polylines.append(current)
+    return polylines
+
+
+def _svg_drawing_entities(svg_bytes):
+    """Lines, solids, circles and texts (page units, SVG orientation) of a drawing's SVG."""
+    root = ET.fromstring(svg_bytes)
+    entities = []
+    inherited = ("fill", "stroke", "stroke-width", "stroke-dasharray", "font-size")
+
+    def layer_of(style):
+        dash = [value for value in re.split(r"[\s,]+", style.get("stroke-dasharray", "") or "")
+                if value and value != "none"]
+        width = float(style.get("stroke-width", "1") or 1)
+        if len(dash) >= 4:
+            return "CENTER"
+        if dash:
+            return "HIDDEN"
+        if width >= 2.5:
+            return "FRAME"
+        return "OUTLINE" if width >= 1.9 else "THIN"
+
+    def ink(colour):
+        return colour not in (None, "", "none") and colour.lower() not in ("#ffffff", "white")
+
+    def visit(element, style, matrix):
+        style = dict(style)
+        for key in inherited:
+            if element.get(key) is not None:
+                style[key] = element.get(key)
+        if element.get("transform"):
+            matrix = matrix @ _svg_matrix(element.get("transform"))
+        tag = element.tag.rsplit("}", 1)[-1]
+
+        def to_page(points):
+            return [tuple((matrix @ np.array((x, y, 1.0)))[:2]) for x, y in points]
+
+        polylines, closed = [], False
+        if tag == "path":
+            polylines = _svg_path_polylines(element.get("d"))
+        elif tag in ("polyline", "polygon"):
+            values = [float(v) for v in re.split(r"[\s,]+", (element.get("points") or "").strip()) if v]
+            points = list(zip(values[0::2], values[1::2]))
+            if tag == "polygon" and points:
+                points.append(points[0])
+                closed = True
+            polylines = [points]
+        elif tag == "line":
+            polylines = [[(float(element.get("x1", 0)), float(element.get("y1", 0))),
+                          (float(element.get("x2", 0)), float(element.get("y2", 0)))]]
+        elif tag == "rect":
+            x, y = float(element.get("x", 0)), float(element.get("y", 0))
+            w, h = float(element.get("width", 0)), float(element.get("height", 0))
+            polylines = [[(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]]
+            closed = True
+        elif tag in ("circle", "ellipse"):
+            cx, cy = float(element.get("cx", 0)), float(element.get("cy", 0))
+            rx = float(element.get("r", element.get("rx", 0)))
+            ry = float(element.get("r", element.get("ry", rx)))
+            if ink(style.get("stroke")) and abs(rx - ry) < 1e-9:
+                centre = to_page([(cx, cy)])[0]
+                scale = math.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+                entities.append(("circle", layer_of(style), centre, rx * scale))
+            elif ink(style.get("stroke")):
+                angles = np.linspace(0.0, 2 * math.pi, 49)
+                polylines = [list(zip(cx + rx * np.cos(angles), cy + ry * np.sin(angles)))]
+        elif tag == "text":
+            content = "".join(element.itertext()).strip()
+            if content and ink(element.get("fill", style.get("fill"))):
+                position = to_page([(float(element.get("x", 0)), float(element.get("y", 0)))])[0]
+                angle = -math.degrees(math.atan2(matrix[1, 0], matrix[0, 0]))
+                scale = math.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+                size = float(element.get("font-size", style.get("font-size", "14")) or 14) * scale
+                entities.append(("text", "TEXT", position, size, angle, content))
+            return
+        elif tag == "image":
+            return
+        for points in polylines:
+            if len(points) < 2:
+                continue
+            points = to_page(points)
+            filled = ink(style.get("fill")) and not ink(style.get("stroke"))
+            unique = points[:-1] if len(points) > 2 and np.allclose(points[0], points[-1]) else points
+            if filled and 3 <= len(unique) <= 4:          # arrowheads
+                entities.append(("solid", "THIN", unique))
+            elif ink(style.get("stroke")) or filled:
+                layer = layer_of(style) if ink(style.get("stroke")) else "THIN"
+                for a, b in zip(points[:-1], points[1:]):
+                    if np.hypot(b[0] - a[0], b[1] - a[1]) > 1e-6:
+                        entities.append(("line", layer, a, b))
+        for child in element:
+            visit(child, style, matrix)
+
+    visit(root, {"fill": "black", "stroke": "none", "stroke-width": "1"}, np.eye(3))
+    return entities
+
+
+def _dxf_text(value):
+    """Text for a DXF R12 TEXT entity: CAD codes for Ø ° ±, \\U+ escapes for other characters."""
+    value = value.replace("⌀", "%%c").replace("Ø", "%%c").replace("°", "%%d").replace("±", "%%p")
+    return "".join(ch if 32 <= ord(ch) < 127 else f"\\U+{ord(ch):04X}" for ch in value)
+
+
+def write_technical_drawing_dxf(path, mesh, options):
+    """DXF (AutoCAD R12, millimetres) of the drawing on its sheet, black on white as printed.
+    DXF holds no pictures, so the isometric view is given by its edges."""
+    options = dict(options, _colors=DRAWING_PRINT_COLORS, _page_scale=1.0, _iso_edges=True)
+    sheet = _drawing_sheet(options)
+    buffer = QBuffer()
+    buffer.open(QBuffer.ReadWrite)
+    generator = _drawing_svg_generator(sheet, buffer)
+    painter = QPainter()
+    if not painter.begin(generator):
+        raise RuntimeError("Could not render the drawing for the DXF export")
+    try:
+        _draw_technical_drawing(painter, mesh[0], mesh[1], options)
+    finally:
+        painter.end()
+    entities = _svg_drawing_entities(bytes(buffer.data()))
+    unit = 1.0 / DRAWING_UNITS_PER_MM
+    height = sheet["h"]
+    cap_ratio = (_DRAWING_FONT_BASE.get(False) or (None, 0.716))[1]
+
+    def xy(point, x_code=10):
+        return [x_code, f"{point[0] * unit:.4f}", x_code + 10, f"{(height - point[1]) * unit:.4f}",
+                x_code + 20, "0.0"]
+
+    out = [0, "SECTION", 2, "HEADER", 9, "$ACADVER", 1, "AC1009", 9, "$INSUNITS", 70, 4,
+           9, "$MEASUREMENT", 70, 1,
+           9, "$EXTMIN", 10, "0.0", 20, "0.0", 30, "0.0",
+           9, "$EXTMAX", 10, f"{sheet['w'] * unit:.4f}", 20, f"{height * unit:.4f}", 30, "0.0",
+           9, "$LIMMIN", 10, "0.0", 20, "0.0",
+           9, "$LIMMAX", 10, f"{sheet['w'] * unit:.4f}", 20, f"{height * unit:.4f}",
+           0, "ENDSEC", 0, "SECTION", 2, "TABLES",
+           0, "TABLE", 2, "LTYPE", 70, len(DXF_LINETYPES)]
+    for name, description, pattern in DXF_LINETYPES:
+        out += [0, "LTYPE", 2, name, 70, 0, 3, description, 72, 65, 73, len(pattern),
+                40, f"{sum(abs(p) for p in pattern):.4f}"]
+        for element in pattern:
+            out += [49, f"{element:.4f}"]
+    out += [0, "ENDTAB", 0, "TABLE", 2, "LAYER", 70, len(DXF_LAYERS)]
+    for name, colour, linetype in DXF_LAYERS:
+        out += [0, "LAYER", 2, name, 70, 0, 62, colour, 6, linetype]
+    out += [0, "ENDTAB", 0, "TABLE", 2, "STYLE", 70, 1,
+            0, "STYLE", 2, "STANDARD", 70, 0, 40, "0.0", 41, "1.0", 50, "0.0", 71, 0,
+            42, "2.5", 3, "txt", 4, "",
+            0, "ENDTAB", 0, "ENDSEC", 0, "SECTION", 2, "ENTITIES"]
+    for entity in entities:
+        kind, layer = entity[0], entity[1]
+        if kind == "line":
+            out += [0, "LINE", 8, layer] + xy(entity[2]) + xy(entity[3], 11)
+        elif kind == "solid":
+            corners = list(entity[2])
+            if len(corners) == 3:
+                corners.append(corners[2])
+            else:                                       # SOLID takes its corners crosswise
+                corners = [corners[0], corners[1], corners[3], corners[2]]
+            out += [0, "SOLID", 8, layer]
+            for code, corner in zip((10, 11, 12, 13), corners):
+                out += xy(corner, code)
+        elif kind == "circle":
+            out += [0, "CIRCLE", 8, layer] + xy(entity[2]) + [40, f"{entity[3] * unit:.4f}"]
+        elif kind == "text":
+            _kind, _layer, position, size, angle, content = entity
+            out += [0, "TEXT", 8, layer] + xy(position) + \
+                [40, f"{size * cap_ratio * unit:.4f}", 1, _dxf_text(content),
+                 50, f"{angle:.3f}", 7, "STANDARD"]
+    out += [0, "ENDSEC", 0, "EOF"]
+    with open(path, "w", encoding="ascii", errors="replace", newline="\r\n") as stream:
+        for index in range(0, len(out), 2):
+            stream.write(f"{out[index]:>3}\n{out[index + 1]}\n")
+
+
 class TechnicalDrawingDialog(QDialog):
+    _workspace_state = None          # panel position / visibility, kept for the program session
+
     def __init__(self, parent=None, project_name="", mesh=None, options=None,
                  source_entries=None, source_entry=None, source_locked=False, mesh_for=None):
         super().__init__(parent)
         self._mesh_for = mesh_for or (lambda entry: entry.get("solid"))
-        self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint |
-                            Qt.WindowMaximizeButtonHint | Qt.WindowSystemMenuHint)
+        # a window of its own like the assembly window (dark title bar: see showEvent)
+        self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint |
+                            Qt.WindowCloseButtonHint | Qt.WindowSystemMenuHint)
+        self.setWindowIcon(QIcon(os.path.join(_LOG_DIR, "icons", "technical_drawing.png")))
         self.setWindowTitle("Technical Drawing")
         self.setMinimumSize(1120, 780)
+        self.resize(1400, 900)
         self.source_entries = list(source_entries or [])
         self.current_source_entry = source_entry
         self.mesh = mesh if mesh is not None else \
@@ -16338,65 +17523,100 @@ class TechnicalDrawingDialog(QDialog):
         self._preview_timer.setInterval(40)
         self._preview_timer.timeout.connect(self._refresh_preview)
 
-        root = QVBoxLayout(self)
-        toolbar = QFrame()
-        toolbar.setObjectName("drawingToolbar")
-        toolbar.setStyleSheet("QFrame#drawingToolbar{background:#202329;border:0;}")
-        toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(2, 2, 2, 2)
-        toolbar_layout.setSpacing(4)
+        # ── window frame like the main window and the assembly window: menu bar, flat icon
+        # toolbars, dock panels and a status bar with the dark title bar ──────────────────
+        icon_dir = os.path.join(_LOG_DIR, "icons")
 
-        def drawing_button(text, tip, checkable=True):
-            button = QToolButton()
-            button.setText(text)
-            button.setToolTip(tip)
-            button.setCheckable(checkable)
-            button.setAutoRaise(True)
-            button.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            button.setStyleSheet(
-                "QToolButton:checked{background:#3f74c8;color:white;"
-                "border:1px solid #2a5598;border-radius:3px;}")
-            return button
+        def action(icon, text, tip, slot=None, checkable=False, shortcut=None):
+            """Action shared by the menu bar and the toolbars (as in the assembly window)."""
+            act = QAction(icon if isinstance(icon, QIcon) else QIcon(os.path.join(icon_dir, icon)),
+                          text, self)
+            act.setToolTip(f"{text.rstrip('…')} - {tip}")
+            act.setStatusTip(tip)
+            act.setCheckable(checkable)
+            if slot is not None:
+                act.triggered.connect(lambda _checked=False: slot())
+            if shortcut is not None:
+                act.setShortcut(QKeySequence(shortcut))
+                act.setShortcutContext(Qt.WindowShortcut)
+                self.addAction(act)
+            return act
 
-        self.drawing_status = QLabel("Ready")
-        self.drawing_status.setWordWrap(True)
-        self.drawing_status.setMinimumWidth(140)
-        self.drawing_status.setStyleSheet("color:#80c8ff;font-size:10px;")
-        self.mode_buttons = {}
-        self.btn_select = drawing_button("↖ Select", "Select or drag a placed view")
-        self.btn_select.clicked.connect(lambda: self.canvas.set_mode())
-        self.mode_buttons["select"] = self.btn_select
-        self.btn_cut = drawing_button("✂ Cut", "Place a section cut by clicking a projected view")
-        self.btn_cut.clicked.connect(self._begin_cut_placement)
-        self.mode_buttons["cut"] = self.btn_cut
-        mode_group = tool_group("Mode", [self.btn_select, self.btn_cut], "#292e36")
+        self.act_import_logo = action("import.png", "Import Logo…",
+                                      "Load an image for the logo field of the title block",
+                                      self._load_logo)
+        self.act_export = action("export.png", "Export…",
+                                 "Export the drawing as PDF, SVG or DXF (black on a white sheet)",
+                                 self._export_drawing, shortcut="Ctrl+E")
+        self.act_finish = action("technical_drawing.png", "Finish Drawing",
+                                 "Keep the drawing under its extrusion and close the editor",
+                                 self.accept, shortcut="Ctrl+Return")
+        self.act_cancel = action("exit.png", "Cancel", "Close the editor without keeping changes",
+                                 self.reject)
+        self.act_delete = action("delete_selected.png", "Delete Selected",
+                                 "Remove the selected dimension or view (Del)", self._delete_selected)
+        self.act_undo = action("undo.png", "Undo", "Undo the last change of the drawing (Ctrl+Z)",
+                               self._undo, shortcut="Ctrl+Z")
+        self.act_redo = action("redo.png", "Redo",
+                               "Redo the last undone change (Ctrl+Y / Ctrl+Shift+Z)", self._redo,
+                               shortcut="Ctrl+Y")
+        self.act_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        self.act_undo.setEnabled(False)
+        self.act_redo.setEnabled(False)
+        self.act_select = action("select.png", "Select", "Select or drag placed views and dimensions",
+                                 lambda: self.canvas.set_mode(), checkable=True)
+        self.act_cut = action("scissor.png", "Cut", "Place the section cut by clicking a projected view",
+                              self._begin_cut_placement, checkable=True)
+        self.view_actions = {}
+        for label, name, icon in (("Top", "top", "view_top.png"),
+                                  ("Front", "front", "view_front.png"),
+                                  ("Left", "left", "view_left.png"),
+                                  ("Right", "right", "view_right.png"),
+                                  ("Isometric", "isometric", "view_isometric.png"),
+                                  ("Section", "section", "view_section.png")):
+            tip = "Place the section A-A (enable it in the Views panel under Section)" \
+                if name == "section" else f"Place the {label.lower()} view on the sheet"
+            self.view_actions[name] = action(icon, f"{label} View", tip,
+                                             lambda view=name: self._begin_view_placement(view),
+                                             checkable=True)
+        self.dimension_actions = {}
+        for label, kind, icon in (("Length", "length", "length.png"),
+                                  ("Radius", "radius", "radius.png"),
+                                  ("Diameter", "diameter", "diameter.png"),
+                                  ("Angle", "angle", "angle.png")):
+            self.dimension_actions[kind] = action(
+                icon, label, f"Place a {label.lower()} dimension on a view",
+                lambda value=kind: self._add_dimension(value), checkable=True)
+        self.act_fit = action("show_all_objects.png", "Fit Sheet", "Show the whole sheet (Home)",
+                              lambda: self.canvas.fit_sheet())
+        self.act_panels = action("objects.png", "Panels",
+                                 "Show / hide the Views, Dimensions and Sheet panels",
+                                 self._toggle_panels, checkable=True)
 
-        self.view_buttons = {}
-        view_tools = []
-        for label, name in (("Top", "top"), ("Front", "front"),
-                            ("Left", "left"), ("Right", "right"),
-                            ("Isometric", "isometric"), ("Section", "section")):
-            button = drawing_button(label, f"Place the {label.lower()} view on the sheet")
-            button.clicked.connect(lambda _checked=False, view=name:
-                                   self._begin_view_placement(view))
-            self.view_buttons[name] = button
-            view_tools.append(button)
-        self.place_section_button = self.view_buttons["section"]
-        view_group = tool_group("Views", view_tools, "#292e36")
-
-        self.dimension_buttons = {}
-        dimension_tools = []
-        for label, kind in (("Length", "length"), ("Radius", "radius"),
-                            ("Diameter", "diameter"), ("Angle", "angle")):
-            button = drawing_button(label, f"Place a {label.lower()} dimension on a view")
-            button.clicked.connect(lambda _checked=False, value=kind:
-                                   self._add_dimension(value))
-            self.dimension_buttons[kind] = button
-            dimension_tools.append(button)
-        dimension_group = tool_group("Dimensions", dimension_tools, "#292e36")
+        # grid and snap, as in the sketcher toolbar (sheet millimetres)
+        self.sp_grid = QDoubleSpinBox()
+        self.sp_grid.setRange(1, 100)
+        self.sp_grid.setSuffix(" mm")
+        self.sp_grid.setToolTip("Grid spacing on the sheet (mm)")
+        self.sp_grid.setMinimumWidth(112)
+        self.sp_grid.setValue(min(100.0, max(1.0, float(self._options.get("grid_mm", DEFAULT_GRID)))))
+        self.sp_snap = QDoubleSpinBox()
+        self.sp_snap.setRange(0.1, 50)
+        self.sp_snap.setSuffix(" mm")
+        self.sp_snap.setToolTip("Snap step on the sheet (mm)")
+        self.sp_snap.setMinimumWidth(112)
+        self.sp_snap.setValue(min(50.0, max(0.1, float(self._options.get("snap_mm", DEFAULT_SNAP)))))
+        self._snap_icon = QIcon(os.path.join(icon_dir, "snap_to_grid.png"))
+        self.act_snap = action(self._snap_icon, "Snap to Grid",
+                               "Snap placing and dragging views and dimensions to the grid",
+                               checkable=True)
+        self.act_snap.setChecked(bool(self._options.get("snap", True)))
+        self._update_snap_icon(self.act_snap.isChecked())
+        grid_icon = QLabel()
+        grid_icon.setPixmap(QIcon(os.path.join(icon_dir, "grid.png")).pixmap(QSize(32, 32)))
+        grid_icon.setToolTip("Grid")
 
         self.rotation = []
-        rotation_tools = []
         for axis, value in zip("XYZ", self._options.get("rotation", (0, 0, 0))):
             spin = QSpinBox()
             spin.setRange(0, 270)
@@ -16406,30 +17626,33 @@ class TechnicalDrawingDialog(QDialog):
             spin.setToolTip(f"Rotate the model around {axis} in 90 degree steps")
             spin.valueChanged.connect(self._refresh_preview)
             self.rotation.append(spin)
-            rotation_tools.append(spin)
-        rotation_group = tool_group("Orientation", rotation_tools, "#292e36")
 
         self.view_scale = QComboBox()
         self.view_scale.addItem("Auto", None)
-        for ratio in DRAWING_STD_SCALES:
+        for ratio in DRAWING_SELECTABLE_SCALES:
             self.view_scale.addItem(_drawing_scale_text(ratio * DRAWING_UNITS_PER_MM), ratio)
         stored_ratio = self._options.get("scale_ratio")
         if stored_ratio:
             index = min(range(1, self.view_scale.count()),
                         key=lambda i: abs(math.log(self.view_scale.itemData(i) / float(stored_ratio))))
             self.view_scale.setCurrentIndex(index)
-        self.view_scale.setToolTip("Scale of all placed views (preferred scales of DIN ISO 5455)")
+        self.view_scale.setToolTip("Scale of all placed views: the preferred scales of DIN ISO 5455 "
+                                   "and every whole step from 10:1 to 1:10 (Auto: ISO 5455)")
         self.view_scale.currentIndexChanged.connect(self._refresh_preview)
-        scale_group = tool_group("Scale", [self.view_scale], "#292e36")
-        for group in (mode_group, view_group):
-            toolbar_layout.addWidget(ToolbarGroupScroll(group, toolbar))
-        _sep = QFrame(); _sep.setFrameShape(QFrame.VLine)
-        _sep.setStyleSheet('QFrame{background:#3b424d;width:1px;margin:4px 2px;}')
-        toolbar_layout.addWidget(_sep)
-        for group in (dimension_group, rotation_group, scale_group):
-            toolbar_layout.addWidget(ToolbarGroupScroll(group, toolbar))
-        toolbar_layout.addStretch(1)
-        root.addWidget(toolbar)
+
+        self.source_combo = QComboBox()
+        for entry in self.source_entries:
+            self.source_combo.addItem(entry.get("name", "Extrusion"))
+        self.source_combo.setMinimumWidth(180)
+        self.source_combo.setToolTip("Choose the extrusion whose views will be placed on the sheet")
+        if self.source_entries:
+            selected_source = next((index for index, entry in enumerate(self.source_entries)
+                                    if entry is source_entry), 0)
+            self.source_combo.setCurrentIndex(selected_source)
+            self.current_source_entry = self.source_entries[selected_source]
+            self.mesh = self._mesh_for(self.current_source_entry)
+        self.source_combo.setEnabled(bool(self.source_entries) and not source_locked and
+                                     len(self.source_entries) > 1)
 
         form = QFormLayout()
         self.front_view = QComboBox()
@@ -16438,21 +17661,50 @@ class TechnicalDrawingDialog(QDialog):
                 ("From +X", (1, 0, 0)), ("From -X", (-1, 0, 0)),
                 ("From +Z (top)", (0, 0, 1)), ("From -Z (bottom)", (0, 0, -1))):
             self.front_view.addItem(label, vector)
-        self.section_view = QCheckBox("Add cut section (A-A)")
-        self.section_view.setToolTip(
-            "Adds a hatched section at the selected offset; the cut line is marked in the other views.")
-        self.section_view.setChecked(bool(self._options.get("section", False)))
+        # cut sections A-A, B-B, …: listed in the Views panel; each can be placed as a view
+        self.sections = [dict(item) for item in _drawing_sections(self._options)]
+        if self.sections:          # older drawings: the placed "section" view is section A-A
+            for record in self.view_placements:
+                if record.get("name") == "section":
+                    record["name"] = f"section-{self.sections[0]['letter']}"
+        self.section_list = QListWidget()
+        self.section_list.setMaximumHeight(120)
+        self.section_list.setToolTip("Cut sections of the part. Drag a cutting line on the sheet "
+                                     "to move it; right-click it to rotate it by 90° or delete it.")
+        self.section_list.currentRowChanged.connect(self._on_section_row)
+        QShortcut(QKeySequence.Delete, self.section_list, self._remove_section,
+                  context=Qt.WidgetShortcut)
         self.section_plane = QComboBox()
-        self.section_plane.addItem("Parallel to the front view", 0)
-        self.section_plane.addItem("Parallel to the top view", 1)
-        self.section_plane.addItem("Parallel to the right side view", 2)
-        self.section_plane.setEnabled(False)
-        self.section_view.toggled.connect(self.section_plane.setEnabled)
+        for plane, text in enumerate(DRAWING_SECTION_PLANE_TEXT):
+            self.section_plane.addItem(text[0].upper() + text[1:], plane)
+        self.section_plane.setToolTip("Plane of the selected cut")
         self.cut_offset = QDoubleSpinBox()
         self.cut_offset.setRange(-100000, 100000)
         self.cut_offset.setDecimals(2)
         self.cut_offset.setSuffix(" mm")
-        self.cut_offset.setValue(float(self._options.get("cut_offset", 0.0)))
+        self.cut_offset.setMinimumWidth(110)
+        self.cut_offset.setToolTip("Distance of the selected cut from the centre of the part")
+        self.section_plane.currentIndexChanged.connect(self._on_section_edited)
+        self.cut_offset.valueChanged.connect(self._on_section_edited)
+        section_buttons = QHBoxLayout()
+        section_buttons.setSpacing(4)
+        for text, icon, tip, slot in (
+                ("Add", "view_section.png", "Add a cut section through the middle of the part",
+                 self._add_section),
+                ("Rotate 90°", "view_section.png",
+                 "Rotate the selected cut by 90° (front → right side → top plane)",
+                 self._rotate_section),
+                ("Remove", "delete_selected.png", "Remove the selected cut and its section view",
+                 self._remove_section)):
+            button = QPushButton(text)
+            button.setIcon(QIcon(os.path.join(icon_dir, icon)))
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            section_buttons.addWidget(button)
+            if text == "Rotate 90°":
+                self.btn_rotate_section = button
+            elif text == "Remove":
+                self.btn_remove_section = button
         self.project = QLineEdit(project_name)
         self.project.setText(self._options.get("project", project_name))
         self.author = QLineEdit()
@@ -16475,9 +17727,14 @@ class TechnicalDrawingDialog(QDialog):
         self.projection.setCurrentIndex(max(0, self.projection.findData(stored_projection)))
 
         form.addRow("Front orientation:", self.front_view)
-        form.addRow("Section:", self.section_view)
-        form.addRow("Cut plane:", self.section_plane)
-        form.addRow("Cut offset:", self.cut_offset)
+        rotation_row = QHBoxLayout()
+        rotation_row.setSpacing(2)
+        for spin in self.rotation:
+            rotation_row.addWidget(spin)
+        form.addRow("Model rotation:", rotation_row)
+        section_form = QFormLayout()
+        section_form.addRow("Cut plane:", self.section_plane)
+        section_form.addRow("Cut offset:", self.cut_offset)
 
         logo_row = QHBoxLayout()
         self.logo_field = QLineEdit()
@@ -16486,10 +17743,32 @@ class TechnicalDrawingDialog(QDialog):
         if self.logo_path:
             self.logo_field.setText(os.path.basename(self.logo_path))
         logo_button = QPushButton("Load logo…")
+        logo_button.setIcon(QIcon(os.path.join(icon_dir, "import.png")))
         logo_button.clicked.connect(self._load_logo)
         logo_row.addWidget(self.logo_field, 1)
         logo_row.addWidget(logo_button)
         self.logo_row = logo_row
+
+        # sheet format (ISO 216), orientation and scale: in the Sheet panel
+        sheet = _drawing_sheet(self._options)
+        self.sheet_size = QComboBox()
+        for name, (width, height, _zones) in DRAWING_SHEETS.items():
+            self.sheet_size.addItem(f"{name}  ({width} × {height} mm)", name)
+        self.sheet_size.setCurrentIndex(max(0, self.sheet_size.findData(sheet["name"])))
+        self.sheet_size.setToolTip("Sheet size (ISO 216) with frame, grid and title block "
+                                   "of DIN EN ISO 5457")
+        self.sheet_orientation = QComboBox()
+        self.sheet_orientation.addItem("Landscape (horizontal)", "landscape")
+        self.sheet_orientation.addItem("Portrait (vertical)", "portrait")
+        self.sheet_orientation.setCurrentIndex(
+            max(0, self.sheet_orientation.findData(sheet["orientation"])))
+        self.sheet_orientation.setToolTip("Horizontal (landscape) or vertical (portrait) sheet")
+        self.sheet_size.currentIndexChanged.connect(self._on_sheet_changed)
+        self.sheet_orientation.currentIndexChanged.connect(self._on_sheet_changed)
+        format_form = QFormLayout()
+        format_form.addRow("Sheet:", self.sheet_size)
+        format_form.addRow("Orientation:", self.sheet_orientation)
+        format_form.addRow("Scale:", self.view_scale)
 
         sheet_form = QFormLayout()
         sheet_form.addRow("Title:", self.title)
@@ -16504,40 +17783,36 @@ class TechnicalDrawingDialog(QDialog):
 
         view_page = QWidget()
         view_layout = QVBoxLayout(view_page)
-        view_layout.setContentsMargins(4, 6, 4, 4)
-        view_layout.addWidget(QLabel("Object to draw"))
-        self.source_combo = QComboBox()
-        for entry in self.source_entries:
-            self.source_combo.addItem(entry.get("name", "Extrusion"))
-        self.source_combo.setMinimumWidth(180)
-        self.source_combo.setToolTip("Choose the extrusion whose views will be placed on the sheet")
-        if self.source_entries:
-            selected_source = next((index for index, entry in enumerate(self.source_entries)
-                                    if entry is source_entry), 0)
-            self.source_combo.setCurrentIndex(selected_source)
-            self.current_source_entry = self.source_entries[selected_source]
-            self.mesh = self._mesh_for(self.current_source_entry)
-        else:
-            self.source_combo.hide()
-        self.source_combo.setEnabled(bool(self.source_entries) and not source_locked and
-                                     len(self.source_entries) > 1)
-        source_group = tool_group("Object", [self.source_combo], "#292e36")
-        self.source_group = ToolbarGroupScroll(source_group, toolbar)
-        self.source_group.setVisible(bool(self.source_entries))
-        toolbar_layout.insertWidget(0, self.source_group)
-        view_layout.addWidget(QLabel("Placed views"))
+        view_layout.setContentsMargins(6, 6, 6, 6)
+        view_layout.addWidget(QLabel("<b>Placed views</b>"))
         self.view_list = QListWidget()
         self.view_list.currentRowChanged.connect(self._select_view_row)
         view_layout.addWidget(self.view_list, 1)
+        self.hidden_lines = QCheckBox("Show hidden lines")
+        self.hidden_lines.setToolTip(
+            "Dashed hidden edges of the selected view (DIN ISO 128). Untick to leave them out, "
+            "also in the export.")
+        self.hidden_lines.setChecked(True)
+        self.hidden_lines.setEnabled(False)
+        _style_checkbox_like_explorer(self.hidden_lines)       # as the object explorer
+        self.hidden_lines.toggled.connect(self._on_hidden_lines_toggled)
+        view_layout.addWidget(self.hidden_lines)
         remove_view = QPushButton("Remove Selected View")
+        remove_view.setIcon(QIcon(os.path.join(icon_dir, "delete_selected.png")))
         remove_view.clicked.connect(self._remove_selected_view)
         view_layout.addWidget(remove_view)
-        view_layout.addWidget(QLabel("Section settings"))
+        QShortcut(QKeySequence.Delete, self.view_list, self._remove_selected_view,
+                  context=Qt.WidgetShortcut)
+        view_layout.addWidget(QLabel("<b>Orientation</b>"))
         view_layout.addLayout(form)
+        view_layout.addWidget(QLabel("<b>Sections</b>"))
+        view_layout.addWidget(self.section_list)
+        view_layout.addLayout(section_buttons)
+        view_layout.addLayout(section_form)
 
         dimensions_page = QWidget()
         dimension_layout = QVBoxLayout(dimensions_page)
-        dimension_layout.setContentsMargins(4, 6, 4, 4)
+        dimension_layout.setContentsMargins(6, 6, 6, 6)
         dimension_row = QHBoxLayout()
         self.dimension_label = QLineEdit()
         self.dimension_label.setPlaceholderText("Optional label")
@@ -16546,87 +17821,470 @@ class TechnicalDrawingDialog(QDialog):
         self.dimension_value.setDecimals(2)
         self.dimension_value.setSuffix(" mm")
         self.dimension_value.setReadOnly(True)
+        self.dimension_value.setMinimumWidth(100)
         self.dimension_value.setToolTip("Measured value of the selected drawing geometry")
         dimension_row.addWidget(self.dimension_label, 1)
         dimension_row.addWidget(self.dimension_value)
         dimension_layout.addLayout(dimension_row)
-        self.dimension_list = QListWidget()
+        self.dimension_list = ToggleListWidget()
+        self.dimension_list.setToolTip("Select a dimension to highlight it on the sheet; "
+                                       "Delete removes it.")
+        self.dimension_list.currentRowChanged.connect(self._on_dimension_row)
         dimension_layout.addWidget(self.dimension_list, 1)
         remove_dimension = QPushButton("Remove selected measurement")
+        remove_dimension.setIcon(QIcon(os.path.join(icon_dir, "delete_selected.png")))
         remove_dimension.clicked.connect(self._remove_dimension)
         dimension_layout.addWidget(remove_dimension)
+        QShortcut(QKeySequence.Delete, self.dimension_list, self._remove_dimension,
+                  context=Qt.WidgetShortcut)
 
         sheet_page = QWidget()
         sheet_layout = QVBoxLayout(sheet_page)
-        sheet_layout.setContentsMargins(4, 6, 4, 4)
+        sheet_layout.setContentsMargins(6, 6, 6, 6)
+        sheet_layout.addWidget(QLabel("<b>Format</b>"))
+        sheet_layout.addLayout(format_form)
+        sheet_layout.addWidget(QLabel("<b>Title block</b>"))
         sheet_layout.addLayout(sheet_form)
-        sheet_layout.addWidget(QLabel("Logo"))
+        sheet_layout.addWidget(QLabel("<b>Logo</b>"))
         sheet_layout.addLayout(logo_row)
         sheet_layout.addStretch(1)
-
-        sidebar = QFrame()
-        sidebar.setFrameShape(QFrame.StyledPanel)
-        sidebar.setMinimumWidth(255)
-        sidebar.setMaximumWidth(320)
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(6, 6, 6, 6)
-        sidebar_layout.setSpacing(4)
-        sidebar_layout.addWidget(QLabel("<b>Drawing Status</b>"))
-        self.drawing_status = QLabel("Ready")
-        self.drawing_status.setWordWrap(True)
-        self.drawing_status.setStyleSheet("color:#80c8ff;font-size:10px;")
-        sidebar_layout.addWidget(self.drawing_status)
-        self.sidebar_tabs = QTabWidget()
-        self.sidebar_tabs.addTab(view_page, "Views")
-        self.sidebar_tabs.addTab(dimensions_page, "Dimensions")
-        self.sidebar_tabs.addTab(sheet_page, "Sheet")
-        sidebar_layout.addWidget(self.sidebar_tabs, 1)
 
         self.canvas = TechnicalDrawingCanvas()
         self.canvas.sheetEdited.connect(self._queue_refresh_preview)
         self.canvas.viewSelected.connect(self._on_view_selected)
         self.canvas.dimensionPlaced.connect(self._on_dimension_placed)
         self.canvas.cutPlaced.connect(self._on_cut_placed)
+        self.canvas.cutMoved.connect(self._on_cut_moved)
         self.canvas.statusChanged.connect(self._on_canvas_status)
-        content = QHBoxLayout()
-        content.addWidget(self.canvas, 1)
-        content.addWidget(sidebar)
-        root.addLayout(content, 1)
+        self.canvas.dimensionSelected.connect(self._on_canvas_dimension_selected)
+        self.canvas.dimensionRemoveRequested.connect(self._remove_dimension_at)
+        self.canvas.set_grid(self.sp_grid.value(), self.sp_snap.value(), self.act_snap.isChecked())
+        self.sp_grid.valueChanged.connect(lambda value: self.canvas.set_grid(grid_mm=value))
+        self.sp_snap.valueChanged.connect(lambda value: self.canvas.set_grid(snap_mm=value))
+        self.act_snap.toggled.connect(self._on_snap_toggled)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Finish Drawing")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        workspace = self._workspace = QMainWindow()
+        workspace.setWindowFlags(Qt.Widget)
+        workspace.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowTabbedDocks)
+        workspace.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)
+        workspace.setCentralWidget(self.canvas)
+
+        # toolbars: file / edit / view actions in the first row, drawing tools in the second,
+        # styled and spaced as the main window's first toolbar (both rows alike, so the buttons
+        # line up), with the main window's gap strips between the rows and above the sheet.
+        # Both can be moved (top / bottom edge or floating); their place is saved in .settings.
+        def toolbar(title, name):
+            bar = QToolBar(title, workspace)
+            bar.setObjectName(name)
+            bar.setMovable(True)
+            bar.setFloatable(True)
+            bar.setAllowedAreas(Qt.TopToolBarArea | Qt.BottomToolBarArea)
+            bar.setContentsMargins(0, 0, 0, 0)
+            bar.setIconSize(QSize(32, 32))
+            bar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            bar.setStyleSheet(f"QToolBar#{name}{{margin:0;padding:2px 4px;border:0;spacing:4px;}}"
+                              "QToolButton:checked{background:#315f94;border:1px solid #548ac2;"
+                              "border-radius:3px;}")
+            bar.layout().setContentsMargins(4, 4, 4, 4)
+            workspace.addToolBar(Qt.TopToolBarArea, bar)
+            return bar
+
+        def toolbar_gap(name, height):
+            gap = QToolBar(workspace)
+            gap.setObjectName(name)
+            gap.setMovable(False)
+            gap.setFloatable(False)
+            gap.setFixedHeight(height)
+            gap.toggleViewAction().setVisible(False)
+            gap.setStyleSheet(f"QToolBar#{name}{{background:#202329;border:0;padding:0;}}")
+            workspace.addToolBarBreak(Qt.TopToolBarArea)
+            workspace.addToolBar(Qt.TopToolBarArea, gap)
+            workspace.addToolBarBreak(Qt.TopToolBarArea)
+
+        self.tb_file = toolbar("File", "tb_drawing_file")
+        for act in (self.act_import_logo, self.act_export, None, self.act_delete, None,
+                    self.act_fit, self.act_panels, None):
+            self.tb_file.addSeparator() if act is None else self.tb_file.addAction(act)
+        self.tb_file.addAction(self.act_undo)          # as in the main window's first toolbar
+        self.tb_file.addAction(self.act_redo)
+        toolbar_gap("tb_drawing_toolbar_gap", 10)
+        self.tb_tools = toolbar("Drawing Tools", "tb_drawing_tools")
+        for act in [self.act_select, self.act_cut, None, *self.view_actions.values(), None,
+                    *self.dimension_actions.values(), None]:
+            self.tb_tools.addSeparator() if act is None else self.tb_tools.addAction(act)
+        self.tb_tools.addWidget(tool_group("", [grid_icon, QLabel("Grid"), self.sp_grid,
+                                                QLabel("Snap"), self.sp_snap], framed=False))
+        self.tb_tools.addAction(self.act_snap)
+        toolbar_gap("tb_drawing_view_gap", 12)
+        for bar in (self.tb_file, self.tb_tools):        # icons as large as the buttons allow
+            enlarge_toolbar_icons(bar)
+
+        # panels: docks like the main window's panels; tabbed together on the right, each one
+        # can be moved to the left or right, closed and shown again (View menu / Panels button)
+        def panel(title, name, page, icon):
+            dock = QDockWidget(title, workspace)
+            dock.setObjectName(name)
+            dock.setWindowIcon(QIcon(os.path.join(icon_dir, icon)))
+            dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
+            dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(page)
+            # never narrower than its contents (nothing is cut off at the right edge)
+            scroll.setMinimumWidth(max(270, page.minimumSizeHint().width() +
+                                       scroll.verticalScrollBar().sizeHint().width() + 4))
+            dock.setWidget(scroll)
+            workspace.addDockWidget(Qt.RightDockWidgetArea, dock)
+            dock.toggleViewAction().toggled.connect(lambda _visible: self._sync_panels_action())
+            return dock
+
+        self.views_dock = panel("Views", "dock_drawing_views", view_page, "view_isometric.png")
+        self.dimensions_dock = panel("Dimensions", "dock_drawing_dimensions", dimensions_page,
+                                     "dimension.png")
+        self.sheet_dock = panel("Sheet", "dock_drawing_sheet", sheet_page, "technical_drawing.png")
+        workspace.tabifyDockWidget(self.views_dock, self.dimensions_dock)
+        workspace.tabifyDockWidget(self.dimensions_dock, self.sheet_dock)
+        self.views_dock.raise_()
+        self.panel_docks = (self.views_dock, self.dimensions_dock, self.sheet_dock)
+
+        # menu bar with the same actions as the toolbars (checked / enabled states stay in sync)
+        menu_bar = QMenuBar(workspace)
+        file_menu = menu_bar.addMenu("&File")
+        for act in (self.act_import_logo, self.act_export, None, self.act_finish, self.act_cancel):
+            file_menu.addSeparator() if act is None else file_menu.addAction(act)
+        edit_menu = menu_bar.addMenu("&Edit")
+        for act in (self.act_undo, self.act_redo, None, self.act_delete):
+            edit_menu.addSeparator() if act is None else edit_menu.addAction(act)
+        view_menu = menu_bar.addMenu("&View")
+        view_menu.addAction(self.act_fit)
+        view_menu.addSeparator()
+        for dock in self.panel_docks:
+            view_menu.addAction(dock.toggleViewAction())
+        view_menu.addSeparator()
+        for bar in (self.tb_file, self.tb_tools):
+            view_menu.addAction(bar.toggleViewAction())
+        tools_menu = menu_bar.addMenu("&Tools")
+        tools_menu.addAction(self.act_select)
+        tools_menu.addAction(self.act_cut)
+        place_menu = tools_menu.addMenu(QIcon(os.path.join(icon_dir, "view_front.png")), "Place View")
+        for act in self.view_actions.values():
+            place_menu.addAction(act)
+        dimension_menu = tools_menu.addMenu(QIcon(os.path.join(icon_dir, "dimension.png")),
+                                            "Dimension")
+        for act in self.dimension_actions.values():
+            dimension_menu.addAction(act)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.act_snap)
+        workspace.setMenuBar(menu_bar)
+
+        # status bar: drawing status on the left, Finish / Cancel on the right
+        status_bar = QStatusBar(workspace)
+        status_bar.setSizeGripEnabled(False)
+        self.drawing_status = QLabel("Ready")
+        self.drawing_status.setStyleSheet("color:#80c8ff;font-size:10px;")
+        status_bar.addWidget(self.drawing_status, 1)
+        self.object_info = QLabel()          # the extrusion being drawn, with its size
+        self.object_info.setStyleSheet("color:#aab2bd;font-size:10px;padding:0 8px;")
+        status_bar.addPermanentWidget(self.object_info)
+        self._update_object_info()
+        finish = QPushButton("✔ Finish Drawing")
+        finish.setToolTip("Keep the drawing under its extrusion and close the editor (Ctrl+Enter)")
+        finish.clicked.connect(self.accept)
+        cancel = QPushButton("✖ Cancel")
+        cancel.setToolTip("Close the editor without keeping changes")
+        cancel.clicked.connect(self.reject)
+        status_bar.addPermanentWidget(finish)
+        status_bar.addPermanentWidget(cancel)
+        workspace.setStatusBar(status_bar)
+
+        state = self._saved_workspace_state()        # toolbar / panel layout from .settings
+        if state is not None:
+            workspace.restoreState(state, self.WORKSPACE_STATE_VERSION)
+        self._sync_panels_action()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(workspace, 1)
 
         self.front_view.setCurrentIndex(max(0, self.front_view.findData(
             tuple(self._options.get("front", (0, 1, 0))))))
-        self.section_plane.setCurrentIndex(max(0, self.section_plane.findData(
-            int(self._options.get("section_view", 0)))))
+        self.canvas.cutRotated.connect(self._on_cut_rotated)
+        self.canvas.sectionRemoveRequested.connect(self._remove_section_by_letter)
         self._refresh_dimension_list()
         self._refresh_view_list()
-        for widget in [self.front_view, self.section_view, self.section_plane, self.cut_offset,
-                       self.view_scale]:
-            signal = getattr(widget, "currentIndexChanged", None) or \
-                     getattr(widget, "toggled", None) or getattr(widget, "valueChanged", None)
-            if signal is not None:
-                signal.connect(self._refresh_preview)
-        self.section_view.toggled.connect(lambda enabled:
-                                          self.place_section_button.setEnabled(enabled))
-        self.section_view.toggled.connect(lambda enabled:
-                                          self.view_buttons["section"].setEnabled(enabled))
-        self.section_view.toggled.connect(self.btn_cut.setEnabled)
+        self._refresh_section_list(0 if self.sections else -1)
+        for widget in [self.front_view, self.view_scale]:
+            widget.currentIndexChanged.connect(self._refresh_preview)
         for widget in (self.project, self.author, self.date, self.version, self.page,
                        self.title, self.number, self.tolerance):
             widget.editingFinished.connect(self._refresh_preview)
         self.projection.currentIndexChanged.connect(self._refresh_preview)
-        self.view_buttons["section"].setEnabled(self.section_view.isChecked())
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         self._sync_tool_buttons()
         self._refresh_preview()
+        # undo / redo: snapshots of the drawing, recorded after every finished change
+        self._restoring_history = False
+        self._history = History(self._history_state())
+        self._sync_history_actions()
+
+    WORKSPACE_STATE_VERSION = 3
+
+    # ── undo / redo ───────────────────────────────────────────────────────────
+    # what a snapshot holds: the content of the drawing (not grid / snap or the panel layout)
+    HISTORY_KEYS = ("front", "rotation", "scale_ratio", "view_placements", "dimensions",
+                    "sections", "sheet", "orientation", "projection", "project", "author",
+                    "date", "version", "page", "title", "number", "tolerance", "logo_path")
+
+    def _history_state(self):
+        options = self.drawing_options()
+        return json.dumps({key: options.get(key) for key in self.HISTORY_KEYS},
+                          sort_keys=True, default=_json_default)
+
+    def _commit_history(self):
+        """Record the drawing after a change; not while restoring or in the middle of a drag
+        (a drag is one step)."""
+        if getattr(self, "_history", None) is None or self._restoring_history:
+            return
+        canvas = self.canvas
+        if canvas._drag_offset is not None or canvas._dimension_drag is not None or \
+                canvas._cut_drag is not None:
+            return
+        if self._history.push(self._history_state()):
+            self._sync_history_actions()
+
+    def _sync_history_actions(self):
+        self.act_undo.setEnabled(bool(self._history.undo_stack))
+        self.act_redo.setEnabled(bool(self._history.redo_stack))
+
+    def _undo(self):
+        state = self._history.undo()
+        if state is not None:
+            self._apply_history_state(state)
+            self.drawing_status.setText("Undo")
+        self._sync_history_actions()
+
+    def _redo(self):
+        state = self._history.redo()
+        if state is not None:
+            self._apply_history_state(state)
+            self.drawing_status.setText("Redo")
+        self._sync_history_actions()
+
+    def _apply_history_state(self, text):
+        """Put a recorded drawing back into the editor (fields, views, dimensions, sections)."""
+        state = json.loads(text)
+        self._restoring_history = True
+        widgets = (self.front_view, self.view_scale, self.projection, self.sheet_size,
+                   self.sheet_orientation, *self.rotation, self.project, self.author, self.date,
+                   self.version, self.page, self.title, self.number, self.tolerance)
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.canvas.set_mode()
+            self.front_view.setCurrentIndex(max(0, self.front_view.findData(
+                tuple(state.get("front") or (0, 1, 0)))))
+            for spin, value in zip(self.rotation, state.get("rotation") or (0, 0, 0)):
+                spin.setValue(int(value) % 360)
+            ratio = state.get("scale_ratio")
+            self.view_scale.setCurrentIndex(0 if not ratio else min(
+                range(1, self.view_scale.count()),
+                key=lambda i: abs(math.log(self.view_scale.itemData(i) / float(ratio)))))
+            self.projection.setCurrentIndex(max(0, self.projection.findData(state.get("projection"))))
+            self.sheet_size.setCurrentIndex(max(0, self.sheet_size.findData(state.get("sheet"))))
+            self.sheet_orientation.setCurrentIndex(
+                max(0, self.sheet_orientation.findData(state.get("orientation"))))
+            for key in ("project", "author", "date", "version", "page", "title", "number",
+                        "tolerance"):
+                getattr(self, key).setText(str(state.get(key) or ""))
+            path = state.get("logo_path") or ""
+            if path != self.logo_path:
+                self.logo_path = path
+                self.logo_pixmap = QPixmap(path) if path and os.path.isfile(path) else QPixmap()
+                self.logo_field.setText(os.path.basename(path) if path else "")
+            # the lists are changed in place: the canvas works on the same objects
+            self.view_placements[:] = [dict(item) for item in state.get("view_placements") or []]
+            self.dimensions[:] = [dict(item) for item in state.get("dimensions") or []]
+            self.sections[:] = [dict(item) for item in state.get("sections") or []]
+            self.canvas.selected = None
+            self.canvas._selected_geometry = None
+            self.canvas._hover_geometry = None
+            self.canvas.select_dimension(None)
+            self._refresh_view_list()
+            self._refresh_dimension_list()
+            self._refresh_section_list()
+            self._refresh_preview()
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+            self._restoring_history = False
 
     def source_entry(self):
         return self.current_source_entry
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        _set_dark_title_bar(self)          # dark Windows title bar, as the other windows
+
+    def _settings_owner(self):
+        """The main window, whose .settings file also keeps the editor's layout."""
+        owner = self.parent()
+        return owner if hasattr(owner, "_settings") and hasattr(owner, "_save_settings") else None
+
+    def _saved_workspace_state(self):
+        owner = self._settings_owner()
+        text = owner._settings.get("session", {}).get("drawing_layout") if owner else ""
+        if text:
+            try:
+                return QByteArray.fromHex(text.encode("ascii"))
+            except (UnicodeEncodeError, ValueError):
+                pass
+        return TechnicalDrawingDialog._workspace_state
+
+    def done(self, result):
+        """Keep the toolbar and panel layout: for this session and in .settings."""
+        state = self._workspace.saveState(self.WORKSPACE_STATE_VERSION)
+        TechnicalDrawingDialog._workspace_state = state
+        owner = self._settings_owner()
+        if owner is not None:
+            owner._settings["session"]["drawing_layout"] = bytes(state.toHex()).decode("ascii")
+            owner._save_settings()
+        super().done(result)
+
+    def _toggle_panels(self):
+        """Panels button: show all panels when none is open, otherwise close them all."""
+        show = not any(dock.toggleViewAction().isChecked() for dock in self.panel_docks)
+        for dock in self.panel_docks:
+            dock.setVisible(show)
+        if show:
+            self.views_dock.raise_()
+        self._sync_panels_action()
+
+    def _sync_panels_action(self):
+        if hasattr(self, "panel_docks"):
+            self.act_panels.setChecked(
+                any(dock.toggleViewAction().isChecked() for dock in self.panel_docks))
+
+    def _delete_selected(self):
+        """Edit → Delete Selected: the selected dimension, otherwise the selected view."""
+        if self.canvas.selected_dimension is not None:
+            self._remove_dimension_at(self.canvas.selected_dimension)
+        elif self.canvas.selected is not None:
+            self._remove_selected_view()
+
+    # ── cut sections A-A, B-B, … ──────────────────────────────────────────────
+    SECTION_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"     # without I and O (mistaken for 1 and 0)
+    SECTION_ROTATION = {0: 2, 2: 1, 1: 0}             # 90° turns: front → right side → top plane
+
+    def _section_index(self, letter):
+        return next((index for index, item in enumerate(self.sections)
+                     if item["letter"] == letter), -1)
+
+    def _current_section(self):
+        row = self.section_list.currentRow()
+        return self.sections[row] if 0 <= row < len(self.sections) else None
+
+    def _section_text(self, section):
+        letter = section["letter"]
+        placed = any(record.get("name") == f"section-{letter}" for record in self.view_placements)
+        return (f"{letter}-{letter}  ·  {DRAWING_SECTION_PLANE_TEXT[section['plane']]}  ·  "
+                f"{section['offset']:g} mm" + ("" if placed else "  (view not placed)"))
+
+    def _refresh_section_list(self, select_row=None):
+        row = self.section_list.currentRow() if select_row is None else select_row
+        self.section_list.blockSignals(True)
+        self.section_list.clear()
+        for section in self.sections:
+            self.section_list.addItem(self._section_text(section))
+        row = min(row, len(self.sections) - 1)
+        self.section_list.setCurrentRow(row)
+        self.section_list.blockSignals(False)
+        self._on_section_row(row)
+
+    def _on_section_row(self, row):
+        """Show the selected cut in the plane / offset fields."""
+        section = self.sections[row] if 0 <= row < len(self.sections) else None
+        for widget in (self.section_plane, self.cut_offset, self.btn_rotate_section,
+                       self.btn_remove_section):
+            widget.setEnabled(section is not None)
+        self.view_actions["section"].setEnabled(bool(self.sections))
+        if section is None:
+            return
+        self.section_plane.blockSignals(True)
+        self.cut_offset.blockSignals(True)
+        self.section_plane.setCurrentIndex(max(0, self.section_plane.findData(section["plane"])))
+        self.cut_offset.setValue(float(section["offset"]))
+        self.section_plane.blockSignals(False)
+        self.cut_offset.blockSignals(False)
+
+    def _on_section_edited(self, *_):
+        section = self._current_section()
+        if section is None:
+            return
+        section["plane"] = int(self.section_plane.currentData())
+        section["offset"] = float(self.cut_offset.value())
+        self._refresh_section_list()
+        self._refresh_preview()
+
+    def _add_section(self, plane=0, offset=0.0):
+        letter = next((letter for letter in self.SECTION_LETTERS
+                       if self._section_index(letter) < 0), None)
+        if letter is None:
+            self.drawing_status.setText("No more section letters available")
+            return
+        self.sections.append({"letter": letter, "plane": int(plane), "offset": float(offset)})
+        self._refresh_section_list(len(self.sections) - 1)
+        self.drawing_status.setText(
+            f"Section {letter}-{letter} added · place its view with the Section View tool")
+        self._refresh_preview()
+
+    def _rotate_section(self):
+        section = self._current_section()
+        if section is not None:
+            self._on_cut_rotated(section["letter"], self.SECTION_ROTATION[section["plane"]],
+                                 section["offset"])
+
+    def _remove_section(self):
+        section = self._current_section()
+        if section is not None:
+            self._remove_section_by_letter(section["letter"])
+
+    def _remove_section_by_letter(self, letter):
+        """Remove a cut with its section view and the dimensions on that view."""
+        index = self._section_index(letter)
+        if index < 0:
+            return
+        view = f"section-{letter}"
+        del self.sections[index]
+        self.view_placements[:] = [r for r in self.view_placements if r.get("name") != view]
+        self.dimensions[:] = [d for d in self.dimensions if d.get("view") != view]
+        if self.canvas.selected is not None and self.canvas.selected.get("name") == view:
+            self.canvas.selected = None
+        self.canvas.select_dimension(None)
+        self._refresh_section_list(min(index, len(self.sections) - 1))
+        self._refresh_view_list()
+        self._refresh_dimension_list()
+        self.drawing_status.setText(f"Section {letter}-{letter} removed")
+        self._refresh_preview()
+
+    def _on_cut_rotated(self, letter, plane, offset):
+        index = self._section_index(letter)
+        if index < 0:
+            return
+        self.sections[index].update(plane=int(plane), offset=float(offset))
+        self._refresh_section_list(index)
+        self.drawing_status.setText(
+            f"Section {letter}-{letter} rotated: {DRAWING_SECTION_PLANE_TEXT[int(plane)]}")
+        self._refresh_preview()
+
+    def _update_snap_icon(self, enabled):
+        """Greyed snap icon while snapping is off, as in the sketcher toolbar."""
+        mode = QIcon.Normal if enabled else QIcon.Disabled
+        self.act_snap.setIcon(QIcon(self._snap_icon.pixmap(QSize(64, 64), mode)))
+
+    def _on_snap_toggled(self, enabled):
+        self._update_snap_icon(enabled)
+        self.canvas.set_grid(snap_enabled=enabled)
+        self.drawing_status.setText("Snap to grid on" if enabled else "Snap to grid off")
 
     def _on_source_changed(self, index):
         if not 0 <= index < len(self.source_entries):
@@ -16640,6 +18298,7 @@ class TechnicalDrawingDialog(QDialog):
         self.view_placements.clear()
         self.dimensions.clear()
         self.canvas.selected = None
+        self._update_object_info()
         self._refresh_view_list()
         self._refresh_dimension_list()
         self._refresh_preview()
@@ -16647,9 +18306,7 @@ class TechnicalDrawingDialog(QDialog):
     def drawing_options(self):
         return {
             "front": self.front_view.currentData(),
-            "section": self.section_view.isChecked(),
-            "section_view": self.section_plane.currentData(),
-            "cut_offset": self.cut_offset.value(),
+            "sections": [dict(section) for section in self.sections],
             "rotation": [spin.value() for spin in self.rotation],
             "view_scale": 1.0,
             "scale_ratio": self.view_scale.currentData(),
@@ -16666,19 +18323,26 @@ class TechnicalDrawingDialog(QDialog):
             "logo": self.logo_pixmap,
             "logo_path": self.logo_path,
             "dimensions": [dict(value) for value in self.dimensions],
+            "grid_mm": self.sp_grid.value(),
+            "snap_mm": self.sp_snap.value(),
+            "snap": self.act_snap.isChecked(),
+            "sheet": self.sheet_size.currentData(),
+            "orientation": self.sheet_orientation.currentData(),
         }
 
     def _refresh_preview(self, *_):
         if self.mesh is None:
             return
         picture = QPicture()
-        picture.setBoundingRect(QRect(0, 0, int(DRAWING_PAGE_W), int(DRAWING_PAGE_H)))
+        sheet = _drawing_sheet(self.drawing_options())
+        picture.setBoundingRect(QRect(0, 0, int(sheet["w"]), int(sheet["h"])))
         painter = QPainter(picture)
         try:
             options = self.drawing_options()
             options["dimensions"] = []
-            options.update(_geometry_cache=self._geometry_cache, _page_scale=1.0, _thick_scale=1.5,
-                           _projection_resolution=900, _isometric_resolution=1200)
+            options.update(_geometry_cache=self._geometry_cache, _page_scale=1.0,
+                           _projection_resolution=900, _isometric_resolution=1200,
+                           _colors=DRAWING_SCREEN_COLORS)
             layout = _draw_technical_drawing(
                 painter, self.mesh[0], self.mesh[1], options)
             source_sketch = self.current_source_entry.get("parent") \
@@ -16691,12 +18355,57 @@ class TechnicalDrawingDialog(QDialog):
             return
         painter.end()
         self.canvas.set_sheet(picture, layout, self.view_placements, self.dimensions)
+        self._commit_history()                   # every finished change is one undo step
 
     def _queue_refresh_preview(self):
         if not self._preview_timer.isActive():
             dragging = self.canvas._drag_offset is not None or \
-                self.canvas._dimension_drag is not None
+                self.canvas._dimension_drag is not None or self.canvas._cut_drag is not None
             self._preview_timer.start(80 if dragging else 40)
+
+    def _update_object_info(self):
+        """Status bar: name and overall size of the drawn extrusion (with its child bodies)."""
+        name = self.current_source_entry.get("name", "Extrusion") \
+            if self.current_source_entry is not None else "Model"
+        text = f"Object: {name}"
+        if self.mesh is not None and len(self.mesh[1]):
+            vertices = np.asarray(self.mesh[0], dtype=float).reshape(-1, 3)
+            used = vertices[np.unique(np.asarray(self.mesh[1], dtype=int))]
+            size = used.max(axis=0) - used.min(axis=0)
+            text += "  ·  " + " × ".join(_drawing_fmt(float(value)) for value in size) + " mm"
+        self.object_info.setText(text)
+        self.object_info.setToolTip("Extrusion drawn on this sheet (select another extrusion in "
+                                    "the main window before opening Technical Drawing)")
+
+    def _on_sheet_changed(self, *_):
+        """New sheet format: the placed views keep their relative position on the sheet (and
+        stay on it), then the sheet is redrawn and fitted into the window."""
+        sheet = _drawing_sheet(self.drawing_options())
+        old_w, old_h = self.canvas.page_w, self.canvas.page_h
+        for record in self.view_placements:
+            x = float(record.get("x", 60.0)) * sheet["w"] / old_w
+            y = float(record.get("y", 60.0)) * sheet["h"] / old_h
+            record["x"] = float(min(max(x, 60.0), sheet["w"] - 120.0))
+            record["y"] = float(min(max(y, 60.0), sheet["h"] - 120.0))
+        self.drawing_status.setText(f"Sheet {sheet['name']} {sheet['orientation']}")
+        self._refresh_preview()
+        self.canvas.fit_sheet()
+
+    def _on_cut_moved(self, letter, offset):
+        """Cutting line dragged: move that section live (preview refreshes are throttled)."""
+        index = self._section_index(letter)
+        if index < 0:
+            return
+        self.sections[index]["offset"] = float(offset)
+        item = self.section_list.item(index)
+        if item is not None:
+            item.setText(self._section_text(self.sections[index]))
+        if self.section_list.currentRow() != index:
+            self.section_list.blockSignals(True)
+            self.section_list.setCurrentRow(index)
+            self.section_list.blockSignals(False)
+        self._on_section_row(index)
+        self._queue_refresh_preview()
 
     def _attach_sketch_references(self, layout, sketch, options):
         vertices, triangles = self.mesh
@@ -16751,6 +18460,8 @@ class TechnicalDrawingDialog(QDialog):
             rotated_curves = []
 
         for info in layout.get("placements", []):
+            if info.get("name") == "isometric":        # the shaded isometric is not picked from
+                continue
             right, up = np.asarray(info["right"]), np.asarray(info["up"])
             info["reference_points"] = np.column_stack((rotated_points @ right,
                                                          rotated_points @ up))
@@ -16760,13 +18471,21 @@ class TechnicalDrawingDialog(QDialog):
                                          for curve in rotated_curves]
 
     def _begin_view_placement(self, name):
-        if name == "section" and not self.section_view.isChecked():
-            return
+        if name == "section":
+            # the section selected in the Views panel, else the first one without a view
+            section = self._current_section() or next(
+                (item for item in self.sections if not any(
+                    record.get("name") == f"section-{item['letter']}"
+                    for record in self.view_placements)), None)
+            if section is None:
+                self.drawing_status.setText("Add a section first (Cut tool or Views panel)")
+                self._sync_tool_buttons()
+                return
+            name = f"section-{section['letter']}"
         self.canvas.set_mode("place_view", name)
 
     def _begin_cut_placement(self):
-        if self.section_view.isChecked():
-            self.canvas.set_mode("cut")
+        self.canvas.set_mode("cut")
         self._sync_tool_buttons()
 
     def _on_canvas_status(self, text):
@@ -16775,12 +18494,14 @@ class TechnicalDrawingDialog(QDialog):
 
     def _sync_tool_buttons(self):
         mode = self.canvas.mode
-        self.btn_select.setChecked(mode is None)
-        self.btn_cut.setChecked(mode == "cut")
-        for name, button in self.view_buttons.items():
-            button.setChecked(mode == "place_view" and self.canvas.active_view == name)
-        for kind, button in self.dimension_buttons.items():
-            button.setChecked(mode == "dimension" and self.canvas.dimension_kind == kind)
+        self.act_select.setChecked(mode is None)
+        self.act_cut.setChecked(mode == "cut")
+        for name, act in self.view_actions.items():
+            active = str(self.canvas.active_view or "")
+            act.setChecked(mode == "place_view" and (
+                active == name or name == "section" and active.startswith("section-")))
+        for kind, act in self.dimension_actions.items():
+            act.setChecked(mode == "dimension" and self.canvas.dimension_kind == kind)
 
     def _refresh_view_list(self):
         current = self.canvas.selected if hasattr(self, "canvas") else None
@@ -16788,14 +18509,39 @@ class TechnicalDrawingDialog(QDialog):
         self.view_list.clear()
         selected_row = -1
         for index, record in enumerate(self.view_placements):
-            label = {"top": "Top View", "front": "Front View", "left": "Left Side", "right": "Right Side",
-                     "isometric": "Isometric", "section": "Section"}.get(
-                         record.get("name"), record.get("name", "View").title())
+            letter = _section_view_letter(record.get("name"), self.sections)
+            label = f"Section {letter}-{letter}" if letter else \
+                {"top": "Top View", "front": "Front View", "left": "Left Side",
+                 "right": "Right Side", "isometric": "Isometric"}.get(
+                     record.get("name"), str(record.get("name", "View")).title())
+            if record.get("name") in self.HIDDEN_LINE_VIEWS and not record.get("hidden_lines", True):
+                label += "  (no hidden lines)"
             self.view_list.addItem(label)
             if record is current:
                 selected_row = index
         self.view_list.setCurrentRow(selected_row)
         self.view_list.blockSignals(False)
+        self._sync_hidden_lines_box()
+
+    HIDDEN_LINE_VIEWS = ("front", "top", "left", "right")
+
+    def _sync_hidden_lines_box(self):
+        record = self.canvas.selected if hasattr(self, "canvas") else None
+        applies = record is not None and record.get("name") in self.HIDDEN_LINE_VIEWS
+        self.hidden_lines.blockSignals(True)
+        self.hidden_lines.setEnabled(applies)
+        self.hidden_lines.setChecked(bool(record.get("hidden_lines", True)) if applies else True)
+        self.hidden_lines.blockSignals(False)
+
+    def _on_hidden_lines_toggled(self, checked):
+        record = self.canvas.selected
+        if record is None or record.get("name") not in self.HIDDEN_LINE_VIEWS:
+            return
+        record["hidden_lines"] = bool(checked)
+        self._refresh_view_list()
+        self.drawing_status.setText(
+            f"{record['name'].title()} view: hidden lines {'shown' if checked else 'hidden'}")
+        self._refresh_preview()
 
     def _select_view_row(self, row):
         if 0 <= row < len(self.view_placements):
@@ -16809,6 +18555,7 @@ class TechnicalDrawingDialog(QDialog):
 
     def _on_view_selected(self, record):
         if record is None:
+            self._sync_hidden_lines_box()
             return
         self._refresh_view_list()
         self.drawing_status.setText(f"Selected: {record['name'].title()} view")
@@ -16832,21 +18579,16 @@ class TechnicalDrawingDialog(QDialog):
         self._pending_dimension = None
         self.dimension_value.setSuffix("°" if kind == "angle" else " mm")
         self.dimension_value.setValue(value)
+        self.canvas.select_dimension(len(self.dimensions) - 1)     # the new one stays highlighted
         self._refresh_dimension_list()
         self._refresh_preview()
 
-    def _on_cut_placed(self, offset):
-        self.section_view.setChecked(True)
-        self.cut_offset.setValue(offset)
-        self._refresh_preview()
-
-    def _on_section_toggled(self, enabled):
-        self.place_section_button.setEnabled(enabled)
-        self.btn_cut.setEnabled(enabled)
-        self.view_buttons["section"].setEnabled(enabled)
-        self._refresh_preview()
+    def _on_cut_placed(self, plane, offset):
+        """Cut tool: a new section through the clicked point."""
+        self._add_section(plane, offset)
 
     def _refresh_dimension_list(self):
+        self.dimension_list.blockSignals(True)
         self.dimension_list.clear()
         for dimension in self.dimensions:
             kind = dimension.get("type", "length").title()
@@ -16854,6 +18596,38 @@ class TechnicalDrawingDialog(QDialog):
             label = str(dimension.get("label", "")).strip() or kind
             self.dimension_list.addItem(
                 f"{kind} · {label}: {float(dimension['value']):.2f}{unit}")
+        selected = self.canvas.selected_dimension if hasattr(self, "canvas") else None
+        self.dimension_list.setCurrentRow(-1 if selected is None else selected)
+        if selected is None:
+            self.dimension_list.clearSelection()
+        self.dimension_list.blockSignals(False)
+
+    def _on_dimension_row(self, row):
+        """List → sheet: highlight the dimension chosen in the list."""
+        if hasattr(self, "canvas"):
+            self.canvas.select_dimension(row)
+            self._show_dimension_value(row)
+
+    def _on_canvas_dimension_selected(self, index):
+        """Sheet → list: select the clicked dimension's row (and bring up the Dimensions panel)."""
+        self.dimension_list.blockSignals(True)
+        self.dimension_list.setCurrentRow(index)
+        if index < 0:
+            self.dimension_list.clearSelection()
+        self.dimension_list.blockSignals(False)
+        if index >= 0:
+            if self.dimensions_dock.isHidden():
+                self.dimensions_dock.show()
+            self.dimensions_dock.raise_()
+            self.dimension_list.scrollToItem(self.dimension_list.item(index))
+            self._show_dimension_value(index)
+
+    def _show_dimension_value(self, row):
+        if 0 <= row < len(self.dimensions):
+            dimension = self.dimensions[row]
+            self.dimension_value.setSuffix("°" if dimension.get("type") == "angle" else " mm")
+            self.dimension_value.setValue(float(dimension.get("value", 0.0)))
+            self.drawing_status.setText(f"Selected dimension {row + 1} · Delete removes it")
 
     def _add_dimension(self, kind):
         label = self.dimension_label.text().strip()
@@ -16862,11 +18636,18 @@ class TechnicalDrawingDialog(QDialog):
         self.canvas.set_mode("dimension", kind)
 
     def _remove_dimension(self):
-        row = self.dimension_list.currentRow()
-        if row >= 0:
-            self.dimensions.pop(row)
-            self._refresh_dimension_list()
-            self._refresh_preview()
+        self._remove_dimension_at(self.dimension_list.currentRow())
+
+    def _remove_dimension_at(self, row):
+        if not 0 <= row < len(self.dimensions):
+            return
+        self.dimensions.pop(row)
+        self.canvas.select_dimension(None)
+        self.canvas._hover_dimension = None
+        self.canvas._dimension_drag = None
+        self._refresh_dimension_list()
+        self.drawing_status.setText("Dimension removed")
+        self._refresh_preview()
 
     def _load_logo(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -16882,6 +18663,31 @@ class TechnicalDrawingDialog(QDialog):
         self.logo_path = path
         self.logo_field.setText(os.path.basename(path))
         self.logo_field.setToolTip(path)
+        self.drawing_status.setText(f"Logo loaded: {os.path.basename(path)}")
+        self._refresh_preview()
+
+    def _export_drawing(self):
+        """Export the current state of the drawing directly from the editor."""
+        if self.mesh is None:
+            return
+        suggested = self.number.text().strip() or self.title.text().strip() or \
+            self.project.text().strip() or "drawing"
+        suggested = re.sub(r'[\\/:*?"<>|]+', "_", suggested)
+        path, extension = _ask_drawing_export_path(self, suggested + ".pdf")
+        if not path:
+            return
+        options = self.drawing_options()
+        options["_geometry_cache"] = self._geometry_cache
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            write_technical_drawing(path, extension, self.mesh, options)
+        except (OSError, ValueError, RuntimeError) as ex:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Drawing export failed", str(ex))
+            self.drawing_status.setText(f"Export failed: {ex}")
+            return
+        QApplication.restoreOverrideCursor()
+        self.drawing_status.setText(f"Exported {os.path.basename(path)}")
 
 
 def clamp_window_geometry(rect, available, minimum):
@@ -18095,7 +19901,8 @@ class AssemblyDialog(QDialog):
                 ("view_isometric.png", "Isometric", -54.735610317245346, -135.0),
                 ("view_top.png", "Top (XY)", 0.0, 0.0),
                 ("view_front.png", "Front (XZ)", -90.0, 0.0),
-                ("view_side.png", "Right (YZ)", -90.0, -90.0)):
+                ("view_right.png", "Right (YZ)", -90.0, -90.0),
+                ("view_left.png", "Left (YZ)", -90.0, 90.0)):
             view_action = action(icon, text, f"{text} view",
                                  lambda rx=rot_x, rz=rot_z: self.view.set_camera(rx, rz))
             self._view_actions.append(view_action)
@@ -18282,6 +20089,7 @@ class AssemblyDialog(QDialog):
 
         root = QVBoxLayout(self)
         root.setMenuBar(menu_bar)
+        enlarge_toolbar_icons(toolbar)                   # icons as large as the buttons allow
         root.addWidget(toolbar)
         root.addWidget(split, 1)
         root.addLayout(bottom)
@@ -19553,6 +21361,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_saved_user_settings()
         self._build_menus()
+        for toolbar in self.findChildren(QToolBar):      # icons as large as the buttons allow
+            enlarge_toolbar_icons(toolbar)
         self._apply_shortcuts()
         self._restore_session_settings()
         self._set_mode(MODE_NORMAL)
@@ -19629,7 +21439,7 @@ class MainWindow(QMainWindow):
                 "show_fps": False,
             },
             "session": {"recent_files": [], "last_file": None, "window_geometry": "",
-                        "window_rect": None, "toolbar_state": ""},
+                        "window_rect": None, "toolbar_state": "", "drawing_layout": ""},
             "system": {
                 "schema_version": 1,
                 "platform": sys_platform.system(),
@@ -19685,9 +21495,9 @@ class MainWindow(QMainWindow):
             geometry = session.get("window_geometry")
             if isinstance(geometry, str):
                 settings["session"]["window_geometry"] = geometry
-            toolbar_state = session.get("toolbar_state")
-            if isinstance(toolbar_state, str):
-                settings["session"]["toolbar_state"] = toolbar_state
+            for key in ("toolbar_state", "drawing_layout"):    # main window / drawing editor
+                if isinstance(session.get(key), str):
+                    settings["session"][key] = session[key]
             rect = session.get("window_rect")
             if isinstance(rect, (list, tuple)) and len(rect) == 4 and all(
                     isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -19754,6 +21564,7 @@ class MainWindow(QMainWindow):
                 self.restoreState(QByteArray.fromHex(toolbar_state.encode("ascii")), 1)
             except (UnicodeEncodeError, ValueError):
                 pass
+        self._dock_measure.setVisible(self.view3d._measure_mode)    # only with the Measure tool
         self._settings["session"]["window_geometry"] = ""
         self._refresh_recent_files_menu()
 
@@ -19819,7 +21630,7 @@ class MainWindow(QMainWindow):
 
     def _update_sel_snap_icon(self, enabled):
         mode = QIcon.Normal if enabled else QIcon.Disabled
-        pixmap = self._snap_toggle_icon.pixmap(QSize(32, 32), mode)
+        pixmap = self._snap_toggle_icon.pixmap(QSize(64, 64), mode)     # sharp at the large size
         self.cb_sel_snap.setIcon(QIcon(pixmap))
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -19942,7 +21753,8 @@ class MainWindow(QMainWindow):
              lambda: self._set_view(-54.735610317245346, -135.0)),
             ("Top (XY)", "view_top.png", lambda: self._set_view(0.0, 0.0)),
             ("Front (XZ)", "view_front.png", lambda: self._set_view(-90.0, 0.0)),
-            ("Right (YZ)", "view_side.png", lambda: self._set_view(-90.0, -90.0)),
+            ("Right (YZ)", "view_right.png", lambda: self._set_view(-90.0, -90.0)),
+            ("Left (YZ)", "view_left.png", lambda: self._set_view(-90.0, 90.0)),
         )
         self._tb_view_actions = []
         for label, icon_file, slot in view_actions:
@@ -19964,9 +21776,11 @@ class MainWindow(QMainWindow):
         tb2.addAction(self.act_assembly)
         self.sp_grid=QDoubleSpinBox(); self.sp_grid.setRange(1,100); self.sp_grid.setValue(DEFAULT_GRID)
         self.sp_grid.setSuffix(" mm"); self.sp_grid.setToolTip("Grid spacing (mm)")
+        self.sp_grid.setMinimumWidth(100)
         self.sp_grid.valueChanged.connect(self._on_grid_changed)
         self.sp_snap=QDoubleSpinBox(); self.sp_snap.setRange(0.1,50); self.sp_snap.setValue(DEFAULT_SNAP)
         self.sp_snap.setSuffix(" mm"); self.sp_snap.setToolTip("Snap step (mm)")
+        self.sp_snap.setMinimumWidth(100)
         self.sp_snap.valueChanged.connect(self._on_snap_changed)
         self._snap_toggle_icon=QIcon(os.path.join(icon_dir, "snap_to_grid.png"))
         self.cb_sel_snap=QToolButton(); self.cb_sel_snap.setCheckable(True); self.cb_sel_snap.setChecked(True)
@@ -20056,9 +21870,19 @@ class MainWindow(QMainWindow):
         props_scroll=QScrollArea(); props_scroll.setWidgetResizable(True)
         props_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         props_scroll.setWidget(self._build_props()); split.addWidget(props_scroll)
-        self._meas_panel=self._build_measure_panel(); split.addWidget(self._meas_panel)
-        split.setStretchFactor(0, 3); split.setStretchFactor(1, 2); split.setStretchFactor(2, 2)
+        split.setStretchFactor(0, 3); split.setStretchFactor(1, 2)
         self._dock_obj.setWidget(split); self.addDockWidget(Qt.LeftDockWidgetArea,self._dock_obj)
+
+        # measurement results: a panel on the right like the other tool panels, shown while the
+        # Measure tool is on
+        self._dock_measure=QDockWidget("Measurement", self)
+        self._dock_measure.setObjectName("dock_measurement")
+        self._dock_measure.setWindowIcon(QIcon(os.path.join(icon_dir, "measurement.png")))
+        self._dock_measure.setFeatures(QDockWidget.DockWidgetMovable)
+        self._meas_panel=self._build_measure_panel()
+        self._dock_measure.setWidget(self._meas_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, self._dock_measure)
+        self._dock_measure.hide()
 
         dock_sk=QDockWidget("Sketch Status",self); dock_sk.setObjectName("dock_sketch_status")
         dock_sk.setFeatures(QDockWidget.DockWidgetMovable)
@@ -21040,15 +22864,18 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_measure_panel(self):
-        """Measurement results of the Measure tool, below the object explorer."""
-        w=QFrame(); w.setFrameShape(QFrame.StyledPanel)
-        lay=QVBoxLayout(w); lay.setContentsMargins(6,6,6,6); lay.setSpacing(4)
+        """Measurement results of the Measure tool (the Measurement panel on the right)."""
+        w=QWidget()
+        lay=QVBoxLayout(w); lay.setContentsMargins(8,8,8,8); lay.setSpacing(6)
         lay.addWidget(QLabel("<b>Measurement</b>"))
+        hint=QLabel("Click edges, corners, hole rims or surfaces in the 3-D view to measure them.")
+        hint.setWordWrap(True); hint.setStyleSheet("color:#aab2bd;font-size:9pt;")
+        lay.addWidget(hint)
         self.txt_measure=QPlainTextEdit(); self.txt_measure.setReadOnly(True)
         self.txt_measure.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.txt_measure.setFont(QFont("Consolas",9))
-        lay.addWidget(self.txt_measure)
-        w.hide()
+        self.txt_measure.setMinimumWidth(260)
+        lay.addWidget(self.txt_measure, 1)
         return w
 
     def _set_measure_mode(self, on):
@@ -21063,7 +22890,7 @@ class MainWindow(QMainWindow):
             self.act_measure.blockSignals(False)
         if on==self.view3d._measure_mode: return
         self.view3d.set_measure_mode(on)
-        self._meas_panel.setVisible(on)
+        self._dock_measure.setVisible(on)
         self.txt_measure.clear()
         if on: self._on_measure_changed()
 
@@ -21167,7 +22994,9 @@ class MainWindow(QMainWindow):
         act(m, "&Front (XZ)", lambda: self._set_view(-90.0, 0.0),
             icon=app_icon("view_front.png"))
         act(m, "&Right (YZ)", lambda: self._set_view(-90.0, -90.0),
-            icon=app_icon("view_side.png"))
+            icon=app_icon("view_right.png"))
+        act(m, "&Left (YZ)", lambda: self._set_view(-90.0, 90.0),
+            icon=app_icon("view_left.png"))
         act(m, "&Fit All", self._fit_all, key="fit_all",
             icon=standard_icon("SP_TitleBarMaxButton"))
         m.addSeparator()
@@ -25619,9 +27448,13 @@ class MainWindow(QMainWindow):
             self.p_type.setText("Technical Drawing")
             self.p_parent.setText(par["name"] if par else "—")
             options = sel.get("options", {})
+            sections = _drawing_sections(options)
+            sheet = _drawing_sheet(options)
             self.p_extra.setText(
-                f"3 projected views · {len(options.get('dimensions', []))} added measurement(s)" +
-                (" · section" if options.get("section") else ""))
+                f"{sheet['name']} {sheet['orientation']} · "
+                f"{len(options.get('dimensions', []))} added measurement(s)" +
+                (f" · sections {', '.join(s['letter'] + '-' + s['letter'] for s in sections)}"
+                 if sections else ""))
         else:
             gear = sel.get("gear_parameters")
             gear_type_name = (f"Planetary {gear.get('planetary_role', 'member').lower()}"
@@ -28088,14 +29921,21 @@ class MainWindow(QMainWindow):
                     if key in options:
                         options[key] = str(options[key])[:200]
                 options["section_view"] = min(2, max(0, int(options.get("section_view", 0))))
-                valid_names = {"front", "top", "right", "left", "isometric", "section"}
+                # cut sections A-A, B-B, … (older files: one section from section / cut_offset)
+                options["sections"] = _drawing_sections(options)
+                for key in ("section", "section_view", "cut_offset"):
+                    options.pop(key, None)
+                valid_names = {"front", "top", "right", "left", "isometric", "section"} | \
+                    {f"section-{item['letter']}" for item in options["sections"]}
                 options["view_placements"] = []
                 for item in placements:
                     if not isinstance(item, dict) or item.get("name") not in valid_names:
                         continue
                     x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
                     if math.isfinite(x) and math.isfinite(y):
-                        options["view_placements"].append({"name": item["name"], "x": x, "y": y})
+                        options["view_placements"].append(
+                            {"name": item["name"], "x": x, "y": y,
+                             "hidden_lines": bool(item.get("hidden_lines", True))})
                 options["dimensions"] = []
                 for item in dimensions[:50]:
                     if not isinstance(item, dict):
@@ -28537,15 +30377,9 @@ class MainWindow(QMainWindow):
         if parent is None or parent.get("type") != "extrusion" or not parent.get("solid"):
             QMessageBox.warning(self, "Drawing unavailable", "The source extrusion is unavailable.")
             return
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self, "Export Technical Drawing", "",
-            "PDF document (*.pdf);;SVG drawing (*.svg)")
+        path, extension = _ask_drawing_export_path(self)
         if not path:
             return
-        extension = os.path.splitext(path)[1].lower()
-        if extension not in (".svg", ".pdf"):
-            path += ".pdf" if selected_filter.startswith("PDF") else ".svg"
-            extension = os.path.splitext(path)[1].lower()
         options = copy.deepcopy(entry.get("options", {}))
         logo_path = options.get("logo_path", "")
         options["logo"] = QPixmap(logo_path) if logo_path and os.path.isfile(logo_path) else QPixmap()
@@ -28555,10 +30389,7 @@ class MainWindow(QMainWindow):
             self._update_operation_progress(None, "Preparing drawing mesh...")
             mesh = _drawing_source_mesh(parent, self.state["objects"])
             self._update_operation_progress(None, "Writing drawing...")
-            if extension == ".pdf":
-                self._write_technical_drawing_pdf(path, mesh, options)
-            else:
-                self._write_technical_drawing_svg(path, mesh, options)
+            write_technical_drawing(path, extension, mesh, options)
         except (OSError, ValueError, RuntimeError) as ex:
             QMessageBox.critical(self, "Drawing export failed", str(ex))
             self._st(f"Drawing export failed: {ex}")
@@ -28570,34 +30401,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _write_technical_drawing_svg(path, mesh, options):
-        width, height = 2376, 1680
-        generator_width, generator_height = 2386, 1687
-        generator = QSvgGenerator()
-        generator.setFileName(path)
-        generator.setResolution(102)
-        generator.setSize(QSize(generator_width, generator_height))
-        generator.setViewBox(QRectF(0, 0, width, height))
-        generator.setTitle("SimpleCAD Technical Drawing")
-        painter = QPainter()
-        if not painter.begin(generator):
-            raise RuntimeError(f"Could not create SVG drawing:\n{path}")
-        try:
-            _draw_technical_drawing(painter, mesh[0], mesh[1], options)
-        finally:
-            painter.end()
+        write_technical_drawing_svg(path, mesh, options)
 
     @staticmethod
     def _write_technical_drawing_pdf(path, mesh, options):
-        writer = QPdfWriter(path)
-        writer.setResolution(150)
-        writer.setPageSizeMM(QSizeF(594, 420))
-        painter = QPainter()
-        if not painter.begin(writer):
-            raise RuntimeError(f"Could not create PDF drawing:\n{path}")
-        try:
-            _draw_technical_drawing(painter, mesh[0], mesh[1], options)
-        finally:
-            painter.end()
+        write_technical_drawing_pdf(path, mesh, options)
 
     def _file_export(self):
         mesh=self._export_mesh()

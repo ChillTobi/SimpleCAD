@@ -2744,29 +2744,46 @@ def poly_area(pts):
                    for i in range(len(pts)))
 
 def triangulate_polygon(pts):
-    """Ear clipping for a simple CCW polygon; returns index triples."""
+    """Ear clipping for a simple CCW polygon; returns index triples.
+    Collinear boundary vertices are kept (never clipped as zero-area ears and never
+    skipped by a diagonal): the side walls of an extrusion use every profile vertex, so
+    dropping one would leave a T-junction and an open (non-watertight) mesh."""
     def cross(o, a, b): return (a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0])
+    def same(p, q): return p[0] == q[0] and p[1] == q[1]
+    def side(a, b, p):
+        """+1 left of a→b, -1 right, 0 on the line (relative tolerance)."""
+        cr = cross(a, b, p)
+        scale = math.hypot(b[0]-a[0], b[1]-a[1]) * math.hypot(p[0]-a[0], p[1]-a[1])
+        if abs(cr) <= 1e-9 * scale: return 0
+        return 1 if cr > 0 else -1
+    def turn(a, b, c):
+        """+1 convex, -1 reflex, 0 straight at b."""
+        return side(a, b, c)
+    def in_triangle(a, b, c, p):         # inside or on the boundary
+        return side(a, b, p) >= 0 and side(b, c, p) >= 0 and side(c, a, p) >= 0
     idx = list(range(len(pts))); tris = []
     while len(idx) > 3:
         m = len(idx)
-        reflex = [idx[k] for k in range(m)
-                  if cross(pts[idx[k-1]], pts[idx[k]], pts[idx[(k+1)%m]]) < 0]
+        turns = [turn(pts[idx[k-1]], pts[idx[k]], pts[idx[(k+1)%m]]) for k in range(m)]
+        # reflex and straight vertices can lie inside / on the diagonal of a candidate ear
+        blockers = [idx[k] for k in range(m) if turns[k] <= 0]
         for k in range(m):
             i0, i1, i2 = idx[k-1], idx[k], idx[(k+1)%m]
             a, b, c = pts[i0], pts[i1], pts[i2]
-            cr = cross(a, b, c)
-            if abs(cr) < 1e-12:            # collinear / duplicate vertex: drop it
+            if same(a, b) or same(b, c):   # duplicate vertex: drop it
                 idx.pop(k); break
-            if cr < 0: continue
-            if any(j not in (i0, i1, i2) and cross(a, b, pts[j]) >= 0 and
-                   cross(b, c, pts[j]) >= 0 and cross(c, a, pts[j]) >= 0 for j in reflex):
+            if turns[k] <= 0: continue
+            if any(j not in (i0, i1, i2) and not (same(pts[j], a) or same(pts[j], c)) and
+                   in_triangle(a, b, c, pts[j]) for j in blockers):
                 continue
             tris.append((i0, i1, i2)); idx.pop(k); break
         else:
+            if all(t == 0 for t in turns):
+                return tris                # only a degenerate sliver is left
             # no ear found (self-intersecting input) → fan the remainder
             tris += [(idx[0], idx[k], idx[k+1]) for k in range(1, len(idx)-1)]
             return tris
-    if len(idx) == 3: tris.append(tuple(idx))
+    if len(idx) == 3 and turn(*(pts[i] for i in idx)) != 0: tris.append(tuple(idx))
     return tris
 
 def _face_boundary_loop(entry, face_index):
@@ -6533,6 +6550,7 @@ class View3D(QGLWidget):
         self._sel_info    = ""
         self._main_window = None  # set by MainWindow after construction
         self.show_fps = False
+        self.show_origin_axes = True    # View toolbar: hide / show the origin axes
         self._fps_clock = QElapsedTimer()
         self._fps_frames = collections.deque()
         self._fps_font = QFont("Consolas", 10)
@@ -7404,6 +7422,8 @@ class View3D(QGLWidget):
         return cosine/length, sine/length
 
     def _draw_axes(self):
+        if not self.show_origin_axes:
+            return
         hv = self._hover3d
         all_hot = hv is not None and hv[0] == "origin"
         glDisable(GL_LIGHTING)
@@ -8172,6 +8192,8 @@ class View3D(QGLWidget):
             s = 0.0 if abs(den) < 1e-12 else min(1.0, max(0.0, (a*(u @ w0) - b*(d @ w0))/den))
             return float(((A + s*u) - o) @ d / a)
         S, valid = self._project([(0,0,0),(60,0,0),(0,60,0),(0,0,60)])
+        if not self.show_origin_axes:
+            valid = valid & False       # hidden axes cannot be hovered or picked
         if valid[0] and math.hypot(S[0,0]-p[0], S[0,1]-p[1]) < 9 and \
                 ray_t_at((0,0,0), (0,0,0)) <= solid_t:
             return ("origin", None)
@@ -19928,6 +19950,15 @@ class MainWindow(QMainWindow):
                              triggered=slot, toolTip=f"{label} view")
             tb2.addAction(action)
             self._tb_view_actions.append(action)
+        self._origin_icons = (QIcon(os.path.join(icon_dir, "origin.png")),
+                              QIcon(os.path.join(icon_dir, "origin_disabled.png")))
+        # not checkable: the icon shows the state, so the button keeps the normal look
+        self.act_origin = QAction(self._origin_icons[0], "Origin axes", self,
+                                  triggered=lambda: self._set_origin_axes_visible(
+                                      not self.view3d.show_origin_axes))
+        self.act_origin.setToolTip("Origin axes - shown (click to hide)")
+        tb2.addAction(self.act_origin)
+        self._tb_view_actions.append(self.act_origin)     # hidden while sketching like the views
         tb2.addSeparator()
         tb2.addAction(self.act_technical_drawing)
         tb2.addAction(self.act_assembly)
@@ -21438,6 +21469,16 @@ class MainWindow(QMainWindow):
         self._operation_progress_bar.hide()
 
     # ── modes / sketch start ──────────────────────────────────────────────────
+    def _set_origin_axes_visible(self, visible):
+        self.act_origin.setIcon(self._origin_icons[0 if visible else 1])
+        self.act_origin.setToolTip("Origin axes - shown (click to hide)" if visible
+                                   else "Origin axes - hidden (click to show)")
+        view = getattr(self, "view3d", None)
+        if view is not None:
+            view.show_origin_axes = bool(visible)
+            view._hover3d = None
+            view.update()
+
     def _set_mode(self, mode, plane=None):
         self.state["mode"]=mode
         self.view3d.set_mode(mode, plane)

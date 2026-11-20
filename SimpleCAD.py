@@ -132,7 +132,21 @@ Workflow:
      dependent sketches automatically fix the model until the last dependency is deleted (or a
      new sketch is cancelled). A manually fixed model stays fixed until its checkbox is cleared.
     File → Export writes the selected solid (or all visible solids) as STEP or STL.
-    Choose Technical Drawing to open its editor, then select the extrusion in the Views tab.
+    Choose Technical Drawing to open its editor: it starts with the selected solid, or with an
+    empty sheet when none is selected. The model of a sheet is chosen in the Views panel (Model of
+    this sheet): an extrusion or imported part of the project, a STEP / STL file imported into
+    the drawing in an earlier version (still shown), or none; STEP / STL parts are imported in the
+    3-D construction (File → Import) and then chosen here. A drawing can have
+    several sheets (tabs below the sheet, + / Sheet menu: Add, Duplicate, Rename, Delete; drag a
+    tab to reorder), each with its own model, format, views, dimensions, sections, title and
+    drawing number; the other title block fields are shared and the sheets are numbered n / N.
+    File → Import SVG / DXF (Ctrl+Shift+I) places a 2-D drawing on the sheet like a view (mm;
+    lines, polyline arcs, circles, arcs, ellipses, splines, texts, blocks, dimensions, hatches:
+    solid fills and patterns, islands left open; line
+    types give hidden / centre lines, line weights outline / thin lines). It is drawn in the
+    drawing's line colours, can be dragged, scaled (Views panel → Imported graphic scale) and
+    dimensioned. A PDF export holds every sheet as a page; SVG / DXF write one file per sheet
+    (name.svg, name-2.svg, …). A drawing without a project solid is listed at the top level.
     Place the top, front, left, right, isometric, and optional section views manually on the A2 sheet
     (DIN EN ISO 5457 frame, grid and title block; first-angle projection per DIN ISO 128-30 by default:
     top view below the front view, left view to its right; the third-angle method can be chosen on the
@@ -176,6 +190,11 @@ Workflow:
     lengthwise. Centre lines (circle crosses, hole axes) are references for length dimensions
     like edges (point ↔ centre line, centre line ↔ parallel edge or centre line); part geometry
     wins where both are equally near, and Radius / Diameter ignore them.
+    Screw threads (helical crests / roots found on the mesh, also in imported STEP / STL parts)
+    are drawn as in DIN ISO 6410-1 instead of their helices: from the side the crest as thick and
+    the root as thin lines (hatching up to the crest in sections, a thick thread limit line where
+    the thread ends inside the part, all dashed when hidden); along the axis the crest as a thick
+    circle and the root as a thin three-quarter circle open in the upper right quadrant.
     The isometric view shows only the shaded part (no edges, nothing to pick; the
     DXF export, which holds no pictures, gives its edges instead). Export: PDF, SVG or
     DXF (AutoCAD R12, mm; layers OUTLINE / THIN / HIDDEN / CENTER / FRAME / TEXT; the shaded
@@ -277,10 +296,12 @@ from PyQt5.QtWidgets import (
     QMessageBox, QPushButton, QFrame, QInputDialog, QListWidget, QListWidgetItem, QMenu, QScrollArea,
     QShortcut, QFormLayout, QColorDialog, QDialog, QDialogButtonBox, QPlainTextEdit, QToolButton,
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QKeySequenceEdit, QTabWidget, QStyle,
-    QComboBox, QMenuBar, QSizePolicy, QGridLayout, QAbstractItemView, QProgressBar, QHeaderView
+    QComboBox, QMenuBar, QSizePolicy, QGridLayout, QAbstractItemView, QProgressBar, QHeaderView,
+    QTabBar
 )
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QByteArray, QBuffer, QMarginsF, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
+                          QItemSelectionModel,
                           QLocale, QEventLoop, QEvent, QtCriticalMsg, QtFatalMsg)
 from PyQt5.QtGui import (QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath,
                          QTransform, QCursor, QPolygonF, QKeySequence, QPixmap, QIcon,
@@ -8610,7 +8631,8 @@ class View3D(QGLWidget):
         det_v, det_c = an["det_v"], an["det_c"]
 
         self._paint_hover(p, sk, self._hover2d)
-        self._paint_constraint_highlight(p, sk, sv.get("hl_constraint"))
+        for hl_c in sv.get("hl_constraint") or ():
+            self._paint_constraint_highlight(p, sk, hl_c)
 
         def style(geom, defined, selected=False, first_pick=False):
             if selected and mode == DTOOL_SELECT: col = QColor(255, 80, 0)
@@ -8872,6 +8894,30 @@ class View3D(QGLWidget):
             p.setPen(QPen(wip_col, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)); p.setBrush(Qt.NoBrush)
             p.drawPolyline(QPolygonF([self.to_px(q) for q in fp]))
 
+        # WIP Bezier curve: start, end, control 1, control 2 (the cursor is the next point)
+        bp = sv.get("bezier_pts")
+        if bp:
+            ctrl = list(bp) + [tuple(self._cursor_mm)]
+            p.setBrush(Qt.NoBrush)
+            if len(ctrl) == 2:
+                p.setPen(QPen(wip_col, 1, Qt.DashLine))
+                p.drawLine(self.to_px(ctrl[0]), self.to_px(ctrl[1]))
+            else:
+                p0, p3, c1 = ctrl[0], ctrl[1], ctrl[2]
+                c2 = ctrl[3] if len(ctrl) > 3 else c1
+                handle_col = QColor(wip_col.red(), wip_col.green(), wip_col.blue(), 140)
+                p.setPen(QPen(handle_col, 1, Qt.DotLine))
+                p.drawLine(self.to_px(p0), self.to_px(c1))
+                p.drawLine(self.to_px(p3), self.to_px(c2))
+                p.setPen(QPen(wip_col, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.drawPolyline(QPolygonF([self.to_px(q)
+                                          for q in self._bezier_curve(p0, c1, c2, p3, 64)]))
+                p.setPen(QPen(QColor(255,200,0), 1.5)); p.setBrush(Qt.NoBrush)
+                for q in ctrl[2:]:
+                    cp = self.to_px(q); p.drawRect(QRectF(cp.x()-3.5, cp.y()-3.5, 7, 7))
+            p.setPen(Qt.NoPen); p.setBrush(QColor(255,200,0))
+            for q in bp[:2]: p.drawEllipse(self.to_px(q), 4, 4)
+
         # WIP arc: centre → start (radius) → end (direction follows the mouse sweep)
         ac = sv.get("arc_ctr")
         if ac:
@@ -9074,7 +9120,7 @@ class View3D(QGLWidget):
         hv = self._hover2d
         active = {hv[1]} if hv is not None and hv[0] == "dim" else set()
         if self._drag_dim is not None: active.add(self._drag_dim[0])
-        hl = sv.get("hl_constraint")
+        hl = {id(c) for c in sv.get("hl_constraint") or ()}
         vs = list(sk.used_vertices()) or sk.vertices
         if vs:
             C = self.to_px((sum(v.x for v in vs)/len(vs), sum(v.y for v in vs)/len(vs)))
@@ -9087,13 +9133,13 @@ class View3D(QGLWidget):
         for c in sk.constraints:
             if isinstance(c, CDistance):
                 col = QColor(255, 255, 255) if c in active else \
-                      QColor(255, 120, 255) if c is hl else \
+                      QColor(255, 120, 255) if id(c) in hl else \
                       (self.DIM_COL if c.driving else self.INFO_COL)
                 self._paint_distance(p, c, col, auto_side)
                 continue
             if not isinstance(c, CDimension): continue
             col = QColor(255, 255, 255) if c in active else \
-                  QColor(255, 120, 255) if c is hl else self.DIM_COL
+                  QColor(255, 120, 255) if id(c) in hl else self.DIM_COL
             t = c.target
             if isinstance(t, Segment) or (isinstance(t, tuple) and t[0] is not t[1]):
                 v0, v1 = (t.v0, t.v1) if isinstance(t, Segment) else t
@@ -9359,6 +9405,10 @@ class View3D(QGLWidget):
                         "Move around the centre for direction, click end point"),
                 "freehand": "Press and drag to draw a freehand line; release to convert it to line segments "
                             "(release on the start point to close the shape)",
+                "bezier": ("Click the start point", "Click the end point",
+                           "Click the first control point (sets the start tangent)",
+                           "Click the second control point (sets the end tangent)")[
+                               min(3, len(sv.get("bezier_pts") or []))],
                 "point": "Click to place a point — snaps to line crossings (✕) and onto lines (○)",
                 "text": "Click to open the text editor and place a label",
                 "trim": "Scissor: click the part of a line / circle / arc to remove (red) — "
@@ -9647,14 +9697,7 @@ class View3D(QGLWidget):
             return
         panel = mw.sketch_panel
         panel.refresh(sk)                    # the list mirrors sk.constraints row by row
-        row = sk.constraints.index(c)
-        if panel.lst_con.currentRow() != row:
-            panel.lst_con.setCurrentRow(row)
-        else:
-            panel._on_con_row(row)
-        item = panel.lst_con.item(row)
-        if item is not None:
-            panel.lst_con.scrollToItem(item)
+        panel.select_constraint_rows([sk.constraints.index(c)])
 
     def _dim_pick(self, sk, px):
         """Dimension under the cursor: its text always wins; its lines only when no sketch
@@ -9951,7 +9994,8 @@ class View3D(QGLWidget):
                 # nothing in progress → Esc cancels the whole sketch
                 self.sigCancelSketch.emit(); return
             sv["wip_pts"]=[]; sv["rect_p0"]=None; sv["circle_ctr"]=None
-            sv["polygon_ctr"]=None; sv["free_pts"]=None
+            sv["polygon_ctr"]=None; sv["free_pts"]=None; sv["bezier_pts"]=None
+            sv["ellipse_ctr"]=None; sv["ellipse_axis"]=None
             sv["arc_ctr"]=None; sv["arc_start"]=None; sv["arc_sweep"]=0.0
             sv.pop("paste_preview", None)
             sv["sel_seg"]=None; sv["sel_vtx1"]=None; sv["sel_vtx2"]=None
@@ -10053,6 +10097,7 @@ class View3D(QGLWidget):
             elif tool=="polygon": self._draw_polygon(sv,sk,mm,constr)
             elif tool=="arc":    self._draw_arc(sv,sk,mm,constr)
             elif tool=="freehand": sv["free_pts"]=[tuple(mm)]
+            elif tool=="bezier": self._draw_bezier(sv,sk,mm,constr)
             elif tool=="point":  self._draw_point(sk,px)
             elif tool=="text":   self._draw_text(sk,mm)
             elif tool=="trim":   self._trim_at(sk,px)
@@ -10710,7 +10755,8 @@ class View3D(QGLWidget):
         return bool(sv.get("wip_pts") or sv.get("rect_p0") is not None
                     or sv.get("circle_ctr") is not None or sv.get("polygon_ctr") is not None
                     or sv.get("ellipse_ctr") is not None
-                    or sv.get("arc_ctr") is not None or bool(sv.get("free_pts")))
+                    or sv.get("arc_ctr") is not None or bool(sv.get("free_pts"))
+                    or bool(sv.get("bezier_pts")))
 
     def _draw_line(self, sv, sk, mm, px, constr=False):
         v = sk.get_or_merge(mm[0], mm[1], MERGE_TOL)
@@ -10896,6 +10942,42 @@ class View3D(QGLWidget):
             (cx-normal_x*minor_length, cy-normal_y*minor_length),
             (cx+normal_x*minor_length, cy+normal_y*minor_length))]
         sk.ellipses.append(Ellipse(*vertices, construction=constr))
+
+    @staticmethod
+    def _bezier_curve(p0, c1, c2, p3, count=64):
+        """count+1 points along the cubic Bezier curve p0 → p3 with control points c1, c2."""
+        pts = []
+        for i in range(count+1):
+            t = i/count; u = 1.0-t
+            a, b, c, d = u*u*u, 3*u*u*t, 3*u*t*t, t*t*t
+            pts.append((a*p0[0] + b*c1[0] + c*c2[0] + d*p3[0],
+                        a*p0[1] + b*c1[1] + c*c2[1] + d*p3[1]))
+        return pts
+
+    def _draw_bezier(self, sv, sk, mm, constr=False):
+        """Cubic Bezier curve: click the start point, the end point, then the two control
+        points. The finished curve is converted to a chain of line segments."""
+        pts = list(sv.get("bezier_pts") or [])
+        mm = tuple(mm)
+        if pts and math.dist(pts[-1], mm) < 1e-6: return      # ignore a repeated click
+        pts.append(mm)
+        if len(pts) < 4:
+            sv["bezier_pts"] = pts; return
+        sv["bezier_pts"] = None
+        p0, p3, c1, c2 = pts
+        if max(math.dist(p0, q) for q in (p3, c1, c2)) < 0.1: return
+        curve = self._bezier_curve(p0, c1, c2, p3, 256)
+        curve = self._simplify_polyline(curve, min(0.05, 0.5/max(self.scale, 1e-9)))
+        verts = []
+        for x, y in curve:
+            v = sk.get_or_merge(x, y, MERGE_TOL)
+            if not verts or verts[-1] is not v: verts.append(v)
+        segs = [Segment(a, b, constr) for a, b in zip(verts, verts[1:])]
+        if not segs:
+            self._drop_if_orphan(sk, *verts); return
+        sk.segments.extend(segs)
+        self._auto_merge_endpoints(sk)
+        self.sigSelInfo.emit(f"Bezier curve: {len(segs)} line segments")
 
     def _draw_polygon(self, sv, sk, mm, constr=False):
         """Draw a regular polygon from its centre and circumradius."""
@@ -11694,6 +11776,8 @@ class View3D(QGLWidget):
             sv["ellipse_ctr"] = None; sv["ellipse_axis"] = None; return True
         if sv.get("free_pts"):
             sv["free_pts"] = None; return True
+        if sv.get("bezier_pts"):
+            sv["bezier_pts"] = None; return True
         if sv.get("arc_ctr") is not None:
             sv["arc_ctr"] = None; sv["arc_start"] = None; sv["arc_sweep"] = 0.0
             self._arc_last_ang = None; return True
@@ -11703,7 +11787,7 @@ class View3D(QGLWidget):
         """Anything in progress or selected that Esc / RMB should clear first?"""
         return bool(sv.get("wip_pts") or sv.get("rect_p0") or sv.get("circle_ctr")
                     or sv.get("polygon_ctr") is not None or sv.get("ellipse_ctr") is not None
-                    or bool(sv.get("free_pts"))
+                    or bool(sv.get("free_pts")) or bool(sv.get("bezier_pts"))
                     or sv.get("paste_preview") is not None
                     or sv.get("arc_ctr") is not None or sv.get("sel_seg") is not None
                     or sv.get("sel_vtx1") is not None or sv.get("sel_curve") is not None
@@ -11740,11 +11824,13 @@ def tool_group(caption, widgets, bg="#292e36", icon=None, framed=True):
 
 
 class ToggleListWidget(QListWidget):
-    """List whose selected row is deselected again by clicking it."""
+    """List whose only selected row is deselected again by clicking it (Ctrl+click toggles
+    single rows when the list allows several selected rows)."""
     def mousePressEvent(self, e):
         item = self.itemAt(e.pos())
         was_selected = e.button() == Qt.LeftButton and item is not None and item.isSelected() \
-            and item is self.currentItem()
+            and item is self.currentItem() and len(self.selectedItems()) == 1 \
+            and not (e.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
         super().mousePressEvent(e)
         if was_selected:
             self.clearSelection(); self.setCurrentRow(-1)
@@ -11835,8 +11921,8 @@ class SketchPanel(QFrame):
     sigConstruction= pyqtSignal(bool)
     sigImportGeometry = pyqtSignal()
     sigMirror      = pyqtSignal(str)
-    sigConstraintSelected = pyqtSignal(int)   # row in the constraint list (-1 = none)
-    sigConstraintRemove   = pyqtSignal(int)
+    sigConstraintSelected = pyqtSignal(list)  # selected rows in the constraint list ([] = none)
+    sigConstraintRemove   = pyqtSignal(list)  # rows to remove
     sigConstraintEdit     = pyqtSignal(int)
 
     def __init__(self, parent=None):
@@ -11895,6 +11981,9 @@ class SketchPanel(QFrame):
         draw_btns=[]
         for lbl,val,tip,icon in [("Freehand","freehand",
                              "Freehand drawing", "freehand.png"),
+                            ("Bezier","bezier",
+                             "Bezier curve - Click the start point, the end point, then the two "
+                             "control points", "bezier.png"),
                             ("Line","line","Line",
                              "line.png"),
                             ("Rect","rect","Rectangle","rectangle.png"),
@@ -11955,19 +12044,21 @@ class SketchPanel(QFrame):
             tool_group("", con_btns, framed=False)]
         lay.addWidget(QLabel("Constraints:"))
         self.lst_con=ToggleListWidget(); self.lst_con.setMinimumHeight(220)
+        self.lst_con.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.lst_con.setToolTip("Select to highlight the constrained geometry.\n"
+                                "Ctrl+click selects several constraints.\n"
                                 "Double-click a dimension to edit its value.")
-        self.lst_con.currentRowChanged.connect(self._on_con_row)
+        self.lst_con.itemSelectionChanged.connect(self._on_con_selection)
         self.lst_con.itemDoubleClicked.connect(
             lambda it: self.sigConstraintEdit.emit(self.lst_con.row(it)))
         lay.addWidget(self.lst_con, 1)          # takes all spare height of the panel
         row=QHBoxLayout()
         self.btn_con_del=QPushButton("🗑 Remove"); self.btn_con_del.setEnabled(False)
-        self.btn_con_del.setToolTip("Remove the selected constraint")
-        self.btn_con_del.clicked.connect(lambda: self.sigConstraintRemove.emit(self.lst_con.currentRow()))
+        self.btn_con_del.setToolTip("Remove the selected constraint(s)")
+        self.btn_con_del.clicked.connect(lambda: self.sigConstraintRemove.emit(self.selected_con_rows()))
         self.btn_con_edit=QPushButton("✎ Edit"); self.btn_con_edit.setEnabled(False)
         self.btn_con_edit.setToolTip("Edit the value of the selected dimension")
-        self.btn_con_edit.clicked.connect(lambda: self.sigConstraintEdit.emit(self.lst_con.currentRow()))
+        self.btn_con_edit.clicked.connect(self._on_con_edit_clicked)
         row.addWidget(self.btn_con_del); row.addWidget(self.btn_con_edit); lay.addLayout(row)
         lay.addWidget(self._sep())
         self.lbl_issues=QLabel(""); self.lbl_issues.setWordWrap(True)
@@ -12006,20 +12097,39 @@ class SketchPanel(QFrame):
         """Rebuild the constraint list only when it changed (keeps the selection)."""
         sig = tuple((id(c), describe_constraint(sk, c)) for c in sk.constraints)
         if sig == self._con_sig: return
-        cur = self.lst_con.currentRow()
-        cur_id = self._con_ids[cur] if 0 <= cur < len(self._con_ids) else None
+        sel_ids = {self._con_ids[r] for r in self.selected_con_rows() if r < len(self._con_ids)}
         self._con_sig = sig; self._con_ids = [cid for cid, _ in sig]
         self._con_marked = None
         self.lst_con.blockSignals(True)
         self.lst_con.clear()
         for _, text in sig: self.lst_con.addItem(text)
-        row = self._con_ids.index(cur_id) if cur_id in self._con_ids else -1
+        rows = [r for r, cid in enumerate(self._con_ids) if cid in sel_ids]
         pending, self._pending_row = getattr(self, "_pending_row", None), None
-        if row < 0 and pending is not None and self._con_ids:
-            row = min(pending, len(self._con_ids) - 1)   # after a removal: the one below it
-        self.lst_con.setCurrentRow(row)
+        if not rows and pending is not None and self._con_ids:
+            rows = [min(pending, len(self._con_ids) - 1)]   # after a removal: the one below it
+        self._select_rows(rows)
         self.lst_con.blockSignals(False)
-        self._on_con_row(row)
+        self._on_con_selection()
+
+    def selected_con_rows(self):
+        """Rows of the selected constraints, top to bottom."""
+        return sorted(self.lst_con.row(it) for it in self.lst_con.selectedItems())
+
+    def _select_rows(self, rows):
+        self.lst_con.clearSelection()
+        for r in rows:
+            item = self.lst_con.item(r)
+            if item is not None: item.setSelected(True)
+        self.lst_con.setCurrentRow(rows[0] if rows else -1, QItemSelectionModel.NoUpdate)
+
+    def select_constraint_rows(self, rows):
+        """Select exactly these rows (replacing the current selection) and scroll to them."""
+        self.lst_con.blockSignals(True)
+        self._select_rows(rows)
+        self.lst_con.blockSignals(False)
+        self._on_con_selection()
+        item = self.lst_con.item(rows[0]) if rows else None
+        if item is not None: self.lst_con.scrollToItem(item)
 
     def mark_constraints(self, constraints):
         """Highlight the list rows of the given constraints (independent of the current row)."""
@@ -12036,16 +12146,23 @@ class SketchPanel(QFrame):
             if on and first is None: first = item
         if first is not None: self.lst_con.scrollToItem(first)
 
-    def _on_con_row(self, row):
-        self.btn_con_del.setEnabled(row >= 0)
-        self.btn_con_edit.setEnabled(row >= 0 and self.lst_con.item(row) is not None
-                                     and self.lst_con.item(row).text().startswith(("📏", "↔", "∠")))
-        self.sigConstraintSelected.emit(row)
+    def _on_con_selection(self):
+        rows = self.selected_con_rows()
+        self.btn_con_del.setEnabled(bool(rows))
+        self.btn_con_del.setText(f"🗑 Remove ({len(rows)})" if len(rows) > 1 else "🗑 Remove")
+        self.btn_con_edit.setEnabled(len(rows) == 1 and self.lst_con.item(rows[0]) is not None
+                                     and self.lst_con.item(rows[0]).text().startswith(("📏", "↔", "∠")))
+        self.sigConstraintSelected.emit(rows)
+
+    def _on_con_edit_clicked(self):
+        rows = self.selected_con_rows()
+        if len(rows) == 1: self.sigConstraintEdit.emit(rows[0])
 
     def reset_constraints(self):
         self._con_sig = None; self._con_ids = []
         self.lst_con.blockSignals(True); self.lst_con.clear(); self.lst_con.blockSignals(False)
         self.btn_con_del.setEnabled(False); self.btn_con_edit.setEnabled(False)
+        self.btn_con_del.setText("🗑 Remove")
 
     def set_mode(self, mode):
         self._mode = mode; self._sync_mode_buttons()
@@ -12062,7 +12179,7 @@ class SketchPanel(QFrame):
         self.btn_sel.setChecked(self._mode == DTOOL_SELECT)
         self.btn_con.setChecked(self._mode == "constrain")
         self.btn_trim.setChecked(trim)
-        for t in ("line","rect","circle","ellipse","polygon","arc","freehand","point","text"):
+        for t in ("line","rect","circle","ellipse","polygon","arc","freehand","bezier","point","text"):
             getattr(self,f"btn_{t}").setChecked(t == self._tool)
 
     def set_has_selection(self, has_sel):
@@ -12816,8 +12933,10 @@ def _drawing_prepare_mesh(vertices, triangles):
     return V, _drawing_orient_triangles(V, T)
 
 
-def _drawing_topology(V, T):
-    """Unique edges with their adjacent faces, sharp-edge flags and detected circles."""
+def _drawing_topology(V, T, threads=None):
+    """Unique edges with their adjacent faces, sharp-edge flags, detected circles and screw
+    threads (found on the mesh, or given: a section keeps the threads of the whole part). The
+    edges of threaded surfaces are no sharp edges: views draw the thread symbol instead."""
     used = V[np.unique(T)]
     span = max(float(np.ptp(used, axis=0).max()), 1e-9)
     P = V[T]
@@ -12843,12 +12962,26 @@ def _drawing_topology(V, T):
     sharp = ((counts == 1) & valid[fa]) | (counts > 2) | (two & (dots < 0.8))
     topology = {"edges": edges, "counts": counts, "fa": fa, "fb": fb, "two": two,
                 "sharp": sharp, "fold": two & (dots < 0.8), "normals": normals, "span": span}
+    if threads is None:
+        threads = _drawing_find_threads(V, T, topology)
+    topology["threads"] = threads
+    topology["thread_zone"] = _drawing_thread_zone(V, edges, threads, span) if threads else \
+        np.zeros(len(edges), dtype=bool)
+    topology["sharp"] = topology["sharp"] & ~topology["thread_zone"]
+    topology["fold"] = topology["fold"] & ~topology["thread_zone"]
     topology["circles"] = _drawing_find_circles(V, topology)
     topology["arcs"] = [
         arc for arc in _drawing_find_arcs(V, topology)
         if not any(abs(arc["radius"] - c["radius"]) <= 1e-3 * span
                    and np.linalg.norm(arc["center"] - c["center"]) <= 1e-3 * span
                    for c in topology["circles"])]        # a split full circle is no fillet
+    # the nominal (major) diameter of each thread at both ends: centre marks, centre lines in
+    # sections and the circle a diameter dimension picks
+    for index, thread in enumerate(threads):
+        for end in (thread["low"], thread["high"]):
+            topology["circles"].append({"center": thread["point"] + thread["axis"] * end,
+                                        "radius": thread["major"], "axis": thread["axis"],
+                                        "edges": [], "thread": index})
     return topology
 
 
@@ -13013,6 +13146,320 @@ def _drawing_find_circles(V, topology):
     return circles
 
 
+def _drawing_point_inside(V, T, point):
+    """True if a point lies inside the closed mesh (ray parity)."""
+    direction = np.array((0.31234, 0.52671, 0.79131))
+    direction /= np.linalg.norm(direction)
+    corners = V[T]
+    e1, e2 = corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+    h = np.cross(direction, e2)
+    a = np.einsum("ij,ij->i", e1, h)
+    ok = np.abs(a) > 1e-15
+    f = 1.0 / a[ok]
+    s = np.asarray(point, dtype=float) - corners[ok, 0]
+    u = f * np.einsum("ij,ij->i", s, h[ok])
+    q = np.cross(s, e1[ok])
+    v = f * (q @ direction)
+    t = f * np.einsum("ij,ij->i", e2[ok], q)
+    return int(((u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-9)).sum()) % 2 == 1
+
+
+def _drawing_find_threads(V, T, topology):
+    """Screw threads of a meshed part (DIN ISO 6410 draws them as symbols, not as helices):
+    helical chains of fold edges (crests and roots) of at least about one turn, grouped by their
+    axis. [{"axis", "point" (on the axis), "minor", "major" (radii), "pitch", "low", "high"
+    (axial range), "internal", "limits" (thread limit line at low / high)}]"""
+    span = topology["span"]
+    edges = topology["edges"]
+    fold_ids = np.flatnonzero(topology["fold"])
+    edge_index = {(int(a), int(b)): int(i) for i, (a, b) in zip(fold_ids, edges[fold_ids].tolist())}
+    helices = []
+    for chain in _drawing_outline_chains(V, topology):
+        if len(chain) < 16:
+            continue
+        points = V[chain]
+        steps = np.diff(points, axis=0)
+        lengths = np.linalg.norm(steps, axis=1)
+        keep = lengths > span * 1e-9
+        if keep.sum() < 12:
+            continue
+        steps = steps[keep] / lengths[keep, None]
+        axis = np.linalg.svd(steps - steps.mean(axis=0), full_matrices=False)[2][-1]
+        k = int(np.argmax(np.abs(axis)))
+        if abs(axis[k]) > math.cos(math.radians(1.0)):
+            axis = np.eye(3)[k]                       # an axis along x / y / z is taken exactly
+        if axis[k] < 0:
+            axis = -axis
+        e1 = np.cross(axis, (1.0, 0.0, 0.0) if abs(axis[0]) < 0.9 else (0.0, 1.0, 0.0))
+        e1 /= np.linalg.norm(e1)
+        e2 = np.cross(axis, e1)
+        mean = points.mean(axis=0)
+        local = np.column_stack(((points - mean) @ e1, (points - mean) @ e2))
+        c = np.linalg.lstsq(np.column_stack((2 * local, np.ones(len(local)))),
+                            (local ** 2).sum(axis=1), rcond=None)[0]
+        radius = math.sqrt(max(c[2] + c[0] ** 2 + c[1] ** 2, 0.0))
+        offsets = local - c[:2]
+        if radius <= span * 1e-4 or \
+                float(np.abs(np.hypot(offsets[:, 0], offsets[:, 1]) - radius).max()) > 0.03 * radius:
+            continue
+        angles = np.unwrap(np.arctan2(offsets[:, 1], offsets[:, 0]))
+        turn = float(angles[-1] - angles[0])
+        z = points @ axis
+        rise = float(z[-1] - z[0])
+        if abs(turn) < 1.9 * math.pi or abs(rise) < span * 1e-6 or \
+                (np.diff(angles) * math.copysign(1.0, turn) < -1e-6).any() or \
+                (np.diff(z) * math.copysign(1.0, rise) < -span * 1e-6).any():
+            continue                                  # not a helix of about one turn or more
+        pitch = abs(rise) / (abs(turn) / (2.0 * math.pi))
+        if not 0.02 * radius <= pitch <= 0.8 * radius:
+            continue
+        if float(np.abs(np.polyval(np.polyfit(angles, z, 1), angles) - z).max()) > 0.1 * pitch:
+            continue                                  # the pitch must be constant
+        centre = mean + c[0] * e1 + c[1] * e2
+        faces = set()
+        for a, b in zip(chain[:-1], chain[1:]):
+            edge_id = edge_index.get((min(a, b), max(a, b)))
+            if edge_id is not None:
+                faces.update((int(topology["fa"][edge_id]), int(topology["fb"][edge_id])))
+        faces.discard(-1)
+        helices.append({"axis": axis, "point": centre - axis * float(centre @ axis),
+                        "radius": radius, "pitch": pitch, "faces": faces,
+                        "chain": np.asarray(chain)})
+    groups = []
+    for helix in helices:
+        for group in groups:
+            if float(helix["axis"] @ group[0]["axis"]) > 0.9999 and \
+                    float(np.linalg.norm(np.cross(helix["point"] - group[0]["point"],
+                                                  group[0]["axis"]))) <= 0.05 * helix["radius"] and \
+                    abs(helix["pitch"] - group[0]["pitch"]) <= 0.1 * group[0]["pitch"]:
+                group.append(helix)
+                break
+        else:
+            groups.append([helix])
+    threads = []
+    for group in groups:
+        axis, point = group[0]["axis"], group[0]["point"]
+        pitch = float(np.mean([helix["pitch"] for helix in group]))
+        faces = np.asarray(sorted(set().union(*(helix["faces"] for helix in group))), dtype=int)
+        if not len(faces):
+            continue
+        corners = V[T[faces]].reshape(-1, 3) - point
+        along = corners @ axis
+        radial = corners - np.outer(along, axis)
+        distance = np.linalg.norm(radial, axis=1)
+        minor, major = float(distance.min()), float(distance.max())
+        if not 0.2 * pitch <= major - minor <= 1.0 * pitch:
+            continue                                  # no thread profile depth (e.g. a spring)
+        chain_points = np.concatenate([V[helix["chain"]] for helix in group]) - point
+        low = float(min(along.min(), (chain_points @ axis).min()))
+        high = float(max(along.max(), (chain_points @ axis).max()))
+        # the thread run-out next to the helices (the end of the cut profile, a plain bore or
+        # shank at the thread diameter up to the face, a bolt's end chamfer) belongs to the thread
+        relative = V[np.unique(T)] - point
+        axial = relative @ axis
+        reach = np.linalg.norm(relative - np.outer(axial, axis), axis=1)
+        tolerance = 0.15 * (major - minor) + span * 1e-6
+        band = (reach >= minor - tolerance) & (reach <= major + tolerance) & \
+            (axial >= low - 1.5 * pitch) & (axial <= high + 1.5 * pitch)
+        if band.any():
+            low, high = min(low, float(axial[band].min())), max(high, float(axial[band].max()))
+        # material outside (normals pointing to the axis): a tapped hole, else a bolt thread
+        face_centres = V[T[faces]].mean(axis=1) - point
+        outward = face_centres - np.outer(face_centres @ axis, axis)
+        outward /= np.maximum(np.linalg.norm(outward, axis=1), 1e-12)[:, None]
+        internal = float(np.einsum("ij,ij->i", topology["normals"][faces], outward).mean()) < 0
+        # thread limit line where the part goes on beyond the thread (not at a free end)
+        helper = np.cross(axis, (1.0, 0.0, 0.0) if abs(axis[0]) < 0.9 else (0.0, 1.0, 0.0))
+        helper /= np.linalg.norm(helper)
+        middle = (minor + major) / 2.0
+        limits = []
+        for end, outwards in ((low, -1.0), (high, 1.0)):
+            probe = point + axis * (end + outwards * 1.5 * pitch)
+            inside = 0
+            for angle in (0.3, 1.9, 3.4, 5.0):
+                direction = helper * math.cos(angle) + np.cross(axis, helper) * math.sin(angle)
+                inside += _drawing_point_inside(V, T, probe + direction * middle)
+            limits.append(inside >= 3)
+        threads.append({"axis": axis, "point": point, "minor": minor, "major": major,
+                        "pitch": pitch, "low": low, "high": high, "internal": internal,
+                        "limits": limits})
+    return threads
+
+
+def _drawing_thread_zone(V, edges, threads, span):
+    """Edges of the threaded surfaces (both ends between the root and crest radius inside the
+    thread length): left out of the views, the thread is drawn as its symbol instead."""
+    zone = np.zeros(len(edges), dtype=bool)
+    for thread in threads:
+        relative = V - thread["point"]
+        along = relative @ thread["axis"]
+        distance = np.linalg.norm(relative - np.outer(along, thread["axis"]), axis=1)
+        tolerance = 0.15 * (thread["major"] - thread["minor"]) + span * 1e-6
+        inside = (distance >= thread["minor"] - tolerance) & \
+            (distance <= thread["major"] + tolerance) & \
+            (along >= thread["low"] - tolerance) & (along <= thread["high"] + tolerance)
+        zone |= inside[edges[:, 0]] & inside[edges[:, 1]]
+    return zone
+
+
+def _drawing_thread_radii(thread):
+    """(crest, root) radius: the crest is where the material ends (minor diameter of a tapped
+    hole, major diameter of a bolt)."""
+    if thread["internal"]:
+        return thread["minor"], thread["major"]
+    return thread["major"], thread["minor"]
+
+
+def _drawing_thread_section_loops(loops, threads, normal, offset, right, up):
+    """Cut-face outlines with the thread profile replaced by the crest line: the hatching of a
+    threaded section runs up to the crest (DIN ISO 6410-1)."""
+    if not threads or not loops:
+        return loops
+    normal, right, up = (np.asarray(v, dtype=float) for v in (normal, right, up))
+    result = []
+    for loop in loops:
+        loop = np.asarray(loop, dtype=float)
+        points = np.outer(loop[:, 0], right) + np.outer(loop[:, 1], up) + normal * float(offset)
+        for thread in threads:
+            axis = thread["axis"]
+            along_normal = float(axis @ normal)
+            crest, _root = _drawing_thread_radii(thread)
+            relative = points - thread["point"]
+            along = relative @ axis
+            radial = relative - np.outer(along, axis)
+            distance = np.linalg.norm(radial, axis=1)
+            tolerance = 0.15 * (thread["major"] - thread["minor"])
+            zone = (distance >= thread["minor"] - tolerance) & \
+                (distance <= thread["major"] + tolerance) & \
+                (along >= thread["low"] - tolerance) & (along <= thread["high"] + tolerance)
+            if not zone.any():
+                continue
+            if abs(along_normal) < 1e-3:              # axis in the cut plane: lines at the crest
+                side = np.cross(axis, normal)
+                side /= np.linalg.norm(side)
+                depth = float(offset - thread["point"] @ normal)
+                if abs(depth) >= crest:
+                    continue
+                half = math.sqrt(crest * crest - depth * depth)
+                sign = np.sign(radial[zone] @ side)
+                sign[sign == 0] = 1.0
+                points[zone] = thread["point"] + np.outer(along[zone], axis) + normal * depth + \
+                    np.outer(sign * half, side)
+            elif abs(along_normal) > 0.999:           # cut across the axis: the crest circle
+                points[zone] = thread["point"] + np.outer(along[zone], axis) + \
+                    radial[zone] / np.maximum(distance[zone], 1e-12)[:, None] * crest
+        flat = np.column_stack((points @ right, points @ up))
+        keep = np.r_[True, np.linalg.norm(np.diff(flat, axis=0), axis=1) > 1e-9]
+        flat = flat[keep]
+        if len(flat) >= 3:
+            result.append(flat)
+    return result
+
+
+def _drawing_thread_symbols(result, topology, right, up, normal, near, center, extent,
+                            resolution, tolerance, cut=None):
+    """Threads in a projected view (DIN ISO 6410-1): seen from the side, the crest as thick and
+    the root as thin lines with a thick thread limit line where the thread ends inside the part;
+    seen along the axis, the crest as a full thick circle and the root as a thin three-quarter
+    circle (open in the upper right quadrant). Hidden threads are dashed."""
+    threads = topology.get("threads") or []
+    result["thin"] = np.zeros((0, 2, 2))
+    result["thread_visible"] = {}
+    result["thread_lines"] = (np.zeros((0, 2, 2)),) * 3
+    if not threads:
+        return
+    thick, thin, hidden = [], [], []
+
+    def visible(points):
+        u, v, w = points @ right, points @ up, points @ normal
+        sx = np.clip(np.floor((u - center[0]) / extent * resolution + resolution / 2).astype(int),
+                     0, resolution - 1)
+        sy = np.clip(np.floor((center[1] - v) / extent * resolution + resolution / 2).astype(int),
+                     0, resolution - 1)
+        return w >= near[sy, sx] - tolerance
+
+    def flat(points):
+        return np.column_stack((points @ right, points @ up))
+
+    def runs(points, shown, visible_list, straight):
+        """Pieces of a polyline split where its visibility changes."""
+        points2 = flat(points)
+        start = 0
+        for index in range(1, len(points) + 1):
+            if index == len(points) or shown[index] != shown[start]:
+                end = min(index, len(points) - 1)
+                target = visible_list if shown[start] else hidden
+                if straight:
+                    if end > start:
+                        target.append((points2[start], points2[end]))
+                else:
+                    for a in range(start, end):
+                        target.append((points2[a], points2[a + 1]))
+                start = index
+
+    pixel = extent / resolution
+    for index, thread in enumerate(threads):
+        axis, point = thread["axis"], thread["point"]
+        crest, root = _drawing_thread_radii(thread)
+        along_normal = float(axis @ normal)
+        if abs(along_normal) < 1e-3:                  # the thread seen from the side
+            side = np.cross(axis, normal)
+            side /= np.linalg.norm(side)
+            depth = 0.0 if cut is None else float(cut - point @ normal)
+            if abs(depth) >= crest:
+                continue
+            base = point + normal * depth
+            half_crest = math.sqrt(crest * crest - depth * depth)
+            half_root = math.sqrt(max(root * root - depth * depth, 0.0))
+            count = max(2, int(math.ceil((thread["high"] - thread["low"]) / pixel / 1.5)) + 1)
+            ts = np.linspace(thread["low"], thread["high"], count)
+            any_visible = False
+            for sign in (1.0, -1.0):
+                crest_points = base + np.outer(ts, axis) + side * (sign * half_crest)
+                shown = visible(crest_points)
+                any_visible |= bool(shown.any())
+                runs(crest_points, shown, thick, True)
+                if half_root > 0:
+                    # the root line lies inside the material; it shows where the crest does
+                    runs(base + np.outer(ts, axis) + side * (sign * half_root), shown, thin, True)
+                for end, flag, sample in ((thread["low"], thread["limits"][0], 0),
+                                          (thread["high"], thread["limits"][1], -1)):
+                    if flag and sign > 0:
+                        major = math.sqrt(max(thread["major"] ** 2 - depth * depth, 0.0))
+                        a = flat((base + axis * end + side * major)[None])[0]
+                        b = flat((base + axis * end - side * major)[None])[0]
+                        (thick if shown[sample] else hidden).append((a, b))
+            result["thread_visible"][index] = any_visible
+        elif abs(along_normal) > 0.999:               # the thread seen along its axis
+            if cut is None:
+                nearest = thread["high"] if along_normal > 0 else thread["low"]
+            else:
+                t_cut = float(cut - point @ normal) / along_normal
+                nearest = min(thread["high"], t_cut) if along_normal > 0 else \
+                    max(thread["low"], t_cut)
+            middle = point + axis * nearest
+            full = np.linspace(0.0, 2.0 * math.pi, 97)
+            crest_points = middle + crest * (np.outer(np.cos(full), right) +
+                                             np.outer(np.sin(full), up))
+            shown = visible(crest_points)
+            runs(crest_points, shown, thick, False)
+            three_quarters = np.linspace(0.5 * math.pi, 2.0 * math.pi, 73)
+            root_points = middle + root * (np.outer(np.cos(three_quarters), right) +
+                                           np.outer(np.sin(three_quarters), up))
+            runs(root_points, visible(root_points), thin, False)
+            result["thread_visible"][index] = bool(shown.any())
+    as_array = lambda items: np.asarray(items, dtype=float).reshape(-1, 2, 2)
+    thick, thin, hidden = as_array(thick), as_array(thin), as_array(hidden)
+    result["visible"] = np.concatenate((result["visible"], thick))
+    result["visible_edges"] = np.concatenate((result["visible_edges"],
+                                              np.full(len(thick), -1, dtype=int)))
+    result["hidden"] = np.concatenate((result["hidden"], hidden))
+    result["hidden_edges"] = np.concatenate((result["hidden_edges"],
+                                             np.full(len(hidden), -1, dtype=int)))
+    result["thin"] = thin
+    result["thread_lines"] = (thick, thin, hidden)
+
+
 def _drawing_clip(V, T, normal, offset=0.0):
     """Keep the part of the mesh behind a parallel section plane (viewer on +normal)."""
     n = np.asarray(normal, dtype=float)
@@ -13170,8 +13617,9 @@ def _drawing_rasterize(screen, depth_values, T, valid, resolution, want_ids):
     return depth, ids
 
 
-def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids=False):
-    """Orthographic projection with visible and hidden feature / silhouette edges."""
+def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids=False, cut=None):
+    """Orthographic projection with visible and hidden feature / silhouette edges and the thread
+    symbols (`cut`: offset of the section plane of a section view)."""
     proj = np.column_stack((V @ right, V @ up, V @ normal))
     used = proj[np.unique(T)]
     low, high = used[:, :2].min(axis=0), used[:, :2].max(axis=0)
@@ -13192,7 +13640,10 @@ def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids
     facing = (normals @ normal) > 1e-6
     silhouette = np.zeros(len(edges), dtype=bool)
     silhouette[two] = facing[topology["fa"][two]] != facing[topology["fb"][two]]
-    edge_ids = np.flatnonzero(topology["sharp"] | silhouette)
+    edge_mask = topology["sharp"] | silhouette
+    if "thread_zone" in topology:
+        edge_mask &= ~topology["thread_zone"]
+    edge_ids = np.flatnonzero(edge_mask)
     empty = np.zeros((0, 2, 2))
     result = {"bounds": (low, high), "center": center, "extent": extent,
               "resolution": resolution, "ids": ids, "visible": empty, "hidden": empty,
@@ -13202,6 +13653,13 @@ def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids
               "pick_curves": [], "normal": normal,
               "right": right, "up": up}
     if not len(edge_ids):
+        _drawing_thread_symbols(result, topology, right, up, normal, near, center, extent,
+                                resolution, tolerance, cut)
+        thick, thin, thread_hidden = result["thread_lines"]
+        result["pick_segments"] = np.concatenate((thick, thin, thread_hidden))
+        result["visible_picks"] = {"pick_segments": np.concatenate((thick, thin)),
+                                   "pick_points": np.zeros((0, 2)), "pick_curves": [],
+                                   "pick_arcs": []}
         return result
     A, B = proj[edges[edge_ids, 0]], proj[edges[edge_ids, 1]]
     length = np.linalg.norm(screen[edges[edge_ids, 1]] - screen[edges[edge_ids, 0]], axis=1)
@@ -13231,54 +13689,87 @@ def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids
     p1 = A[run_owner, :2] + delta * f1[:, None]
     segments = np.stack((p0, p1), axis=1)
     show, hide = keep & run_visible, keep & ~run_visible
-    result["visible"], result["visible_edges"] = segments[show], edge_ids[run_owner[show]]
-    result["hidden"], result["hidden_edges"] = segments[hide], edge_ids[run_owner[hide]]
-    result["pick_segments"] = np.concatenate((segments[show], segments[hide]))
-    centres = [(float(item["center"] @ right), float(item["center"] @ up))
-               for group in ("circles", "arcs") for item in topology.get(group, ())
-               if "axis" in item and "center" in item
-               and abs(float(item["axis"] @ normal)) >= 0.999]      # circle and arc centres snap too
-    result["pick_points"] = np.unique(np.concatenate((
-        proj[np.unique(edges[edge_ids]), :2], np.asarray(centres, dtype=float).reshape(-1, 2))), axis=0)
-    projected_arcs = []
-    for arc in topology.get("arcs", ()):
-        if "axis" in arc and abs(float(arc["axis"] @ normal)) < 0.999:
-            continue                                             # an edge-on arc is just a line here
-        points = np.asarray(arc.get("points", ()), dtype=float).reshape(-1, 3)
-        if len(points) >= 6:
-            projected_arcs.append(np.column_stack((points @ right, points @ up)))
-    arc_endpoints = np.asarray([endpoint for curve in projected_arcs
-                                for endpoint in (curve[0], curve[-1])], dtype=float).reshape(-1, 2)
-    picked_edges = np.unique(np.concatenate((result["visible_edges"], result["hidden_edges"])))
-    if len(picked_edges):
-        known_arcs = [(np.array((float(arc["center"] @ right), float(arc["center"] @ up))),
-                       float(arc["radius"])) for arc in topology.get("arcs", ())
-                      if "center" in arc and "radius" in arc]
-        chains = _drawing_group_segments(
-            proj[edges[picked_edges], :2], max(extent / resolution * 0.01, extent * 1e-9),
-            split_points=arc_endpoints)
-        # silhouettes (e.g. a fillet seen from the side) join arcs and straight edges into one
-        # smooth chain; separate them so the arc gives a radius and the lines stay measurable
-        for chain in chains:
-            for piece, circle in _drawing_split_smooth_chain(chain):
-                if circle is None:
-                    result["pick_curves"].append(piece)
-                elif not any(abs(circle[1] - radius) <= 0.02 * radius and
-                             float(np.linalg.norm(circle[0] - centre)) <= 0.02 * radius
-                             for centre, radius in known_arcs):
-                    result["pick_curves"].append(piece)
-                    projected_arcs.append(piece)
-    for circle in topology.get("circles", ()):
-        if abs(float(circle["axis"] @ normal)) < 0.999:
-            continue
-        center = np.array((circle["center"] @ right, circle["center"] @ up))
-        angles = np.linspace(0.0, 2.0 * math.pi, 65)
-        curve = center + float(circle["radius"]) * np.column_stack((np.cos(angles),
-                                                                    np.sin(angles)))
-        result["pick_curves"].append(curve)
-    result["pick_curves"].extend(projected_arcs)
-    result["pick_arcs"] = projected_arcs
-    result["edge_visible"][edge_ids[run_owner[show]]] = True
+    visible_ids, hidden_ids = edge_ids[run_owner[show]], edge_ids[run_owner[hide]]
+    result["visible"], result["visible_edges"] = segments[show], visible_ids
+    result["hidden"], result["hidden_edges"] = segments[hide], hidden_ids
+    result["edge_visible"][visible_ids] = True
+    _drawing_thread_symbols(result, topology, right, up, normal, near, center, extent,
+                            resolution, tolerance, cut)
+    thick, thin, thread_hidden = result["thread_lines"]
+
+    def seen(points):
+        """Depth test of 3-D points: nothing of the part in front of them."""
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        u, v, w = points @ right, points @ up, points @ normal
+        sx = np.clip(np.floor((u - center[0]) / extent * resolution + resolution / 2).astype(int),
+                     0, resolution - 1)
+        sy = np.clip(np.floor((center[1] - v) / extent * resolution + resolution / 2).astype(int),
+                     0, resolution - 1)
+        return w >= near[sy, sx] - tolerance
+
+    def shown_item(group, item):
+        if group == "arcs":
+            return bool(seen(item.get("points", item["center"])).any())
+        if item.get("thread") is not None:
+            return bool(result["thread_visible"].get(item["thread"], False))
+        return bool(result["edge_visible"][item["edges"]].any())
+
+    def pick_geometry(chosen_edges, pick_segments, only_visible):
+        """What the dimension tools can pick: points (corners, circle and arc centres), straight
+        pieces and curves; with `only_visible` just what is seen (no hidden lines)."""
+        picks = {"pick_segments": pick_segments, "pick_curves": []}
+        corners = np.unique(edges[chosen_edges]) if len(chosen_edges) else np.zeros(0, dtype=int)
+        if only_visible and len(corners):
+            corners = corners[seen(V[corners])]
+        items = [(group, item) for group in ("circles", "arcs") for item in topology.get(group, ())
+                 if "axis" in item and "center" in item and abs(float(item["axis"] @ normal)) >= 0.999
+                 and (not only_visible or shown_item(group, item))]
+        centres = [(float(item["center"] @ right), float(item["center"] @ up)) for _g, item in items]
+        picks["pick_points"] = np.unique(np.concatenate((
+            proj[corners, :2], np.asarray(centres, dtype=float).reshape(-1, 2))), axis=0)
+        projected_arcs = []
+        for group, arc in items:                      # an edge-on arc is just a line: left out
+            points = np.asarray(arc.get("points", ()), dtype=float).reshape(-1, 3) \
+                if group == "arcs" else np.zeros((0, 3))
+            if len(points) >= 6:
+                projected_arcs.append(np.column_stack((points @ right, points @ up)))
+        arc_endpoints = np.asarray([endpoint for curve in projected_arcs
+                                    for endpoint in (curve[0], curve[-1])], dtype=float).reshape(-1, 2)
+        if len(chosen_edges):
+            known_arcs = [(np.array((float(arc["center"] @ right), float(arc["center"] @ up))),
+                           float(arc["radius"])) for arc in topology.get("arcs", ())
+                          if "center" in arc and "radius" in arc]
+            chains = _drawing_group_segments(
+                proj[edges[chosen_edges], :2], max(extent / resolution * 0.01, extent * 1e-9),
+                split_points=arc_endpoints)
+            # silhouettes (e.g. a fillet seen from the side) join arcs and straight edges into one
+            # smooth chain; separate them so the arc gives a radius and the lines stay measurable
+            for chain in chains:
+                for piece, circle in _drawing_split_smooth_chain(chain):
+                    if circle is None:
+                        picks["pick_curves"].append(piece)
+                    elif not any(abs(circle[1] - radius) <= 0.02 * radius and
+                                 float(np.linalg.norm(circle[0] - centre)) <= 0.02 * radius
+                                 for centre, radius in known_arcs):
+                        picks["pick_curves"].append(piece)
+                        projected_arcs.append(piece)
+        for group, circle in items:
+            if group != "circles":
+                continue
+            middle = np.array((circle["center"] @ right, circle["center"] @ up))
+            angles = np.linspace(0.0, 2.0 * math.pi, 65)
+            picks["pick_curves"].append(middle + float(circle["radius"]) * np.column_stack(
+                (np.cos(angles), np.sin(angles))))
+        picks["pick_curves"].extend(projected_arcs)
+        picks["pick_arcs"] = projected_arcs
+        return picks
+
+    result.update(pick_geometry(
+        np.unique(np.concatenate((visible_ids, hidden_ids))),
+        np.concatenate((segments[show], segments[hide], thick, thin, thread_hidden)), False))
+    # views drawn without hidden lines (and section views) only offer what is drawn
+    result["visible_picks"] = pick_geometry(
+        np.unique(visible_ids), np.concatenate((segments[show], thick, thin)), True)
     return result
 
 
@@ -13413,7 +13904,11 @@ def _drawing_view_circles(topology, view):
             u, v = float(item["center"] @ view["right"]), float(item["center"] @ view["up"])
             key = (kind, round(u / tolerance), round(v / tolerance),
                    round(item["radius"] / tolerance))
-            visible = bool(view["edge_visible"][item["edges"]].any()) if kind == "circle" else True
+            if item.get("thread") is not None:          # a thread: drawn as its symbol
+                visible = bool(view.get("thread_visible", {}).get(item["thread"], False))
+            else:
+                visible = bool(view["edge_visible"][item["edges"]].any()) \
+                    if kind == "circle" else True
             if key not in found or (visible and not found[key]["visible"]):
                 found[key] = {"kind": kind, "u": u, "v": v, "radius": item["radius"],
                               "visible": visible, "edges": item.get("edges", []),
@@ -13576,9 +14071,14 @@ def _drawing_segments_path(place, segments):
     entry = cache.get(id(segments))
     if entry is None or entry[0] is not segments:
         base = QPainterPath()
+        last = None
         for (ax, ay), (bx, by) in np.asarray(segments, dtype=float).reshape(-1, 2, 2).tolist():
-            base.moveTo(ax, -ay)
+            # a segment going on from the previous one continues its line (no notches in curves
+            # at the joints, dashes run on)
+            if last is None or abs(ax - last[0]) > 1e-9 or abs(ay - last[1]) > 1e-9:
+                base.moveTo(ax, -ay)
             base.lineTo(bx, -by)
+            last = (bx, by)
         entry = cache[id(segments)] = (segments, base)
     s = place.scale
     return QTransform(s, 0.0, 0.0, s, place.rect.left() - place.low[0] * s,
@@ -14156,19 +14656,22 @@ def _drawing_section_axes(topology, normal, offset, right, up, tolerance):
     return lines
 
 
-def _prepare_drawing_section(V, T, frames, plane, offset):
+def _prepare_drawing_section(V, T, frames, plane, offset, threads=None):
     """Section through the part parallel to one of the main views at `offset`; computed on its
-    own so that moving a cut does not project all the other views again."""
+    own so that moving a cut does not project all the other views again. `threads` are those of
+    the whole part (the cut-off part has only pieces of their helices)."""
     if not math.isfinite(offset):
         raise ValueError("The section offset must be a finite measurement.")
     name = DRAWING_SECTION_PLANES[plane]
     s_right, s_up, s_normal = frames[name]
     sv, st = _drawing_clip(V, T, s_normal, offset)
-    s_topology = _drawing_topology(sv, st)
+    s_topology = _drawing_topology(sv, st, threads or [])
+    loops = _drawing_section_loops(sv, s_topology, s_normal, s_right, s_up, offset)
     return {"name": name, "plane": plane, "normal": s_normal, "topology": s_topology,
             "offset": offset,
-            "view": _drawing_project(sv, st, s_topology, s_right, s_up, s_normal),
-            "loops": _drawing_section_loops(sv, s_topology, s_normal, s_right, s_up, offset)}
+            "view": _drawing_project(sv, st, s_topology, s_right, s_up, s_normal, cut=offset),
+            "loops": _drawing_thread_section_loops(loops, threads or [], s_normal, offset,
+                                                   s_right, s_up)}
 
 
 def _draw_technical_drawing(painter, vertices, triangles, options):
@@ -14179,9 +14682,46 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
     _DRAWING_COLORS = options.get("_colors") or DRAWING_PRINT_COLORS
     _DRAWING_PAGE = _drawing_sheet(options)
     try:
+        if vertices is None or triangles is None or not len(triangles):
+            # a sheet without a model: frame, title block, imported graphics and their dimensions
+            return _render_drawing_without_model(painter, options)
         return _render_technical_drawing(painter, vertices, triangles, options)
     finally:
         _DRAWING_COLORS, _DRAWING_PAGE = previous
+
+
+def _drawing_begin_page(painter, options):
+    """Page transform, sheet colour and frame (the caller restores the painter)."""
+    painter.save()
+    page_scale = options.get("_page_scale")
+    page_w, page_h = _DRAWING_PAGE["w"], _DRAWING_PAGE["h"]
+    if page_scale is None:
+        painter.scale(painter.device().width() / page_w, painter.device().height() / page_h)
+    else:
+        painter.scale(float(page_scale), float(page_scale))
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+    if _DRAWING_COLORS.get("sheet"):
+        painter.fillRect(QRectF(0, 0, page_w, page_h), _drawing_color("sheet"))
+    _paint_sheet_frame(painter)
+    painter.setBrush(Qt.NoBrush)
+
+
+def _render_drawing_without_model(painter, options):
+    """Sheet without a 3-D model: frame, imported SVG / DXF graphics, their dimensions and the
+    title block. The title block shows the chosen scale, else that of the first graphic."""
+    sheet_scale = float(options["scale_ratio"]) * DRAWING_UNITS_PER_MM \
+        if options.get("scale_ratio") else None
+    _drawing_begin_page(painter, options)
+    places = {}
+    _paint_drawing_graphics(painter, options, sheet_scale, places)
+    dimension_hits = _paint_drawing_dimensions(painter, options, places, [])
+    shown_scale = sheet_scale or next((place.scale for place in places.values()),
+                                      DRAWING_UNITS_PER_MM)
+    _paint_title_block(painter, options, _drawing_scale_text(shown_scale))
+    painter.restore()
+    return {"placements": _drawing_layout_records(places), "dimension_hits": dimension_hits,
+            "plane_normals": [], "sections": [], "page": dict(_DRAWING_PAGE)}
 
 
 def _render_technical_drawing(painter, vertices, triangles, options):
@@ -14207,25 +14747,14 @@ def _render_technical_drawing(painter, vertices, triangles, options):
         used.add(section_key)
         if section_key not in section_cache:
             section_cache[section_key] = _prepare_drawing_section(
-                V, T, frames, item["plane"], float(item["offset"]))
+                V, T, frames, item["plane"], float(item["offset"]), topology.get("threads"))
         sections.append(dict(section_cache[section_key], letter=item["letter"]))
     for section_key in [key for key in section_cache if key not in used]:
         del section_cache[section_key]
     section = sections[0] if sections else None    # the automatic layout shows the first one
 
-    painter.save()
-    page_scale = options.get("_page_scale")
     page_w, page_h = _DRAWING_PAGE["w"], _DRAWING_PAGE["h"]
-    if page_scale is None:
-        painter.scale(painter.device().width() / page_w, painter.device().height() / page_h)
-    else:
-        painter.scale(float(page_scale), float(page_scale))
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    painter.setRenderHint(QPainter.TextAntialiasing, True)
-    if _DRAWING_COLORS.get("sheet"):
-        painter.fillRect(QRectF(0, 0, page_w, page_h), _drawing_color("sheet"))
-    _paint_sheet_frame(painter)
-    painter.setBrush(Qt.NoBrush)
+    _drawing_begin_page(painter, options)
     metrics = QFontMetricsF(_drawing_font(DRAWING_TEXT))
 
     def size_of(view):
@@ -14267,6 +14796,8 @@ def _render_technical_drawing(painter, vertices, triangles, options):
                 continue
             place = _DrawingPlacement(view, float(record["x"]), float(record["y"]), scale)
             place.record_index = index
+            place.show_hidden = bool(record.get("hidden_lines", True)) and \
+                name in ("front", "top", "right", "left")
             places[name] = place
             if shown is not None:
                 section_places.append((shown, place))
@@ -14382,6 +14913,9 @@ def _render_technical_drawing(painter, vertices, triangles, options):
         painter.setPen(_drawing_pen(DRAWING_THICK * float(options.get("_thick_scale", 1.0)),
                                     role="visible"))
         painter.drawPath(_drawing_segments_path(place, place.view["visible"]))
+        if len(place.view.get("thin", ())):           # thread roots: thin continuous lines
+            painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+            painter.drawPath(_drawing_segments_path(place, place.view["thin"]))
         painter.restore()
         painter.setFont(_drawing_font(DRAWING_TEXT))
         if not manual_layout:
@@ -14428,6 +14962,9 @@ def _render_technical_drawing(painter, vertices, triangles, options):
                                     role="visible"))
         painter.drawPath(_drawing_segments_path(shown_place, shown["view"]["visible"]))
         _paint_section_fill(painter, shown_place, shown["loops"])
+        if len(shown["view"].get("thin", ())):        # thread roots over the hatching
+            painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+            painter.drawPath(_drawing_segments_path(shown_place, shown["view"]["thin"]))
         # centre lines of holes (and bosses) the cut runs through lengthwise (DIN ISO 128)
         painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
         for start, end in _drawing_section_axes(
@@ -14467,6 +15004,23 @@ def _render_technical_drawing(painter, vertices, triangles, options):
         painter.drawText(QPointF(shown_place.rect.left(),
                                  shown_place.rect.bottom() + shown_place.reserved["bottom"] + 30), label)
 
+    # imported SVG / DXF graphics (placed like views; their geometry can be dimensioned)
+    _paint_drawing_graphics(painter, options, scale, places)
+    dimension_hits = _paint_drawing_dimensions(painter, options, places, sections)
+    _paint_title_block(painter, options, _drawing_scale_text(scale))
+    painter.restore()
+    layout_records = _drawing_layout_records(places)
+    return {"placements": layout_records, "dimension_hits": dimension_hits,
+            # the normals of the three section planes (front / top / right) and every section
+            "plane_normals": [frames[name][2].tolist() for name in DRAWING_SECTION_PLANES],
+            "sections": [{"letter": item["letter"], "name": item["name"], "plane": item["plane"],
+                          "offset": item["offset"], "normal": item["normal"].tolist()}
+                         for item in sections],
+            "page": dict(_DRAWING_PAGE)}
+
+
+def _paint_drawing_dimensions(painter, options, places, sections):
+    """Paint the added dimensions on their placed views; returns their hit boxes."""
     dimension_hits = []
     for dimension_index, dimension in enumerate(options.get("dimensions", [])):
         place = places.get(dimension.get("view"))
@@ -14617,33 +15171,36 @@ def _render_technical_drawing(painter, vertices, triangles, options):
         dimension_hits.append({"index": dimension_index, "x": label_rect.x(),
                        "y": label_rect.y(), "width": label_rect.width(),
                        "height": label_rect.height()})
-    _paint_title_block(painter, options, _drawing_scale_text(scale))
-    painter.restore()
+    return dimension_hits
+
+
+def _drawing_layout_records(places):
+    """What the editor canvas needs of each placed view: frame, scale, axes and the
+    geometry that can be picked for dimensions."""
     layout_records = []
     for name, place in places.items():
+        # what is not drawn cannot be picked: hidden lines switched off, section views
+        show_hidden = getattr(place, "show_hidden", not str(name).startswith("section"))
+        picks = place.view if show_hidden or "visible_picks" not in place.view else \
+            place.view["visible_picks"]
         layout_records.append({
             "name": name, "record_index": getattr(place, "record_index", None),
             "x": place.rect.left(), "y": place.rect.top(),
             "width": place.rect.width(), "height": place.rect.height(),
             "low": place.low.tolist(), "high": place.high.tolist(), "scale": place.scale,
             "right": place.view["right"].tolist(), "up": place.view["up"].tolist(),
+            "hidden_shown": bool(show_hidden),
             # nothing to pick in the shaded isometric view (no edge highlighting there)
-            "pick_points": place.view.get("pick_points", np.zeros((0, 2)))
+            "pick_points": picks.get("pick_points", np.zeros((0, 2)))
                            if name != "isometric" else np.zeros((0, 2)),
-            "pick_segments": place.view.get("pick_segments", np.zeros((0, 2, 2)))
+            "pick_segments": picks.get("pick_segments", np.zeros((0, 2, 2)))
                              if name != "isometric" else np.zeros((0, 2, 2)),
-            "pick_curves": place.view.get("pick_curves", []) if name != "isometric" else [],
-            "pick_arcs": place.view.get("pick_arcs", []) if name != "isometric" else [],
+            "pick_curves": picks.get("pick_curves", []) if name != "isometric" else [],
+            "pick_arcs": picks.get("pick_arcs", []) if name != "isometric" else [],
             # drawn centre lines (circle crosses, hole axes): references for dimensions
             "centre_lines": np.asarray(place.centre_lines, dtype=float).reshape(-1, 2, 2),
         })
-    return {"placements": layout_records, "dimension_hits": dimension_hits,
-            # the normals of the three section planes (front / top / right) and every section
-            "plane_normals": [frames[name][2].tolist() for name in DRAWING_SECTION_PLANES],
-            "sections": [{"letter": item["letter"], "name": item["name"], "plane": item["plane"],
-                          "offset": item["offset"], "normal": item["normal"].tolist()}
-                         for item in sections],
-            "page": dict(_DRAWING_PAGE)}
+    return layout_records
 
 
 def _read_stl_mesh(path, progress=None):
@@ -15009,14 +15566,20 @@ def _read_step_mesh(path, progress=None):
         raise RuntimeError("STEP import requires CadQuery/OCP to be installed") from ex
     if progress is not None:
         progress(None)
-    shape = cq.importers.importStep(path).val()
+    # every shape of the file (Workplane.val() would be the origin Vector when CadQuery
+    # transferred nothing, and only the first shape otherwise)
+    shapes = [item for item in cq.importers.importStep(path).vals() if hasattr(item, "Faces")]
+    source_faces = [face for shape in shapes for face in shape.Faces()]
+    if not source_faces:
+        raise ValueError("The STEP file contains no solids or surfaces that can be read (it may "
+                         "hold only curves, points or an empty assembly structure)")
+    shape = shapes[0] if len(shapes) == 1 else cq.Compound.makeCompound(shapes)
     if hasattr(shape, "mesh"):
         shape.mesh(0.1, 0.1)     # mesh all faces in one (parallel) pass; tessellate() reuses it
     if progress is not None:
         progress(0)
     vertices, triangles, faces = [], [], []
     vertex_ids = {}
-    source_faces = shape.Faces()
     face_count = len(source_faces)
     for face_index, face in enumerate(source_faces):
         points, tris = face.tessellate(0.1)
@@ -15063,6 +15626,8 @@ def _read_step_mesh(path, progress=None):
         if progress is not None and (face_index == face_count - 1
                                      or face_index % max(1, face_count // 100) == 0):
             progress(100 * (face_index + 1) // face_count)
+    if not triangles:
+        raise ValueError("The surfaces of the STEP file could not be meshed")
     return vertices, triangles, faces
 
 def _translate_import_faces(faces, offset):
@@ -15837,6 +16402,7 @@ class TechnicalDrawingCanvas(QWidget):
         self.grid_mm = DEFAULT_GRID
         self.snap_mm = DEFAULT_SNAP
         self.snap_enabled = True
+        self.empty_hint = "Choose a view in the toolbar, then click the sheet to place it"
 
     def set_grid(self, grid_mm=None, snap_mm=None, snap_enabled=None):
         if grid_mm is not None:
@@ -15897,7 +16463,8 @@ class TechnicalDrawingCanvas(QWidget):
         self.setFocus()
         self.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
         if mode == "place_view":
-            self.statusChanged.emit(f"Placement: {view.title()} view")
+            self.statusChanged.emit("Placement: imported graphic" if _graphic_id(view) else
+                                    f"Placement: {view.title()} view")
         elif mode == "dimension":
             self.statusChanged.emit(f"Dimension: {self.dimension_kind.title()}")
         elif mode == "cut":
@@ -16487,7 +17054,8 @@ class TechnicalDrawingCanvas(QWidget):
             return
         if self.mode == "dimension":
             if hit is None or not (hit[0]["name"] in ("front", "top", "right", "left") or
-                                   hit[0]["name"].startswith("section")):
+                                   hit[0]["name"].startswith("section") or
+                                   _graphic_id(hit[0]["name"])):
                 return
             info, _record = hit
             tolerance = max(10.0 * self.page_w /
@@ -17022,7 +17590,8 @@ class TechnicalDrawingCanvas(QWidget):
     def _paint_hud(self, painter, rect):
         """Status lines in the top left corner, as in the sketcher."""
         painter.setFont(QFont("Arial", 9))
-        mode = {None: "select", "place_view": f"place {self.active_view or ''} view",
+        placing = "imported graphic" if _graphic_id(self.active_view) else             f"{self.active_view or ''} view"
+        mode = {None: "select", "place_view": f"place {placing}",
                 "dimension": f"{self.dimension_kind} dimension", "cut": "section cut"}.get(
                     self.mode, str(self.mode))
         snap = f"snap:{self.snap_mm:g}mm" if self.snap_enabled else "snap:off"
@@ -17085,8 +17654,7 @@ class TechnicalDrawingCanvas(QWidget):
         if not self._layout.get("placements"):
             painter.setPen(QColor(170, 178, 189))
             painter.setFont(QFont("Arial", 12))
-            painter.drawText(rect, Qt.AlignCenter,
-                             "Choose a view in the toolbar, then click the sheet to place it")
+            painter.drawText(rect, Qt.AlignCenter | Qt.TextWordWrap, self.empty_hint)
         self._paint_dimensions_overlay(painter, rect)
         sx, sy = rect.width() / self.page_w, rect.height() / self.page_h
         if self._snap_guides:
@@ -17202,29 +17770,15 @@ def write_technical_drawing_svg(path, mesh, options):
     if not painter.begin(generator):
         raise RuntimeError(f"Could not create SVG drawing:\n{path}")
     try:
-        _draw_technical_drawing(painter, mesh[0], mesh[1], options)
+        _draw_technical_drawing(painter, *(mesh if mesh is not None else (None, None)),
+                                options)
     finally:
         painter.end()
 
 
 def write_technical_drawing_pdf(path, mesh, options):
     """PDF of the drawing on its sheet (A2 … A5, landscape or portrait), black on white."""
-    options = dict(options, _colors=DRAWING_PRINT_COLORS)
-    sheet = _drawing_sheet(options)
-    writer = QPdfWriter(path)
-    writer.setResolution(150)
-    writer.setPageSize(QPageSize(QSizeF(sheet["w"] / DRAWING_UNITS_PER_MM,
-                                        sheet["h"] / DRAWING_UNITS_PER_MM),
-                                 QPageSize.Millimeter, f"{sheet['name']} {sheet['orientation']}",
-                                 QPageSize.ExactMatch))
-    writer.setPageMargins(QMarginsF(0, 0, 0, 0))
-    painter = QPainter()
-    if not painter.begin(writer):
-        raise RuntimeError(f"Could not create PDF drawing:\n{path}")
-    try:
-        _draw_technical_drawing(painter, mesh[0], mesh[1], options)
-    finally:
-        painter.end()
+    write_technical_drawing_pdf_pages(path, [(mesh, options)])
 
 
 # DXF export: the drawing is rendered once more as SVG (page units, print palette) and its lines,
@@ -17260,17 +17814,74 @@ def _svg_matrix(text):
     return result
 
 
-def _svg_path_polylines(d):
-    """Polylines (lists of (x, y)) of an absolute SVG path; curves are flattened."""
-    tokens = re.findall(r"[MLHVCSQTZmlhvcsqtz]|-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", d or "")
+def _svg_arc_points(start, rx, ry, rotation, large, sweep, end):
+    """Points (after `start`) of an SVG elliptical arc, by the endpoint parameterisation of
+    the SVG specification (appendix F.6)."""
+    x1, y1 = start
+    x2, y2 = end
+    if (x1, y1) == (x2, y2):
+        return []
+    rx, ry = abs(rx), abs(ry)
+    if rx < 1e-12 or ry < 1e-12:
+        return [end]
+    phi = math.radians(rotation)
+    cos_phi, sin_phi = math.cos(phi), math.sin(phi)
+    dx, dy = (x1 - x2) / 2.0, (y1 - y2) / 2.0
+    xp, yp = cos_phi * dx + sin_phi * dy, -sin_phi * dx + cos_phi * dy
+    grow = xp * xp / (rx * rx) + yp * yp / (ry * ry)
+    if grow > 1.0:
+        rx, ry = rx * math.sqrt(grow), ry * math.sqrt(grow)
+    numerator = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp
+    denominator = rx * rx * yp * yp + ry * ry * xp * xp
+    factor = math.sqrt(max(0.0, numerator / denominator)) if denominator > 1e-24 else 0.0
+    if large == sweep:
+        factor = -factor
+    cxp, cyp = factor * rx * yp / ry, -factor * ry * xp / rx
+    cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0
+    cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0
+
+    def angle(ux, uy, vx, vy):
+        return math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+
+    theta = angle(1.0, 0.0, (xp - cxp) / rx, (yp - cyp) / ry)
+    delta = angle((xp - cxp) / rx, (yp - cyp) / ry, (-xp - cxp) / rx, (-yp - cyp) / ry)
+    if not sweep and delta > 0:
+        delta -= 2.0 * math.pi
+    elif sweep and delta < 0:
+        delta += 2.0 * math.pi
+    count = max(2, int(math.ceil(abs(delta) / math.radians(5.0))))
+    points = []
+    for step in range(1, count + 1):
+        t = theta + delta * step / count
+        ex, ey = rx * math.cos(t), ry * math.sin(t)
+        points.append((cos_phi * ex - sin_phi * ey + cx, sin_phi * ex + cos_phi * ey + cy))
+    points[-1] = (x2, y2)
+    return points
+
+
+def _svg_path_polylines(d, pieces=None):
+    """Polylines (lists of (x, y)) of an SVG path; curves and arcs are flattened. With a
+    `pieces` list, every straight piece is also appended as ("line", a, b) and every curved one
+    as ("curve", [points]) (what the drawing editor's dimension tools pick)."""
+    tokens = re.findall(r"[MLHVCSQTAZmlhvcsqtaz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", d or "")
     polylines, current, command, index = [], [], None, 0
     position = start = (0.0, 0.0)
+    last_control = None                      # for the smooth curves S / T
+    last_kind = None
 
     def number():
         nonlocal index
         value = float(tokens[index])
         index += 1
         return value
+
+    def add_line(a, b):
+        if pieces is not None and a != b:
+            pieces.append(("line", a, b))
+
+    def add_curve(points):
+        if pieces is not None and len(points) > 1:
+            pieces.append(("curve", points))
 
     while index < len(tokens):
         token = tokens[index]
@@ -17279,46 +17890,85 @@ def _svg_path_polylines(d):
             index += 1
             if command in "Zz":
                 if current:
+                    add_line(current[-1], start)
                     current.append(start)
                     polylines.append(current)
                 current = []
                 position = start
+                last_kind = None
             continue
-        if command in ("M", "m"):
-            if len(current) > 1:
-                polylines.append(current)
-            x, y = number(), number()
-            position = (x, y) if command == "M" else (position[0] + x, position[1] + y)
-            start, current = position, [position]
-            command = "L" if command == "M" else "l"
-        elif command in ("L", "l"):
-            x, y = number(), number()
-            position = (x, y) if command == "L" else (position[0] + x, position[1] + y)
-            current.append(position)
-        elif command in ("H", "h", "V", "v"):
-            value = number()
-            if command == "H":   position = (value, position[1])
-            elif command == "h": position = (position[0] + value, position[1])
-            elif command == "V": position = (position[0], value)
-            else:                position = (position[0], position[1] + value)
-            current.append(position)
-        elif command in ("C", "c", "Q", "q"):
-            count = 3 if command in "Cc" else 2
-            points = [(number(), number()) for _ in range(count)]
-            if command.islower():
-                points = [(position[0] + x, position[1] + y) for x, y in points]
-            control = [position] + points
-            for step in range(1, 9):
-                t = step / 8.0
-                if count == 3:
-                    weights = ((1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3)
-                else:
-                    weights = ((1 - t) ** 2, 2 * t * (1 - t), t * t)
-                current.append((sum(w * p[0] for w, p in zip(weights, control)),
-                                sum(w * p[1] for w, p in zip(weights, control))))
-            position = points[-1]
-        else:                                   # unsupported command: skip its numbers
+        if command is None:
             index += 1
+            continue
+        try:
+            if command in ("M", "m"):
+                if len(current) > 1:
+                    polylines.append(current)
+                x, y = number(), number()
+                position = (x, y) if command == "M" else (position[0] + x, position[1] + y)
+                start, current = position, [position]
+                command = "L" if command == "M" else "l"
+                last_kind = None
+            elif command in ("L", "l"):
+                x, y = number(), number()
+                previous = position
+                position = (x, y) if command == "L" else (position[0] + x, position[1] + y)
+                add_line(previous, position)
+                current.append(position)
+                last_kind = None
+            elif command in ("H", "h", "V", "v"):
+                value = number()
+                previous = position
+                if command == "H":   position = (value, position[1])
+                elif command == "h": position = (position[0] + value, position[1])
+                elif command == "V": position = (position[0], value)
+                else:                position = (position[0], position[1] + value)
+                add_line(previous, position)
+                current.append(position)
+                last_kind = None
+            elif command in ("C", "c", "S", "s", "Q", "q", "T", "t"):
+                upper = command.upper()
+                given = {"C": 3, "S": 2, "Q": 2, "T": 1}[upper]
+                points = [(number(), number()) for _ in range(given)]
+                if command.islower():
+                    points = [(position[0] + x, position[1] + y) for x, y in points]
+                if upper in "ST":               # first control point mirrored from the last curve
+                    wanted = "cubic" if upper == "S" else "quadratic"
+                    reflected = position
+                    if last_control is not None and last_kind == wanted:
+                        reflected = (2 * position[0] - last_control[0],
+                                     2 * position[1] - last_control[1])
+                    points = [reflected] + points
+                cubic = upper in "CS"
+                control = [position] + points
+                curve = [position]
+                for step in range(1, 9):
+                    t = step / 8.0
+                    if cubic:
+                        weights = ((1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3)
+                    else:
+                        weights = ((1 - t) ** 2, 2 * t * (1 - t), t * t)
+                    curve.append((sum(w * p[0] for w, p in zip(weights, control)),
+                                  sum(w * p[1] for w, p in zip(weights, control))))
+                current.extend(curve[1:])
+                add_curve(curve)
+                last_control = points[-2]
+                last_kind = "cubic" if cubic else "quadratic"
+                position = points[-1]
+            elif command in ("A", "a"):
+                rx, ry, rotation = number(), number(), number()
+                large, sweep = number() != 0, number() != 0
+                x, y = number(), number()
+                end = (x, y) if command == "A" else (position[0] + x, position[1] + y)
+                arc = _svg_arc_points(position, rx, ry, rotation, large, sweep, end)
+                current.extend(arc)
+                add_curve([position] + arc)
+                position = end
+                last_kind = None
+            else:                               # unsupported command: skip its numbers
+                index += 1
+        except (IndexError, ValueError):
+            break
     if len(current) > 1:
         polylines.append(current)
     return polylines
@@ -17435,7 +18085,8 @@ def write_technical_drawing_dxf(path, mesh, options):
     if not painter.begin(generator):
         raise RuntimeError("Could not render the drawing for the DXF export")
     try:
-        _draw_technical_drawing(painter, mesh[0], mesh[1], options)
+        _draw_technical_drawing(painter, *(mesh if mesh is not None else (None, None)),
+                                options)
     finally:
         painter.end()
     entities = _svg_drawing_entities(bytes(buffer.data()))
@@ -17493,6 +18144,1249 @@ def write_technical_drawing_dxf(path, mesh, options):
             stream.write(f"{out[index]:>3}\n{out[index + 1]}\n")
 
 
+# ── imported 2-D graphics (SVG / DXF) and drawings with several sheets ────────
+# An imported SVG or DXF is kept as vector data in millimetres (v pointing up, origin at the lower
+# left of its extent) and placed on a sheet like a view: a "graphic-<id>" placement whose data is in
+# the drawing's "graphics". It is drawn in the drawing's line roles (outlines, thin lines, hidden
+# and centre lines), so the editor shows it in its screen colours and an export prints it black on
+# white, and its corners, edges, circles and arcs can be dimensioned like those of a projected view.
+GRAPHIC_THICK, GRAPHIC_THIN, GRAPHIC_HIDDEN, GRAPHIC_CENTRE = 0, 1, 2, 3
+GRAPHIC_PENS = {GRAPHIC_THICK: (DRAWING_THICK, None, "visible"),
+                GRAPHIC_THIN: (DRAWING_THIN, None, "visible"),
+                GRAPHIC_HIDDEN: (DRAWING_THIN, DRAWING_DASH, "hidden"),
+                GRAPHIC_CENTRE: (DRAWING_THIN, DRAWING_CHAIN, "centre")}
+GRAPHIC_PREFIX = "graphic-"
+GRAPHIC_MAX_POINTS = 1_500_000
+# what each sheet of a drawing keeps for itself; everything else (the title block fields shared by
+# all sheets, grid / snap, the logo, imported models and graphics) belongs to the whole drawing
+DRAWING_SHEET_KEYS = ("name", "source", "front", "rotation", "scale_ratio", "view_placements",
+                      "dimensions", "sections", "sheet", "orientation", "title", "number")
+
+
+def _graphic_id(name):
+    """Graphic id of a "graphic-<id>" placement name, else None."""
+    if isinstance(name, str) and name.startswith(GRAPHIC_PREFIX):
+        return name[len(GRAPHIC_PREFIX):]
+    return None
+
+
+class _GraphicBuilder:
+    """Collects imported 2-D geometry (file units, y pointing up) and turns it into graphic data:
+    what is drawn (paths by line style, circles, fills, texts) and what the dimension tools pick
+    (straight pieces, curved pieces, corners and centres)."""
+
+    def __init__(self, unit=1.0):
+        self.unit = float(unit)               # millimetres per file unit
+        self.paths, self.circles, self.fills, self.texts = [], [], [], []
+        self.lines, self.curves, self.points = [], [], []
+        self.count = 0
+
+    def _grow(self, amount):
+        self.count += amount
+        if self.count > GRAPHIC_MAX_POINTS:
+            raise ValueError(f"The file is too complex to import (more than "
+                             f"{GRAPHIC_MAX_POINTS:,} points)")
+
+    def path(self, style, points):
+        points = np.asarray(points, dtype=float).reshape(-1, 2)
+        if len(points) >= 2 and np.isfinite(points).all():
+            self._grow(len(points))
+            self.paths.append((int(style), points))
+
+    def pick_line(self, a, b):
+        a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+        if np.isfinite(a).all() and np.isfinite(b).all() and float(np.linalg.norm(b - a)) > 1e-9:
+            self.lines.append((a, b))
+            self.points.extend((a, b))
+
+    def pick_curve(self, points):
+        points = np.asarray(points, dtype=float).reshape(-1, 2)
+        if len(points) >= 2 and np.isfinite(points).all():
+            self.curves.append(points)
+            self.points.extend((points[0], points[-1]))
+
+    def circle(self, style, centre, radius):
+        if radius > 1e-9 and np.isfinite(centre).all():
+            self._grow(1)
+            self.circles.append((int(style), float(centre[0]), float(centre[1]), float(radius)))
+            self.points.append(np.asarray(centre, dtype=float))
+
+    def fill(self, rings):
+        rings = [np.asarray(ring, dtype=float).reshape(-1, 2) for ring in rings if len(ring) >= 3]
+        rings = [ring for ring in rings if np.isfinite(ring).all()]
+        if rings:
+            self._grow(sum(len(ring) for ring in rings))
+            self.fills.append(rings)
+
+    def text(self, position, height, angle, content):
+        content = str(content).strip()
+        if content and height > 1e-9 and np.isfinite(position).all():
+            self.texts.append((float(position[0]), float(position[1]), float(height),
+                               float(angle), content))
+
+    def data(self, kind, name, path):
+        """Graphic data in millimetres, moved so that its extent starts at (0, 0)."""
+        extents = [points for _style, points in self.paths]
+        extents += [ring for rings in self.fills for ring in rings]
+        extents += [np.array(((x - r, y - r), (x + r, y + r))) for _s, x, y, r in self.circles]
+        for x, y, height, angle, content in self.texts:
+            width = 0.75 * height * len(content)
+            a = math.radians(angle)
+            extents.append(np.array(((x, y), (x + width * math.cos(a), y + width * math.sin(a)),
+                                     (x - height * math.sin(a), y + height * math.cos(a)))))
+        if not extents:
+            raise ValueError("The file contains no drawable lines, curves or texts")
+        everything = np.concatenate([np.asarray(e, dtype=float).reshape(-1, 2) for e in extents])
+        low, high = everything.min(axis=0), everything.max(axis=0)
+        unit = self.unit
+
+        def mm(points):
+            return np.round((np.asarray(points, dtype=float).reshape(-1, 2) - low) * unit, 4)
+
+        size = (high - low) * unit
+        lines = np.asarray([np.concatenate(pair) for pair in self.lines], dtype=float).reshape(-1, 4)
+        points = mm(np.asarray(self.points, dtype=float).reshape(-1, 2)) if self.points else \
+            np.zeros((0, 2))
+        return {
+            "kind": kind, "name": name, "path": path, "token": os.urandom(8).hex(),
+            "width": float(max(size[0], 1e-3)), "height": float(max(size[1], 1e-3)),
+            "polylines": [[style, mm(points_).ravel().tolist()] for style, points_ in self.paths],
+            "circles": [[style, *mm([(x, y)])[0].tolist(), round(r * unit, 4)]
+                        for style, x, y, r in self.circles],
+            "fills": [[mm(ring).ravel().tolist() for ring in rings] for rings in self.fills],
+            "texts": [[*mm([(x, y)])[0].tolist(), round(height * unit, 4), round(angle, 3), text]
+                      for x, y, height, angle, text in self.texts],
+            "lines": mm(lines.reshape(-1, 2)).reshape(-1, 4).tolist(),
+            "curves": [mm(curve).ravel().tolist() for curve in self.curves],
+            "points": (np.unique(points, axis=0) if len(points) else points).tolist(),
+        }
+
+
+# ── SVG import ────────────────────────────────────────────────────────────────
+_SVG_UNITS_MM = {"mm": 1.0, "cm": 10.0, "in": 25.4, "pt": 25.4 / 72.0, "pc": 25.4 / 6.0,
+                 "px": 25.4 / 96.0, "": 25.4 / 96.0, "q": 0.25}
+_SVG_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+
+
+def _svg_numbers(text):
+    return [float(value) for value in re.findall(_SVG_NUMBER, text or "")]
+
+
+def _svg_length_mm(text):
+    """Millimetres of an SVG length ("210mm", "800", "11in"); None for percentages / nothing."""
+    match = re.fullmatch(rf"\s*({_SVG_NUMBER})\s*([a-zA-Z%]*)\s*", text or "")
+    if not match or match.group(2).lower() not in _SVG_UNITS_MM:
+        return None
+    return float(match.group(1)) * _SVG_UNITS_MM[match.group(2).lower()]
+
+
+def _read_svg_graphic(path):
+    """Graphic data of an SVG file: strokes become lines (outline or thin by their width, hidden
+    or centre lines by their dash pattern), filled shapes fills, texts texts. Sizes follow the
+    file's width / height (mm, cm, in, pt; px and plain numbers at 96 dpi)."""
+    with open(path, "rb") as stream:
+        raw = stream.read()
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as ex:
+        raise ValueError(f"Not a valid SVG file: {ex}") from ex
+    if root.tag.rsplit("}", 1)[-1] != "svg":
+        raise ValueError("The file is not an SVG drawing")
+    view_box = _svg_numbers(root.get("viewBox"))
+    width, height = _svg_length_mm(root.get("width")), _svg_length_mm(root.get("height"))
+    if len(view_box) == 4 and view_box[2] > 0 and view_box[3] > 0:
+        sx = width / view_box[2] if width else height / view_box[3] if height else 25.4 / 96.0
+        sy = height / view_box[3] if height else sx
+        origin = view_box[:2]
+    else:
+        sx = sy = 25.4 / 96.0
+        origin = (0.0, 0.0)
+    # millimetres with y pointing up (in the SVG it points down)
+    root_matrix = np.array(((sx, 0.0, -sx * origin[0]), (0.0, -sy, sy * origin[1]), (0, 0, 1.0)))
+    builder = _GraphicBuilder(1.0)
+    ids = {element.get("id"): element for element in root.iter() if element.get("id")}
+    inherited = ("fill", "stroke", "stroke-width", "stroke-dasharray", "font-size", "display",
+                 "visibility")
+    skipped = {"defs", "clipPath", "mask", "symbol", "marker", "metadata", "title", "desc", "style",
+               "pattern", "linearGradient", "radialGradient", "filter", "script", "image",
+               "namedview"}
+
+    def ink(colour):
+        return colour not in (None, "", "none", "transparent") and \
+            colour.strip().lower() not in ("#ffffff", "#fff", "white")
+
+    def style_of(element, style):
+        style = dict(style)
+        for key in inherited:
+            if element.get(key) is not None:
+                style[key] = element.get(key)
+        for item in (element.get("style") or "").split(";"):
+            key, _colon, value = item.partition(":")
+            if key.strip() in inherited and value.strip():
+                style[key.strip()] = value.strip()
+        return style
+
+    def line_style(style, matrix):
+        dash = style.get("stroke-dasharray") or "none"
+        dash = [] if dash.strip() == "none" else [v for v in _svg_numbers(dash) if v > 0]
+        if len(dash) >= 4:
+            return GRAPHIC_CENTRE
+        if dash:
+            return GRAPHIC_HIDDEN
+        stroke_width = (_svg_numbers(style.get("stroke-width")) or [1.0])[0]
+        width_mm = stroke_width * math.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+        return GRAPHIC_THICK if width_mm >= 0.4 else GRAPHIC_THIN
+
+    def visit(element, style, matrix, depth=0, as_symbol=False):
+        tag = element.tag.rsplit("}", 1)[-1] if isinstance(element.tag, str) else ""
+        if depth > 60 or (tag in skipped and not as_symbol):
+            return
+        style = style_of(element, style)
+        if style.get("display", "").strip() == "none" or \
+                style.get("visibility", "").strip() in ("hidden", "collapse"):
+            return
+        if element.get("transform"):
+            matrix = matrix @ _svg_matrix(element.get("transform"))
+
+        def page(points):
+            points = np.asarray(points, dtype=float).reshape(-1, 2)
+            return points @ matrix[:2, :2].T + matrix[:2, 2]
+
+        def number(key, default=0.0):
+            values = _svg_numbers(element.get(key))
+            return values[0] if values else default
+
+        stroke, filled = ink(style.get("stroke")), ink(style.get("fill"))
+        polylines, pieces = [], []
+        if tag == "path":
+            polylines = _svg_path_polylines(element.get("d"), pieces)
+        elif tag in ("polyline", "polygon"):
+            values = _svg_numbers(element.get("points"))
+            points = list(zip(values[0::2], values[1::2]))
+            if tag == "polygon" and points:
+                points.append(points[0])
+            polylines = [points]
+            pieces = [("line", a, b) for a, b in zip(points[:-1], points[1:])]
+        elif tag == "line":
+            a, b = (number("x1"), number("y1")), (number("x2"), number("y2"))
+            polylines, pieces = [[a, b]], [("line", a, b)]
+        elif tag == "rect":
+            x, y, w, h = number("x"), number("y"), number("width"), number("height")
+            if w > 0 and h > 0:
+                points = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]
+                polylines = [points]
+                pieces = [("line", a, b) for a, b in zip(points[:-1], points[1:])]
+        elif tag in ("circle", "ellipse"):
+            cx, cy = number("cx"), number("cy")
+            rx = number("r") if tag == "circle" else number("rx")
+            ry = number("r") if tag == "circle" else number("ry", rx)
+            if rx > 0 and ry > 0:
+                linear = matrix[:2, :2]
+                lengths = np.linalg.norm(linear, axis=0)
+                uniform = abs(lengths[0] - lengths[1]) <= 1e-9 * max(lengths.max(), 1.0) and \
+                    abs(float(linear[:, 0] @ linear[:, 1])) <= 1e-9 * max(lengths.max(), 1.0) ** 2
+                if stroke and uniform and abs(rx - ry) <= 1e-9 * max(rx, 1.0):
+                    builder.circle(line_style(style, matrix), page([(cx, cy)])[0],
+                                   rx * float(lengths[0]))
+                    if filled:
+                        angles = np.linspace(0.0, 2.0 * math.pi, 73)
+                        builder.fill([page(np.column_stack((cx + rx * np.cos(angles),
+                                                            cy + ry * np.sin(angles))))])
+                    return
+                angles = np.linspace(0.0, 2.0 * math.pi, 73)
+                points = [tuple(p) for p in np.column_stack((cx + rx * np.cos(angles),
+                                                             cy + ry * np.sin(angles)))]
+                polylines, pieces = [points], [("curve", points)]
+        elif tag == "text":
+            content = " ".join("".join(element.itertext()).split())
+            if content and (filled or stroke):
+                size = (_svg_numbers(style.get("font-size")) or [16.0])[0]
+                x = number("x")
+                y = number("y")
+                if not element.get("x"):        # position on the first <tspan>
+                    span = next((child for child in element
+                                 if str(child.tag).rsplit("}", 1)[-1] == "tspan"), None)
+                    if span is not None:
+                        x = (_svg_numbers(span.get("x")) or [x])[0]
+                        y = (_svg_numbers(span.get("y")) or [y])[0]
+                scale = math.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+                builder.text(page([(x, y)])[0], 0.7 * size * scale,
+                             math.degrees(math.atan2(matrix[1, 0], matrix[0, 0])), content)
+            return
+        elif tag == "use":
+            reference = element.get("{http://www.w3.org/1999/xlink}href") or element.get("href")
+            target = ids.get(reference[1:]) if reference and reference.startswith("#") else None
+            if target is not None and target is not element:
+                shift = np.array(((1.0, 0.0, number("x")), (0.0, 1.0, number("y")), (0, 0, 1.0)))
+                symbol = str(target.tag).rsplit("}", 1)[-1] == "symbol"
+                visit(target, style, matrix @ shift, depth + 1, as_symbol=symbol)
+            return
+        if polylines:
+            if filled and not stroke:
+                builder.fill([page(points) for points in polylines if len(points) >= 3])
+            if stroke:
+                kind = line_style(style, matrix)
+                for points in polylines:
+                    builder.path(kind, page(points))
+                for piece in pieces:
+                    if piece[0] == "line":
+                        a, b = page([piece[1], piece[2]])
+                        builder.pick_line(a, b)
+                    else:
+                        builder.pick_curve(page(piece[1]))
+        for child in element:
+            visit(child, style, matrix, depth + 1)
+
+    visit(root, {"fill": "black", "stroke": "none", "stroke-width": "1"}, root_matrix)
+    return builder.data("svg", os.path.basename(path), path)
+
+
+# ── DXF import ────────────────────────────────────────────────────────────────
+# $INSUNITS → millimetres (0 = unitless: taken as millimetres)
+_DXF_UNITS_MM = {0: 1.0, 1: 25.4, 2: 304.8, 4: 1.0, 5: 10.0, 6: 1000.0, 9: 0.0254, 10: 914.4,
+                 13: 0.001, 14: 100.0}
+
+
+def _dxf_value(codes, code, default=None):
+    return next((value for c, value in codes if c == code), default)
+
+
+def _dxf_float(codes, code, default=0.0):
+    try:
+        value = float(_dxf_value(codes, code, default))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
+def _dxf_point_list(codes, x_code=10):
+    """(x, y) pairs of a repeated point group (10/20, 11/21, …)."""
+    points, x = [], None
+    for code, value in codes:
+        try:
+            if code == x_code:
+                x = float(value)
+            elif code == x_code + 10 and x is not None:
+                points.append((x, float(value)))
+                x = None
+        except ValueError:
+            x = None
+    return points
+
+
+def _dxf_decode_text(text):
+    """Plain text of a DXF TEXT / MTEXT value (special characters, MTEXT formatting removed)."""
+    text = re.sub(r"\\U\+([0-9A-Fa-f]{4})", lambda m: chr(int(m.group(1), 16)), text or "")
+    for code, character in (("%%c", "Ø"), ("%%C", "Ø"), ("%%d", "°"), ("%%D", "°"),
+                            ("%%p", "±"), ("%%P", "±"), ("%%%", "%")):
+        text = text.replace(code, character)
+    text = text.replace("\\P", "\n").replace("\\~", " ").replace("\\\\", "\x00")
+    text = re.sub(r"\\[ACcFfHhQqTWwp][^;]*;", "", text)           # font / height / colour codes
+    text = re.sub(r"\\S([^;^/#]*)[\^/#]([^;]*);", r"\1/\2", text)  # stacked fractions
+    text = re.sub(r"\\[LlOoKkNX]", "", text)
+    text = text.replace("{", "").replace("}", "").replace("\x00", "\\")
+    return text
+
+
+def _dxf_bulge_points(a, b, bulge):
+    """Points after `a` up to `b` of a polyline segment with a DXF bulge (tan of a quarter of the
+    included angle; positive = counter-clockwise)."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    chord = b - a
+    length = float(np.linalg.norm(chord))
+    if abs(bulge) < 1e-9 or length < 1e-12:
+        return np.asarray([b])
+    theta = 4.0 * math.atan(bulge)
+    direction = chord / length
+    left = np.array((-direction[1], direction[0]))
+    centre = (a + b) / 2.0 + left * (length / 2.0) / math.tan(theta / 2.0)
+    radius = float(np.linalg.norm(a - centre))
+    start = math.atan2(a[1] - centre[1], a[0] - centre[0])
+    count = max(2, int(math.ceil(abs(theta) / math.radians(3.0))))
+    angles = start + theta * np.arange(1, count + 1) / count
+    points = np.column_stack((centre[0] + radius * np.cos(angles),
+                              centre[1] + radius * np.sin(angles)))
+    points[-1] = b
+    return points
+
+
+def _dxf_arc_points(centre, radius, start_deg, end_deg):
+    """Counter-clockwise arc from start to end angle (degrees), about 3° per segment."""
+    sweep = (end_deg - start_deg) % 360.0
+    if sweep <= 1e-9:
+        sweep = 360.0
+    count = max(2, int(math.ceil(sweep / 3.0)))
+    angles = np.radians(start_deg + sweep * np.arange(count + 1) / count)
+    return np.column_stack((centre[0] + radius * np.cos(angles), centre[1] + radius * np.sin(angles)))
+
+
+def _bspline_points(degree, knots, controls, weights=None):
+    """Points along a (rational) B-spline by de Boor's algorithm; the control polygon when the
+    knot vector does not fit."""
+    controls = np.asarray(controls, dtype=float).reshape(-1, 2)
+    count = len(controls)
+    knots = np.asarray(knots, dtype=float)
+    if degree < 1 or count <= degree or len(knots) != count + degree + 1 or \
+            not np.all(np.diff(knots) >= -1e-12):
+        return controls
+    weights = np.asarray(weights, dtype=float) if weights is not None and \
+        len(weights) == count else np.ones(count)
+    homogeneous = np.column_stack((controls * weights[:, None], weights))
+    low, high = knots[degree], knots[count]
+    result = []
+    for t in np.linspace(low, high, max(24, 10 * count)):
+        span = int(np.searchsorted(knots, t, side="right")) - 1
+        span = min(max(span, degree), count - 1)
+        d = [homogeneous[j + span - degree].copy() for j in range(degree + 1)]
+        for r in range(1, degree + 1):
+            for j in range(degree, r - 1, -1):
+                left = knots[j + span - degree]
+                denominator = knots[j + 1 + span - r] - left
+                alpha = 0.0 if abs(denominator) < 1e-15 else (t - left) / denominator
+                d[j] = (1.0 - alpha) * d[j - 1] + alpha * d[j]
+        point = d[degree]
+        result.append(point[:2] / (point[2] if abs(point[2]) > 1e-15 else 1.0))
+    return np.asarray(result)
+
+
+def _dxf_hatch(codes):
+    """Boundary and pattern of a DXF HATCH: (solid, rings [Nx2 in OCS], pattern lines
+    [(angle°, base, offset, dashes)], pattern angle°, pattern scale). The boundary paths are
+    polylines (with bulges) or edges (lines, circular and elliptic arcs, splines)."""
+    count = len(codes)
+    index = 0
+
+    def take(code, default=None):
+        """Value of `code` at the cursor (and advance), else the default."""
+        nonlocal index
+        if index < count and codes[index][0] == code:
+            index += 1
+            try:
+                return float(codes[index - 1][1])
+            except ValueError:
+                return default
+        return default
+
+    def arc_points(centre, radius_x, ratio, major_angle, start, end, ccw):
+        """Circular / elliptic arc of a boundary edge; clockwise edges store mirrored angles."""
+        if not ccw:
+            start, end = -start, -end
+        sweep = (end - start) % 360.0 if ccw else -((start - end) % 360.0)
+        if abs(sweep) < 1e-9:
+            sweep = 360.0 if ccw else -360.0
+        steps = max(4, int(math.ceil(abs(sweep) / 3.0)))
+        t = np.radians(start + sweep * np.arange(steps + 1) / steps)
+        local = np.column_stack((radius_x * np.cos(t), radius_x * ratio * np.sin(t)))
+        c, s = math.cos(major_angle), math.sin(major_angle)
+        return local @ np.array(((c, s), (-s, c))) + np.asarray(centre, dtype=float)
+
+    solid = bool(int(_dxf_float(codes, 70, 0)) & 1) or int(_dxf_float(codes, 450, 0)) == 1
+    while index < count and codes[index][0] != 91:
+        index += 1
+    paths = int(take(91, 0) or 0)
+    rings = []
+    for _path in range(paths):
+        while index < count and codes[index][0] != 92:
+            index += 1
+        if index >= count:
+            break
+        flags = int(take(92, 0))
+        points = []
+        if flags & 2:                                    # polyline path
+            has_bulge = bool(take(72, 0))
+            take(73)
+            vertices = []
+            for _vertex in range(int(take(93, 0) or 0)):
+                x, y = take(10), take(20)
+                if x is None or y is None:
+                    break
+                vertices.append((x, y, take(42, 0.0) if has_bulge else 0.0))
+            if vertices:
+                points = [vertices[0][:2]]
+                for (x0, y0, bulge), (x1, y1, _b) in zip(vertices, vertices[1:] + vertices[:1]):
+                    points.extend(map(tuple, _dxf_bulge_points((x0, y0), (x1, y1), bulge)))
+        else:                                            # edge path
+            for _edge in range(int(take(93, 0) or 0)):
+                kind = int(take(72, 0) or 0)
+                if kind == 1:                            # line
+                    a = (take(10, 0.0), take(20, 0.0))
+                    b = (take(11, 0.0), take(21, 0.0))
+                    piece = [a, b]
+                elif kind == 2:                          # circular arc
+                    centre = (take(10, 0.0), take(20, 0.0))
+                    radius = take(40, 0.0)
+                    start, end = take(50, 0.0), take(51, 360.0)
+                    piece = arc_points(centre, radius, 1.0, 0.0, start, end, bool(take(73, 1)))
+                elif kind == 3:                          # elliptic arc
+                    centre = (take(10, 0.0), take(20, 0.0))
+                    major = (take(11, 1.0), take(21, 0.0))
+                    ratio = take(40, 1.0)
+                    start, end = take(50, 0.0), take(51, 360.0)
+                    piece = arc_points(centre, math.hypot(*major), ratio,
+                                       math.atan2(major[1], major[0]), start, end,
+                                       bool(take(73, 1)))
+                elif kind == 4:                          # spline
+                    degree = int(take(94, 3) or 3)
+                    take(73); take(74); take(95); take(96)
+                    knots, controls, weights, fit = [], [], [], []
+                    while index < count and codes[index][0] in (40, 10, 20, 42):
+                        code = codes[index][0]
+                        value = take(code, 0.0)
+                        if code == 40:
+                            knots.append(value)
+                        elif code == 10:
+                            controls.append([value, 0.0])
+                        elif code == 20 and controls:
+                            controls[-1][1] = value
+                        elif code == 42:
+                            weights.append(value)
+                    if take(97) is not None:
+                        while index < count and codes[index][0] in (11, 21):
+                            code = codes[index][0]
+                            value = take(code, 0.0)
+                            if code == 11:
+                                fit.append([value, 0.0])
+                            elif fit:
+                                fit[-1][1] = value
+                    for code in (12, 22, 13, 23):
+                        take(code)
+                    piece = _bspline_points(degree, knots, controls, weights or None) \
+                        if len(controls) > degree else np.asarray(fit, dtype=float)
+                else:
+                    break
+                piece = np.asarray(piece, dtype=float).reshape(-1, 2)
+                if len(piece):
+                    if points and np.allclose(points[-1], piece[0], atol=1e-9):
+                        piece = piece[1:]
+                    points.extend(map(tuple, piece))
+        if len(points) >= 3:
+            rings.append(np.asarray(points, dtype=float))
+    lines = []
+    while index < count and codes[index][0] != 78:
+        index += 1
+    for _line in range(int(take(78, 0) or 0) if index < count else 0):
+        while index < count and codes[index][0] != 53:
+            index += 1
+        angle = take(53, 0.0)
+        base = (take(43, 0.0), take(44, 0.0))
+        offset = (take(45, 0.0), take(46, 0.0))
+        dashes = [take(49, 0.0) for _dash in range(int(take(79, 0) or 0))]
+        lines.append((angle, np.asarray(base), np.asarray(offset), dashes))
+    return solid, rings, lines, _dxf_float(codes, 52, 0.0), _dxf_float(codes, 41, 1.0) or 1.0
+
+
+def _hatch_segments(rings, lines, limit=200_000):
+    """Pattern lines of a hatch clipped to its boundary (even-odd: islands stay free), with
+    their dash patterns: [(a, b)] in the coordinates of the rings."""
+    starts = np.concatenate([ring for ring in rings])
+    ends = np.concatenate([np.roll(ring, -1, axis=0) for ring in rings])
+    segments = []
+    for angle, base, offset, dashes in lines:
+        a = math.radians(angle)
+        along = np.array((math.cos(a), math.sin(a)))
+        normal = np.array((-math.sin(a), math.cos(a)))
+        spacing = float(offset @ normal)
+        if abs(spacing) < 1e-9:
+            continue
+        span = starts @ normal - float(base @ normal)
+        first = int(math.ceil(min(span.min() / spacing, span.max() / spacing)))
+        last = int(math.floor(max(span.min() / spacing, span.max() / spacing)))
+        if last - first > 20000:                   # far too dense to be meant: leave it out
+            continue
+        period = sum(abs(dash) for dash in dashes)
+        for k in range(first, last + 1):
+            origin = base + k * offset
+            side_a, side_b = (starts - origin) @ normal, (ends - origin) @ normal
+            crossing = (side_a <= 0) != (side_b <= 0)
+            if not crossing.any():
+                continue
+            fraction = side_a[crossing] / (side_a[crossing] - side_b[crossing])
+            u_a, u_b = (starts[crossing] - origin) @ along, (ends[crossing] - origin) @ along
+            positions = np.sort(u_a + (u_b - u_a) * fraction)
+            for u0, u1 in zip(positions[0::2], positions[1::2]):
+                if u1 - u0 < 1e-9:
+                    continue
+                if not dashes or period < 1e-9:
+                    segments.append((origin + along * u0, origin + along * u1))
+                else:
+                    cursor = math.floor(u0 / period) * period
+                    while cursor < u1:
+                        for dash in dashes:
+                            length = abs(dash) if dash else min(period * 0.05, 0.25)
+                            if dash >= 0:
+                                low, high = max(cursor, u0), min(cursor + length, u1)
+                                if high > low:
+                                    segments.append((origin + along * low, origin + along * high))
+                            cursor += abs(dash)
+                            if cursor >= u1:
+                                break
+                        if len(segments) > limit:
+                            break
+                if len(segments) > limit:
+                    raise ValueError(f"The file is too complex to import (a hatch with more "
+                                     f"than {limit:,} lines)")
+    return segments
+
+
+def _dxf_structure(path):
+    """(header, layers, blocks, entities) of an ASCII DXF. An entity is (type, [(code, value)])."""
+    with open(path, "rb") as stream:
+        raw = stream.read()
+    if raw.startswith(b"AutoCAD Binary DXF"):
+        raise ValueError("Binary DXF files are not supported; save the drawing as ASCII DXF")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    lines = text.splitlines()
+    pairs = []
+    for index in range(0, len(lines) - 1, 2):
+        try:
+            code = int(lines[index].strip())
+        except ValueError as ex:
+            raise ValueError(f"Not a valid DXF file (line {index + 1})") from ex
+        pairs.append((code, lines[index + 1].strip()))
+    header, layers, blocks, entities = {}, {}, {}, []
+    section, block, index, count = None, None, 0, len(pairs)
+    while index < count:
+        code, value = pairs[index]
+        if code == 0 and value == "SECTION":
+            section = pairs[index + 1][1] if index + 1 < count and pairs[index + 1][0] == 2 else None
+            index += 2
+            continue
+        if code == 0 and value in ("ENDSEC", "EOF"):
+            section = None
+            index += 1
+            if value == "EOF":
+                break
+            continue
+        if section == "HEADER":
+            if code == 9:
+                end = index + 1
+                while end < count and pairs[end][0] not in (0, 9):
+                    end += 1
+                header[value] = pairs[index + 1:end]
+                index = end
+            else:
+                index += 1
+            continue
+        if code != 0:
+            index += 1
+            continue
+        end = index + 1
+        while end < count and pairs[end][0] != 0:
+            end += 1
+        kind, codes = value, pairs[index + 1:end]
+        index = end
+        if section == "TABLES" and kind == "LAYER":
+            flags = int(_dxf_float(codes, 70, 0))
+            colour = int(_dxf_float(codes, 62, 7))
+            layers[_dxf_value(codes, 2, "")] = {
+                "linetype": str(_dxf_value(codes, 6, "") or ""),
+                "lineweight": int(_dxf_float(codes, 370, -3)),
+                "hidden": bool(flags & 1) or colour < 0}
+        elif section == "BLOCKS":
+            if kind == "BLOCK":
+                block = {"base": (_dxf_float(codes, 10), _dxf_float(codes, 20)), "entities": []}
+                blocks[_dxf_value(codes, 2, "")] = block
+            elif kind == "ENDBLK":
+                block = None
+            elif block is not None:
+                block["entities"].append((kind, codes))
+        elif section == "ENTITIES":
+            entities.append((kind, codes))
+    return header, layers, blocks, entities
+
+
+def _read_dxf_graphic(path):
+    """Graphic data of an ASCII DXF (model space): lines, polylines with arcs, circles, arcs,
+    ellipses, splines, solids, texts, block references and dimensions. Line types make hidden
+    and centre lines; line weights below 0.4 mm, dimensions and annotations thin lines, all
+    other lines outlines. Units follow $INSUNITS (unitless: millimetres)."""
+    header, layers, blocks, entities = _dxf_structure(path)
+    units = header.get("$INSUNITS")
+    unit_code = int(_dxf_float(units, 70, 0)) if units else 0
+    builder = _GraphicBuilder(_DXF_UNITS_MM.get(unit_code, 1.0))
+    model = [entity for entity in entities if _dxf_float(entity[1], 67, 0) != 1]
+    entities = model or entities                  # paper space only when there is nothing else
+
+    def style_of(codes, thin):
+        layer = layers.get(_dxf_value(codes, 8, "0"), {})
+        linetype = str(_dxf_value(codes, 6, "BYLAYER") or "BYLAYER").upper()
+        if linetype == "BYLAYER":
+            linetype = layer.get("linetype", "").upper()
+        if any(word in linetype for word in ("CENTER", "CENTRE", "DASHDOT", "CHAIN", "PHANTOM",
+                                              "DIVIDE", "BORDER")):
+            return GRAPHIC_CENTRE
+        if any(word in linetype for word in ("HIDDEN", "DASH", "DOT")):
+            return GRAPHIC_HIDDEN
+        if thin:
+            return GRAPHIC_THIN
+        weight = int(_dxf_float(codes, 370, -1))
+        if weight == -1:
+            weight = layer.get("lineweight", -3)
+        if weight >= 0:
+            return GRAPHIC_THICK if weight >= 40 else GRAPHIC_THIN
+        return GRAPHIC_THICK
+
+    def transform_of(codes, matrix):
+        """Entity coordinate system: a negative extrusion direction mirrors x (OCS)."""
+        if _dxf_float(codes, 230, 1.0) < 0:
+            return matrix @ np.diag((-1.0, 1.0, 1.0))
+        return matrix
+
+    def mapped(matrix, points):
+        points = np.asarray(points, dtype=float).reshape(-1, 2)
+        return points @ matrix[:2, :2].T + matrix[:2, 2]
+
+    def text_angle(matrix, degrees):
+        a = math.radians(degrees)
+        direction = matrix[:2, :2] @ np.array((math.cos(a), math.sin(a)))
+        return math.degrees(math.atan2(direction[1], direction[0]))
+
+    def linear_scale(matrix):
+        return math.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+
+    def polyline(matrix, style, vertices, closed):
+        """Vertices [(x, y, bulge)]: straight pieces and arcs."""
+        if len(vertices) < 2:
+            return
+        if closed:
+            vertices = list(vertices) + [vertices[0]]
+        drawn = [np.asarray(vertices[0][:2], dtype=float)]
+        for (x0, y0, bulge), (x1, y1, _next) in zip(vertices[:-1], vertices[1:]):
+            if abs(bulge) > 1e-9:
+                arc = _dxf_bulge_points((x0, y0), (x1, y1), bulge)
+                builder.pick_curve(mapped(matrix, np.vstack(((x0, y0), arc))))
+                drawn.extend(arc)
+            else:
+                a, b = mapped(matrix, [(x0, y0), (x1, y1)])
+                builder.pick_line(a, b)
+                drawn.append(np.asarray((x1, y1), dtype=float))
+        builder.path(style, mapped(matrix, np.asarray(drawn)))
+
+    def text(matrix, position, height, angle, content):
+        scale = linear_scale(matrix)
+        builder.text(mapped(matrix, [position])[0], height * scale, text_angle(matrix, angle),
+                     content)
+
+    def convert(items, matrix, depth, thin):
+        index = 0
+        while index < len(items):
+            kind, codes = items[index]
+            index += 1
+            vertices = []
+            if kind == "POLYLINE":                       # followed by VERTEX … SEQEND
+                while index < len(items) and items[index][0] in ("VERTEX", "SEQEND"):
+                    vertex_kind, vertex_codes = items[index]
+                    index += 1
+                    if vertex_kind == "SEQEND":
+                        break
+                    if int(_dxf_float(vertex_codes, 70, 0)) & 128 and \
+                            not int(_dxf_float(vertex_codes, 70, 0)) & 64:
+                        continue                         # polyface mesh face records
+                    vertices.append((_dxf_float(vertex_codes, 10), _dxf_float(vertex_codes, 20),
+                                     _dxf_float(vertex_codes, 42)))
+            if layers.get(_dxf_value(codes, 8, "0"), {}).get("hidden"):
+                continue
+            local = transform_of(codes, matrix)
+            try:
+                if kind == "LINE":
+                    a, b = mapped(matrix, [(_dxf_float(codes, 10), _dxf_float(codes, 20)),
+                                           (_dxf_float(codes, 11), _dxf_float(codes, 21))])
+                    builder.path(style_of(codes, thin), [a, b])
+                    builder.pick_line(a, b)
+                elif kind == "LWPOLYLINE":
+                    points = []
+                    for code, value in codes:
+                        if code == 10:
+                            points.append([float(value), 0.0, 0.0])
+                        elif code == 20 and points:
+                            points[-1][1] = float(value)
+                        elif code == 42 and points:
+                            points[-1][2] = float(value)
+                    polyline(local, style_of(codes, thin), [tuple(p) for p in points],
+                             bool(int(_dxf_float(codes, 70, 0)) & 1))
+                elif kind == "POLYLINE":
+                    flags = int(_dxf_float(codes, 70, 0))
+                    if not flags & 64:                   # not a polyface mesh
+                        polyline(local if not flags & 8 else matrix, style_of(codes, thin),
+                                 vertices, bool(flags & 1))
+                elif kind in ("CIRCLE", "ARC"):
+                    centre = (_dxf_float(codes, 10), _dxf_float(codes, 20))
+                    radius = _dxf_float(codes, 40)
+                    if radius <= 0:
+                        continue
+                    style = style_of(codes, thin)
+                    linear = local[:2, :2]
+                    lengths = np.linalg.norm(linear, axis=0)
+                    uniform = abs(lengths[0] - lengths[1]) <= 1e-9 * max(lengths.max(), 1.0)
+                    if kind == "CIRCLE" and uniform:
+                        builder.circle(style, mapped(local, [centre])[0], radius * lengths[0])
+                        continue
+                    start, end = (0.0, 360.0) if kind == "CIRCLE" else \
+                        (_dxf_float(codes, 50), _dxf_float(codes, 51))
+                    points = mapped(local, _dxf_arc_points(centre, radius, start, end))
+                    builder.path(style, points)
+                    builder.pick_curve(points)
+                    builder.points.append(mapped(local, [centre])[0])
+                elif kind == "ELLIPSE":
+                    centre = np.array((_dxf_float(codes, 10), _dxf_float(codes, 20)))
+                    major = np.array((_dxf_float(codes, 11), _dxf_float(codes, 21)))
+                    ratio = _dxf_float(codes, 40, 1.0)
+                    start, end = _dxf_float(codes, 41, 0.0), _dxf_float(codes, 42, 2 * math.pi)
+                    if end <= start:
+                        end += 2.0 * math.pi
+                    minor = ratio * np.array((-major[1], major[0]))
+                    if _dxf_float(codes, 230, 1.0) < 0:
+                        minor = -minor
+                    t = np.linspace(start, end, max(12, int(math.ceil((end - start) / 0.05))))
+                    points = centre + np.outer(np.cos(t), major) + np.outer(np.sin(t), minor)
+                    points = mapped(matrix, points)
+                    builder.path(style_of(codes, thin), points)
+                    builder.pick_curve(points)
+                elif kind == "SPLINE":
+                    degree = int(_dxf_float(codes, 71, 3))
+                    knots = [float(v) for c, v in codes if c == 40]
+                    weights = [float(v) for c, v in codes if c == 41]
+                    controls = _dxf_point_list(codes, 10)
+                    fit = _dxf_point_list(codes, 11)
+                    points = _bspline_points(degree, knots, controls, weights) \
+                        if len(controls) > degree else np.asarray(fit, dtype=float)
+                    if len(points) < 2 and fit:
+                        points = np.asarray(fit, dtype=float)
+                    if int(_dxf_float(codes, 70, 0)) & 1 and len(points) > 2:
+                        points = np.vstack((points, points[:1]))
+                    points = mapped(matrix, points)
+                    builder.path(style_of(codes, thin), points)
+                    builder.pick_curve(points)
+                elif kind in ("SOLID", "TRACE"):
+                    corners = [(_dxf_float(codes, c), _dxf_float(codes, c + 10))
+                               for c in (10, 11, 13, 12)]          # given crosswise
+                    builder.fill([mapped(local, corners)])
+                elif kind == "HATCH":
+                    solid, rings, lines, pattern_angle, pattern_scale = _dxf_hatch(codes)
+                    if not rings:
+                        continue
+                    if solid:
+                        builder.fill([mapped(local, ring) for ring in rings])
+                        continue
+                    if not lines:                       # no pattern data: 45° lines, 3.175 apart
+                        a = math.radians(pattern_angle + 45.0)
+                        spacing = 3.175 * pattern_scale
+                        lines = [(pattern_angle + 45.0, np.zeros(2),
+                                  np.array((-math.sin(a), math.cos(a))) * spacing, [])]
+                    for a, b in _hatch_segments(rings, lines):
+                        builder.path(GRAPHIC_THIN, mapped(local, [a, b]))
+                elif kind in ("TEXT", "ATTRIB"):
+                    if kind == "ATTRIB" and int(_dxf_float(codes, 70, 0)) & 1:
+                        continue                                  # invisible attribute
+                    aligned = int(_dxf_float(codes, 72, 0)) or int(_dxf_float(codes, 73, 0))
+                    anchor = (_dxf_float(codes, 11), _dxf_float(codes, 21)) if aligned and \
+                        _dxf_value(codes, 11) is not None else \
+                        (_dxf_float(codes, 10), _dxf_float(codes, 20))
+                    height = _dxf_float(codes, 40, 2.5)
+                    content = _dxf_decode_text(_dxf_value(codes, 1, ""))
+                    horizontal = int(_dxf_float(codes, 72, 0))
+                    shift = {1: 0.5, 2: 1.0, 4: 0.5}.get(horizontal, 0.0) * 0.75 * height * \
+                        len(content)
+                    angle = _dxf_float(codes, 50)
+                    a = math.radians(angle)
+                    anchor = (anchor[0] - shift * math.cos(a), anchor[1] - shift * math.sin(a))
+                    text(local if kind == "TEXT" else matrix, anchor, height, angle, content)
+                elif kind == "MTEXT":
+                    content = "".join(v for c, v in codes if c == 3) + (_dxf_value(codes, 1, "") or "")
+                    content = _dxf_decode_text(content)
+                    height = _dxf_float(codes, 40, 2.5)
+                    if _dxf_value(codes, 11) is not None:
+                        angle = math.degrees(math.atan2(_dxf_float(codes, 21), _dxf_float(codes, 11)))
+                    else:
+                        angle = _dxf_float(codes, 50)
+                    attachment = int(_dxf_float(codes, 71, 1))
+                    lines = [line for line in content.split("\n")]
+                    spacing = 1.667 * height
+                    total = height + spacing * (len(lines) - 1)
+                    row, column = (attachment - 1) // 3, (attachment - 1) % 3
+                    top = {0: 0.0, 1: total / 2.0, 2: total}.get(row, 0.0)
+                    a = math.radians(angle)
+                    along, up = np.array((math.cos(a), math.sin(a))), np.array((-math.sin(a), math.cos(a)))
+                    insert = np.array((_dxf_float(codes, 10), _dxf_float(codes, 20)))
+                    for number, line in enumerate(lines):
+                        width = 0.75 * height * len(line)
+                        dx = -width * (0.5 if column == 1 else 1.0 if column == 2 else 0.0)
+                        position = insert + along * dx + up * (top - height - spacing * number)
+                        text(matrix, position, height, angle, line)
+                elif kind in ("INSERT", "DIMENSION") and depth < 16:
+                    block = blocks.get(_dxf_value(codes, 2, ""))
+                    if block is None:
+                        continue
+                    if kind == "DIMENSION":               # its block holds the drawn dimension
+                        convert(block["entities"], matrix, depth + 1, True)
+                        continue
+                    x, y = _dxf_float(codes, 10), _dxf_float(codes, 20)
+                    sx, sy = _dxf_float(codes, 41, 1.0) or 1.0, _dxf_float(codes, 42, 1.0) or 1.0
+                    a = math.radians(_dxf_float(codes, 50))
+                    base_x, base_y = block["base"]
+                    columns = max(1, int(_dxf_float(codes, 70, 1)))
+                    rows = max(1, int(_dxf_float(codes, 71, 1)))
+                    column_gap, row_gap = _dxf_float(codes, 44), _dxf_float(codes, 45)
+                    for row in range(min(rows, 100)):
+                        for column in range(min(columns, 100)):
+                            place = np.array(((math.cos(a), -math.sin(a), x),
+                                              (math.sin(a), math.cos(a), y), (0.0, 0.0, 1.0)))
+                            offset = np.array(((1.0, 0.0, column * column_gap),
+                                               (0.0, 1.0, row * row_gap), (0.0, 0.0, 1.0)))
+                            block_matrix = local @ place @ offset @ np.diag((sx, sy, 1.0)) @ \
+                                np.array(((1.0, 0.0, -base_x), (0.0, 1.0, -base_y), (0.0, 0.0, 1.0)))
+                            convert(block["entities"], block_matrix, depth + 1, thin)
+            except (TypeError, ValueError, ZeroDivisionError, OverflowError) as ex:
+                if "too complex" in str(ex):
+                    raise
+                continue                                  # a broken entity is left out
+
+    convert(entities, np.eye(3), 0, False)
+    return builder.data("dxf", os.path.basename(path), path)
+
+
+def read_drawing_graphic(path):
+    """Graphic data of an SVG or DXF file for a technical drawing."""
+    extension = os.path.splitext(path)[1].lower()
+    if extension == ".svg":
+        return _read_svg_graphic(path)
+    if extension == ".dxf":
+        return _read_dxf_graphic(path)
+    raise ValueError("Choose an .svg or a .dxf file")
+
+
+# ── painting imported graphics ───────────────────────────────────────────────
+_GRAPHIC_VIEWS = collections.OrderedDict()     # token → pickable view and painter paths
+
+
+def _drawing_graphic_view(data):
+    """A graphic as a "view" of the drawing (bounds, picking data) with its painter paths in
+    graphic millimetres; cached by the graphic's token."""
+    token = str(data.get("token") or id(data))
+    view = _GRAPHIC_VIEWS.get(token)
+    if view is not None:
+        _GRAPHIC_VIEWS.move_to_end(token)
+        return view
+    paths = {}
+    for style, flat in data.get("polylines", []):
+        points = np.asarray(flat, dtype=float).reshape(-1, 2)
+        if len(points) < 2:
+            continue
+        path = paths.setdefault(int(style), QPainterPath())
+        path.moveTo(float(points[0, 0]), float(points[0, 1]))
+        for x, y in points[1:]:
+            path.lineTo(float(x), float(y))
+    circle_curves = []
+    angles = np.linspace(0.0, 2.0 * math.pi, 73)
+    for style, cx, cy, radius in data.get("circles", []):
+        paths.setdefault(int(style), QPainterPath()).addEllipse(
+            QPointF(float(cx), float(cy)), float(radius), float(radius))
+        circle_curves.append(np.column_stack((cx + radius * np.cos(angles),
+                                              cy + radius * np.sin(angles))))
+    fills = []                      # one path per fill: its holes (islands) stay open
+    for rings in data.get("fills", []):
+        fill = QPainterPath()
+        fill.setFillRule(Qt.OddEvenFill)
+        for flat in rings:
+            points = np.asarray(flat, dtype=float).reshape(-1, 2)
+            fill.addPolygon(QPolygonF([QPointF(float(x), float(y)) for x, y in points]))
+            fill.closeSubpath()
+        fills.append(fill)
+    curves = [np.asarray(curve, dtype=float).reshape(-1, 2)
+              for curve in data.get("curves", [])] + circle_curves
+    view = {"bounds": (np.zeros(2), np.array((max(float(data.get("width", 1.0)), 1e-3),
+                                              max(float(data.get("height", 1.0)), 1e-3)))),
+            "right": np.array((1.0, 0.0, 0.0)), "up": np.array((0.0, 1.0, 0.0)),
+            "pick_points": np.asarray(data.get("points", []), dtype=float).reshape(-1, 2),
+            "pick_segments": np.asarray(data.get("lines", []), dtype=float).reshape(-1, 2, 2),
+            "pick_curves": curves, "pick_arcs": circle_curves,
+            "paths": paths, "fills": fills}
+    _GRAPHIC_VIEWS[token] = view
+    while len(_GRAPHIC_VIEWS) > 48:
+        _GRAPHIC_VIEWS.popitem(last=False)
+    return view
+
+
+def _drawing_graphic_scale(record, data, default_scale):
+    """Page units per millimetre of a placed graphic: its own scale, else the drawing's, else the
+    largest ISO 5455 scale (at most 1:1) at which it fits on the sheet."""
+    ratio = record.get("scale")
+    if ratio:
+        return float(ratio) * DRAWING_UNITS_PER_MM
+    if default_scale:
+        return float(default_scale)
+    room_w = _DRAWING_PAGE["w"] - DRAWING_BORDER[0] - DRAWING_BORDER[2] - 80.0
+    room_h = _DRAWING_PAGE["h"] - DRAWING_BORDER[1] - DRAWING_BORDER[3] - DRAWING_TITLE_H - 80.0
+    fit = min(room_w / max(float(data["width"]), 1e-3), room_h / max(float(data["height"]), 1e-3))
+    return _drawing_nice_scale(min(fit, DRAWING_UNITS_PER_MM))
+
+
+def _paint_drawing_graphics(painter, options, default_scale, places):
+    """Paint the imported graphics placed on the sheet; each one is added to `places` (by its
+    placement name) so its geometry can be dimensioned."""
+    graphics = options.get("graphics") or {}
+    thick_scale = float(options.get("_thick_scale", 1.0))
+    for index, record in enumerate(options.get("view_placements", [])):
+        data = graphics.get(_graphic_id(record.get("name")))
+        if not isinstance(data, dict):
+            continue
+        view = _drawing_graphic_view(data)
+        scale = _drawing_graphic_scale(record, data, default_scale)
+        place = _DrawingPlacement(view, float(record.get("x", 60.0)), float(record.get("y", 60.0)),
+                                  scale)
+        place.record_index = index
+        places[record["name"]] = place
+        # graphic millimetres (v up) → page units (y down)
+        transform = QTransform(scale, 0.0, 0.0, -scale, place.rect.left(), place.rect.bottom())
+        painter.save()
+        if view["fills"]:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(_drawing_color("visible"))
+            for fill in view["fills"]:
+                painter.drawPath(transform.map(fill))
+        painter.setBrush(Qt.NoBrush)
+        for style in sorted(view["paths"]):
+            width, pattern, role = GRAPHIC_PENS.get(style, GRAPHIC_PENS[GRAPHIC_THIN])
+            if style == GRAPHIC_THICK:
+                width *= thick_scale
+            painter.setPen(_drawing_pen(width, pattern, role))
+            painter.drawPath(transform.map(view["paths"][style]))
+        painter.setPen(_drawing_color("text"))
+        for x, y, height, angle, content in data.get("texts", []):
+            painter.save()
+            painter.translate(place.point(float(x), float(y)))
+            painter.rotate(-float(angle))
+            painter.setFont(_drawing_font(float(height) * scale))
+            for number, line in enumerate(str(content).split("\n")):
+                painter.drawText(QPointF(0.0, number * 1.667 * float(height) * scale), line)
+            painter.restore()
+        painter.restore()
+
+
+# ── drawings with several sheets ─────────────────────────────────────────────
+def drawing_sheet_options(options):
+    """Complete options of every sheet of a drawing: the shared fields with each sheet's own,
+    numbered "n / N". A drawing without "sheets" (older files) is one sheet."""
+    sheets = options.get("sheets") or [
+        {key: options[key] for key in DRAWING_SHEET_KEYS if key in options}]
+    shared = {key: value for key, value in options.items()
+              if key not in DRAWING_SHEET_KEYS and key not in ("sheets", "active_sheet")}
+    result = []
+    for number, sheet in enumerate(sheets, 1):
+        merged = dict(shared)
+        merged.update(sheet)
+        merged["page"] = f"{number} / {len(sheets)}"
+        result.append(merged)
+    return result
+
+
+def _validated_drawing_sheet(options, graphic_ids, model_ids):
+    """One sheet of a drawing read from a project file, with every value checked (older files:
+    the top-level fields of the drawing)."""
+    rotation = [float(value) for value in options.get("rotation", (0, 0, 0))]
+    cut_offset = float(options.get("cut_offset", 0.0))
+    dimensions = options.get("dimensions", [])
+    placements = options.get("view_placements", [])
+    if len(rotation) != 3 or not np.isfinite(rotation).all() or \
+            not math.isfinite(cut_offset) or not isinstance(dimensions, list) or \
+            not isinstance(placements, list):
+        raise ValueError("invalid rotation, views or dimensions")
+    options["rotation"] = [int(round(value / 90.0) * 90) % 360 for value in rotation]
+    options["cut_offset"] = cut_offset
+    options["view_scale"] = min(3.0, max(0.1, float(options.get("view_scale", 1.0))))
+    ratio = options.get("scale_ratio")
+    options["scale_ratio"] = float(ratio) if ratio is not None and \
+        math.isfinite(float(ratio)) and float(ratio) > 0 else None
+    if options.get("projection") not in ("first", "third"):
+        options.pop("projection", None)
+    for key in ("title", "number", "tolerance", "name"):
+        if key in options:
+            options[key] = str(options[key])[:200]
+    options["section_view"] = min(2, max(0, int(options.get("section_view", 0))))
+    # cut sections A-A, B-B, … (older files: one section from section / cut_offset)
+    options["sections"] = _drawing_sections(options)
+    for key in ("section", "section_view", "cut_offset"):
+        options.pop(key, None)
+    source = options.get("source")
+    if isinstance(source, dict) and source.get("kind") == "project" and source.get("name"):
+        options["source"] = {"kind": "project", "name": str(source["name"])}
+    elif isinstance(source, dict) and source.get("kind") == "model" and \
+            source.get("id") in model_ids:
+        options["source"] = {"kind": "model", "id": str(source["id"])}
+    elif "source" in options:
+        options["source"] = None
+    valid_names = {"front", "top", "right", "left", "isometric", "section"} | \
+        {f"section-{item['letter']}" for item in options["sections"]} | \
+        {GRAPHIC_PREFIX + graphic_id for graphic_id in graphic_ids}
+    options["view_placements"] = []
+    for item in placements:
+        if not isinstance(item, dict) or item.get("name") not in valid_names:
+            continue
+        x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
+        if math.isfinite(x) and math.isfinite(y):
+            record = {"name": item["name"], "x": x, "y": y,
+                      "hidden_lines": bool(item.get("hidden_lines", True))}
+            scale = item.get("scale")
+            if _graphic_id(item["name"]) and isinstance(scale, (int, float)) and \
+                    math.isfinite(scale) and scale > 0:
+                record["scale"] = float(scale)
+            options["view_placements"].append(record)
+    options["dimensions"] = []
+    for item in dimensions[:200]:
+        if not isinstance(item, dict):
+            continue
+        value = float(item.get("value", 0.0))
+        if not math.isfinite(value):
+            continue
+        dimension = {"label": str(item.get("label", "Measurement"))[:80], "value": value}
+        kind = item.get("type")
+        if kind in ("length", "radius", "diameter", "angle"):
+            dimension["type"] = kind
+        if item.get("view") in valid_names:
+            raw_points = item.get("points")
+            if raw_points is None and isinstance(item.get("a"), (list, tuple)) and \
+                    isinstance(item.get("b"), (list, tuple)):
+                raw_points = [item["a"], item["b"]]
+            if isinstance(raw_points, list) and len(raw_points) in (2, 3) and \
+                    all(isinstance(point, (list, tuple)) and len(point) == 2
+                        for point in raw_points):
+                points = [[float(v) for v in point] for point in raw_points]
+                if np.isfinite(points).all():
+                    dimension.update(view=item["view"], points=points)
+                    if len(points) == 2:
+                        dimension.update(a=points[0], b=points[1])
+        # where the dimension line and its text were dragged to
+        for key in ("offset_distance", "text_shift", "text_lift", "angle", "leader_length"):
+            if isinstance(item.get(key), (int, float)) and math.isfinite(item[key]):
+                dimension[key] = float(item[key])
+        for key in ("offset", "text_offset"):
+            pair = item.get(key)
+            if isinstance(pair, (list, tuple)) and len(pair) == 2 and \
+                    all(isinstance(v, (int, float)) and math.isfinite(v) for v in pair):
+                dimension[key] = [float(v) for v in pair]
+        options["dimensions"].append(dimension)
+    return options
+
+
+def _validated_graphic(data):
+    """An imported SVG / DXF graphic read from a project file, or None when it is unusable."""
+    if not isinstance(data, dict):
+        return None
+    try:
+        width, height = float(data["width"]), float(data["height"])
+        if not (math.isfinite(width) and math.isfinite(height) and width > 0 and height > 0):
+            return None
+        for style, flat in data.get("polylines", []):
+            if int(style) not in GRAPHIC_PENS or len(flat) % 2:
+                return None
+        for item in data.get("circles", []):
+            if len(item) != 4:
+                return None
+        for item in data.get("texts", []):
+            if len(item) != 5:
+                return None
+        for item in data.get("lines", []):
+            if len(item) != 4:
+                return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    data = dict(data)
+    data["token"] = str(data.get("token") or os.urandom(8).hex())
+    data["name"] = str(data.get("name") or "graphic")[:200]
+    return data
+
+
+def _validated_drawing_options(options):
+    """Drawing options read from a project file: the sheets, the imported models (checked
+    meshes) and graphics. Raises ValueError for broken settings."""
+    if not isinstance(options, dict):
+        raise ValueError("not a settings object")
+    options = {key: (value if key in ("models", "graphics") else copy.deepcopy(value))
+               for key, value in options.items()}
+    graphics = {}
+    for graphic_id, data in (options.get("graphics") or {}).items():
+        checked = _validated_graphic(data)
+        if checked is not None:
+            graphics[str(graphic_id)] = checked
+    models = {}
+    for model_id, model in (options.get("models") or {}).items():
+        if not isinstance(model, dict):
+            continue
+        vertices, triangles = _validate_mesh(model.get("vertices"), model.get("triangles"))
+        models[str(model_id)] = {"name": str(model.get("name") or "Model")[:200],
+                                 "path": str(model.get("path") or ""),
+                                 "vertices": [list(v) for v in vertices],
+                                 "triangles": [list(t) for t in triangles]}
+    options = _validated_drawing_sheet(options, graphics, models)
+    sheets = options.get("sheets")
+    if isinstance(sheets, list) and sheets:
+        options["sheets"] = [_validated_drawing_sheet(dict(sheet), graphics, models)
+                             for sheet in sheets[:100] if isinstance(sheet, dict)]
+        if not options["sheets"]:
+            options.pop("sheets")
+        active = options.get("active_sheet", 0)
+        options["active_sheet"] = min(max(int(active), 0), len(options.get("sheets", [0])) - 1) \
+            if isinstance(active, (int, float)) else 0
+    else:
+        options.pop("sheets", None)
+        options.pop("active_sheet", None)
+    options["graphics"] = graphics
+    options["models"] = models
+    return options
+
+
+def write_technical_drawing_sheets(path, extension, jobs):
+    """Export the sheets of a drawing, `jobs` = [(mesh or None, sheet options)]. A PDF gets one
+    page per sheet; an SVG or DXF file holds one sheet, so the second one goes to "<name>-2.svg",
+    and so on. Returns the written paths."""
+    if not jobs:
+        raise ValueError("The drawing has no sheets")
+    if extension == ".pdf":
+        write_technical_drawing_pdf_pages(path, jobs)
+        return [path]
+    stem, suffix = os.path.splitext(path)
+    written = []
+    for number, (mesh, options) in enumerate(jobs, 1):
+        target = path if number == 1 else f"{stem}-{number}{suffix}"
+        write_technical_drawing(target, extension, mesh, options)
+        written.append(target)
+    return written
+
+
+def _drawing_page_size(sheet):
+    return QPageSize(QSizeF(sheet["w"] / DRAWING_UNITS_PER_MM, sheet["h"] / DRAWING_UNITS_PER_MM),
+                     QPageSize.Millimeter, f"{sheet['name']} {sheet['orientation']}",
+                     QPageSize.ExactMatch)
+
+
+def write_technical_drawing_pdf_pages(path, jobs):
+    """PDF with one page per sheet (each in its own size and orientation), black on white."""
+    writer = QPdfWriter(path)
+    writer.setResolution(150)
+    writer.setPageSize(_drawing_page_size(_drawing_sheet(jobs[0][1])))
+    writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+    painter = QPainter()
+    if not painter.begin(writer):
+        raise RuntimeError(f"Could not create PDF drawing:\n{path}")
+    try:
+        for number, (mesh, options) in enumerate(jobs):
+            options = dict(options, _colors=DRAWING_PRINT_COLORS)
+            sheet = _drawing_sheet(options)
+            if number:
+                writer.setPageSize(_drawing_page_size(sheet))
+                writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+                writer.newPage()
+            # the page in sheet units, independent of the device size of each page
+            options["_page_scale"] = writer.width() / sheet["w"]
+            vertices, triangles = mesh if mesh is not None else (None, None)
+            _draw_technical_drawing(painter, vertices, triangles, options)
+    finally:
+        painter.end()
+
+
 class TechnicalDrawingDialog(QDialog):
     _workspace_state = None          # panel position / visibility, kept for the program session
 
@@ -17507,12 +19401,24 @@ class TechnicalDrawingDialog(QDialog):
         self.setWindowTitle("Technical Drawing")
         self.setMinimumSize(1120, 780)
         self.resize(1400, 900)
+        # project solids a sheet can show (extrusions and imported models, chosen by name)
         self.source_entries = list(source_entries or [])
-        self.current_source_entry = source_entry
-        self.mesh = mesh if mesh is not None else \
-                self._mesh_for(source_entry) if source_entry is not None else None
+        self.current_source_entry = None
+        self.mesh = None
+        self.sheet_source = None             # model of the sheet being edited (None: no model)
+        self._meshes = {}                    # source key → mesh
+        self._geometry_caches = {}           # source key → projected geometry
         self._geometry_cache = {}
         self._options = dict(options or {})
+        # STEP / STL models and SVG / DXF graphics imported into this drawing (never changed in
+        # place, so copies of the drawing share them)
+        self.models = dict(self._options.get("models") or {})
+        self.graphics = dict(self._options.get("graphics") or {})
+        # the sheets of the drawing; the one being edited lives in the widgets below
+        self.sheets = self._initial_sheets(source_entry)
+        self.active_sheet = min(max(int(self._options.get("active_sheet", 0) or 0), 0),
+                                len(self.sheets) - 1)
+        self._options.update(copy.deepcopy(self.sheets[self.active_sheet]))
         self.logo_pixmap = self._options.get("logo") or QPixmap()
         self.logo_path = self._options.get("logo_path", "")
         self.dimensions = [dict(value) for value in self._options.get("dimensions", [])]
@@ -17545,6 +19451,20 @@ class TechnicalDrawingDialog(QDialog):
         self.act_import_logo = action("import.png", "Import Logo…",
                                       "Load an image for the logo field of the title block",
                                       self._load_logo)
+        self.act_import_graphic = action("import_svg_dxf.png", "Import SVG / DXF…",
+                                         "Place an SVG or DXF drawing on the sheet (it can be "
+                                         "moved, scaled and dimensioned like a view)",
+                                         self._import_graphic, shortcut="Ctrl+Shift+I")
+        self.act_add_sheet = action("add_sheet.png", "Add Sheet",
+                                    "Add a sheet to the drawing (it can show another model)",
+                                    lambda: self._add_sheet(False), shortcut="Ctrl+T")
+        self.act_duplicate_sheet = action("save_as.png", "Duplicate Sheet",
+                                          "Add a copy of this sheet with its views and dimensions",
+                                          lambda: self._add_sheet(True))
+        self.act_rename_sheet = action("edit_sheet.png", "Rename Sheet…",
+                                       "Rename this sheet", self._rename_sheet)
+        self.act_delete_sheet = action("remove_sheet.png", "Delete Sheet",
+                                       "Remove this sheet from the drawing", self._delete_sheet)
         self.act_export = action("export.png", "Export…",
                                  "Export the drawing as PDF, SVG or DXF (black on a white sheet)",
                                  self._export_drawing, shortcut="Ctrl+E")
@@ -17640,19 +19560,26 @@ class TechnicalDrawingDialog(QDialog):
                                    "and every whole step from 10:1 to 1:10 (Auto: ISO 5455)")
         self.view_scale.currentIndexChanged.connect(self._refresh_preview)
 
-        self.source_combo = QComboBox()
-        for entry in self.source_entries:
-            self.source_combo.addItem(entry.get("name", "Extrusion"))
-        self.source_combo.setMinimumWidth(180)
-        self.source_combo.setToolTip("Choose the extrusion whose views will be placed on the sheet")
-        if self.source_entries:
-            selected_source = next((index for index, entry in enumerate(self.source_entries)
-                                    if entry is source_entry), 0)
-            self.source_combo.setCurrentIndex(selected_source)
-            self.current_source_entry = self.source_entries[selected_source]
-            self.mesh = self._mesh_for(self.current_source_entry)
-        self.source_combo.setEnabled(bool(self.source_entries) and not source_locked and
-                                     len(self.source_entries) > 1)
+        # the model whose views the sheet shows: a solid of the project (an extrusion or a STEP /
+        # STL part imported in the 3-D construction) or none; each sheet has its own
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumWidth(160)
+        self.model_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.model_combo.setToolTip("Model whose views are placed on this sheet: an extrusion or "
+                                    "a part imported in the 3-D construction (File → Import)")
+        self.model_combo.activated.connect(self._on_model_chosen)
+        model_row = QHBoxLayout()
+        model_row.setSpacing(4)
+        model_row.addWidget(self.model_combo, 1)
+        # scale of a selected imported SVG / DXF graphic
+        self.graphic_scale = QComboBox()
+        self.graphic_scale.addItem("Sheet scale", None)
+        for ratio in DRAWING_SELECTABLE_SCALES:
+            self.graphic_scale.addItem(_drawing_scale_text(ratio * DRAWING_UNITS_PER_MM), ratio)
+        self.graphic_scale.setToolTip("Scale of the selected imported SVG / DXF graphic (Sheet "
+                                      "scale: the scale of the sheet)")
+        self.graphic_scale.setEnabled(False)
+        self.graphic_scale.currentIndexChanged.connect(self._on_graphic_scale_changed)
 
         form = QFormLayout()
         self.front_view = QComboBox()
@@ -17713,8 +19640,9 @@ class TechnicalDrawingDialog(QDialog):
         self.date.setText(self._options.get("date", self.date.text()))
         self.version = QLineEdit()
         self.version.setText(self._options.get("version", ""))
-        self.page = QLineEdit("1 / 1")
-        self.page.setText(self._options.get("page", "1 / 1"))
+        self.page = QLineEdit(f"{self.active_sheet + 1} / {len(self.sheets)}")
+        self.page.setReadOnly(True)          # the sheets are numbered automatically
+        self.page.setToolTip("Sheet number of this sheet / number of sheets (set automatically)")
         self.title = QLineEdit(self._options.get("title", ""))
         self.number = QLineEdit(self._options.get("number", ""))
         self.tolerance = QLineEdit(self._options.get("tolerance", "ISO 2768-mK"))
@@ -17784,6 +19712,8 @@ class TechnicalDrawingDialog(QDialog):
         view_page = QWidget()
         view_layout = QVBoxLayout(view_page)
         view_layout.setContentsMargins(6, 6, 6, 6)
+        view_layout.addWidget(QLabel("<b>Model of this sheet</b>"))
+        view_layout.addLayout(model_row)
         view_layout.addWidget(QLabel("<b>Placed views</b>"))
         self.view_list = QListWidget()
         self.view_list.currentRowChanged.connect(self._select_view_row)
@@ -17797,6 +19727,10 @@ class TechnicalDrawingDialog(QDialog):
         _style_checkbox_like_explorer(self.hidden_lines)       # as the object explorer
         self.hidden_lines.toggled.connect(self._on_hidden_lines_toggled)
         view_layout.addWidget(self.hidden_lines)
+        graphic_row = QHBoxLayout()
+        graphic_row.addWidget(QLabel("Imported graphic scale:"))
+        graphic_row.addWidget(self.graphic_scale, 1)
+        view_layout.addLayout(graphic_row)
         remove_view = QPushButton("Remove Selected View")
         remove_view.setIcon(QIcon(os.path.join(icon_dir, "delete_selected.png")))
         remove_view.clicked.connect(self._remove_selected_view)
@@ -17867,7 +19801,47 @@ class TechnicalDrawingDialog(QDialog):
         workspace.setWindowFlags(Qt.Widget)
         workspace.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowTabbedDocks)
         workspace.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)
-        workspace.setCentralWidget(self.canvas)
+        # the sheet in the middle, the tabs of all sheets below it (drag a tab to reorder, double-
+        # click to rename, right-click for more; + adds a sheet)
+        self.sheet_tabs = QTabBar()
+        self.sheet_tabs.setObjectName("drawing_sheet_tabs")
+        self.sheet_tabs.setMovable(True)
+        self.sheet_tabs.setExpanding(False)
+        self.sheet_tabs.setDrawBase(False)
+        self.sheet_tabs.setShape(QTabBar.RoundedSouth)
+        self.sheet_tabs.setUsesScrollButtons(True)
+        self.sheet_tabs.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.sheet_tabs.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sheet_tabs.setStyleSheet(
+            "QTabBar::tab{background:#2a2e35;color:#c8ccd2;padding:4px 16px;margin-right:2px;"
+            "border:1px solid #3a3f47;border-top:0;border-bottom-left-radius:3px;"
+            "border-bottom-right-radius:3px;}"
+            "QTabBar::tab:selected{background:#315f94;color:#ffffff;border-color:#548ac2;}"
+            "QTabBar::tab:hover:!selected{background:#353a43;}")
+        self.sheet_tabs.currentChanged.connect(self._on_sheet_tab_changed)
+        self.sheet_tabs.tabMoved.connect(self._on_sheet_tab_moved)
+        self.sheet_tabs.tabBarDoubleClicked.connect(lambda _index: self._rename_sheet())
+        self.sheet_tabs.customContextMenuRequested.connect(self._sheet_tab_menu)
+        add_sheet = QToolButton()
+        add_sheet.setDefaultAction(self.act_add_sheet)
+        add_sheet.setAutoRaise(True)
+        add_sheet.setIconSize(QSize(18, 18))
+        tab_strip = QWidget()
+        tab_strip.setObjectName("drawing_tab_strip")
+        tab_strip.setStyleSheet("QWidget#drawing_tab_strip{background:#202329;}")
+        tab_row = QHBoxLayout(tab_strip)
+        tab_row.setContentsMargins(16, 0, 8, 2)
+        tab_row.setSpacing(4)
+        tab_row.addWidget(self.sheet_tabs)
+        tab_row.addWidget(add_sheet)
+        tab_row.addStretch(1)
+        centre = QWidget()
+        centre_layout = QVBoxLayout(centre)
+        centre_layout.setContentsMargins(0, 0, 0, 0)
+        centre_layout.setSpacing(0)
+        centre_layout.addWidget(self.canvas, 1)
+        centre_layout.addWidget(tab_strip)
+        workspace.setCentralWidget(centre)
 
         # toolbars: file / edit / view actions in the first row, drawing tools in the second,
         # styled and spaced as the main window's first toolbar (both rows alike, so the buttons
@@ -17902,7 +19876,8 @@ class TechnicalDrawingDialog(QDialog):
             workspace.addToolBarBreak(Qt.TopToolBarArea)
 
         self.tb_file = toolbar("File", "tb_drawing_file")
-        for act in (self.act_import_logo, self.act_export, None, self.act_delete, None,
+        for act in (self.act_import_graphic, self.act_export, None, self.act_add_sheet,
+                    self.act_rename_sheet, self.act_delete_sheet, None, self.act_delete, None,
                     self.act_fit, self.act_panels, None):
             self.tb_file.addSeparator() if act is None else self.tb_file.addAction(act)
         self.tb_file.addAction(self.act_undo)          # as in the main window's first toolbar
@@ -17951,11 +19926,16 @@ class TechnicalDrawingDialog(QDialog):
         # menu bar with the same actions as the toolbars (checked / enabled states stay in sync)
         menu_bar = QMenuBar(workspace)
         file_menu = menu_bar.addMenu("&File")
-        for act in (self.act_import_logo, self.act_export, None, self.act_finish, self.act_cancel):
+        for act in (self.act_import_graphic, self.act_import_logo, None,
+                    self.act_export, None, self.act_finish, self.act_cancel):
             file_menu.addSeparator() if act is None else file_menu.addAction(act)
         edit_menu = menu_bar.addMenu("&Edit")
         for act in (self.act_undo, self.act_redo, None, self.act_delete):
             edit_menu.addSeparator() if act is None else edit_menu.addAction(act)
+        sheet_menu = menu_bar.addMenu("&Sheet")
+        for act in (self.act_add_sheet, self.act_duplicate_sheet, self.act_rename_sheet, None,
+                    self.act_delete_sheet):
+            sheet_menu.addSeparator() if act is None else sheet_menu.addAction(act)
         view_menu = menu_bar.addMenu("&View")
         view_menu.addAction(self.act_fit)
         view_menu.addSeparator()
@@ -18019,25 +19999,407 @@ class TechnicalDrawingDialog(QDialog):
                        self.title, self.number, self.tolerance):
             widget.editingFinished.connect(self._refresh_preview)
         self.projection.currentIndexChanged.connect(self._refresh_preview)
-        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
+        self._activate_source(self.sheets[self.active_sheet].get("source"))
+        self._fill_model_combo()
+        self._rebuild_sheet_tabs()
         self._sync_tool_buttons()
+        self._restoring_history = False
         self._refresh_preview()
         # undo / redo: snapshots of the drawing, recorded after every finished change
-        self._restoring_history = False
         self._history = History(self._history_state())
         self._sync_history_actions()
 
     WORKSPACE_STATE_VERSION = 3
 
+    # ── sheets and their models ──────────────────────────────────────────────
+    def _initial_sheets(self, source_entry):
+        """The sheets of the drawing. Older drawings have one, made of the top-level fields and
+        showing the extrusion they belong to."""
+        stored = self._options.get("sheets")
+        if isinstance(stored, list) and stored:
+            sheets = [copy.deepcopy(sheet) for sheet in stored if isinstance(sheet, dict)]
+            if sheets:
+                for number, sheet in enumerate(sheets, 1):
+                    sheet.setdefault("name", f"Sheet {number}")
+                return sheets
+        sheet = {key: copy.deepcopy(self._options[key]) for key in DRAWING_SHEET_KEYS
+                 if key in self._options}
+        sheet["sections"] = _drawing_sections(self._options)
+        sheet["name"] = sheet.get("name") or "Sheet 1"
+        sheet["source"] = self._source_of_entry(source_entry)
+        return [sheet]
+
+    @staticmethod
+    def _source_of_entry(entry):
+        return {"kind": "project", "name": entry["name"]} if entry is not None else None
+
+    @staticmethod
+    def _source_key(source):
+        return json.dumps(source, sort_keys=True) if source else "none"
+
+    def _project_entry(self, name):
+        return next((entry for entry in self.source_entries if entry.get("name") == name), None)
+
+    def _source_name(self, source):
+        if not source:
+            return None
+        if source.get("kind") == "model":
+            model = self.models.get(source.get("id"))
+            return model.get("name", "Model") if model else "Imported model"
+        return str(source.get("name", "Extrusion"))
+
+    def _mesh_of(self, source):
+        """Mesh of a sheet's model (None: no model, or the model is gone)."""
+        if not source:
+            return None
+        key = self._source_key(source)
+        if key not in self._meshes:
+            mesh = None
+            if source.get("kind") == "project":
+                entry = self._project_entry(source.get("name"))
+                if entry is not None:
+                    mesh = self._mesh_for(entry)
+            elif source.get("kind") == "model":
+                model = self.models.get(source.get("id"))
+                if model:
+                    mesh = (model["vertices"], model["triangles"])
+            if mesh is not None and (not mesh[1] if isinstance(mesh[1], list) else
+                                     not len(mesh[1])):
+                mesh = None
+            self._meshes[key] = mesh
+        return self._meshes[key]
+
+    def _activate_source(self, source):
+        """Make `source` the model of the sheet being edited (mesh and projection cache)."""
+        self.sheet_source = copy.deepcopy(source) if source else None
+        self._geometry_cache = self._geometry_caches.setdefault(self._source_key(source), {})
+        self.mesh = self._mesh_of(source)
+        self.current_source_entry = self._project_entry(source.get("name")) \
+            if source and source.get("kind") == "project" else None
+        self._update_object_info()
+        self.canvas.empty_hint = (
+            "Choose a view in the toolbar, then click the sheet to place it" if self.mesh else
+            f"The model '{self._source_name(source)}' is no longer in the project · choose "
+            "another one in the Views panel" if source else
+            "No model on this sheet · choose an extrusion or imported part in the Views panel, "
+            "or place an SVG / DXF drawing (Ctrl+Shift+I)")
+
+    def _fill_model_combo(self):
+        """Model choices: none, the project's solids, the imported STEP / STL files."""
+        icon_dir = os.path.join(_LOG_DIR, "icons")
+        choices = [(None, "No model", "")]
+        for entry in self.source_entries:
+            choices.append((self._source_of_entry(entry), entry.get("name", "Extrusion"),
+                            "import.png" if entry.get("type") == "imported" else "extrusion.png"))
+        for model_id, model in self.models.items():
+            choices.append(({"kind": "model", "id": model_id},
+                            f"{model.get('name', 'Model')}  (imported file)", "import.png"))
+        current = self._source_key(self.sheet_source)
+        if self.sheet_source and all(self._source_key(source) != current
+                                     for source, _text, _icon in choices):
+            choices.append((self.sheet_source, f"{self._source_name(self.sheet_source)}  (missing)",
+                            "delete_selected.png"))
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        for source, text, icon in choices:
+            self.model_combo.addItem(QIcon(os.path.join(icon_dir, icon)) if icon else QIcon(),
+                                     text, self._source_key(source))
+            self.model_combo.setItemData(self.model_combo.count() - 1, source, Qt.UserRole + 1)
+        self.model_combo.setCurrentIndex(max(0, self.model_combo.findData(current)))
+        self.model_combo.blockSignals(False)
+
+    def _on_model_chosen(self, index):
+        source = self.model_combo.itemData(index, Qt.UserRole + 1)
+        if self._source_key(source) == self._source_key(self.sheet_source):
+            return
+        self._set_sheet_model(source)
+
+    def _set_sheet_model(self, source):
+        """Show another model on this sheet: the placed views stay where they are and show the new
+        model; dimensions on the old model's views are removed (graphics keep theirs)."""
+        self._activate_source(source)
+        self.dimensions[:] = [d for d in self.dimensions if _graphic_id(d.get("view"))]
+        self.canvas.select_dimension(None)
+        self.canvas._selected_geometry = self.canvas._hover_geometry = None
+        self._fill_model_combo()
+        self._rebuild_sheet_tabs()
+        self._refresh_dimension_list()
+        self._refresh_view_list()
+        name = self._source_name(source)
+        self.drawing_status.setText(f"This sheet shows {name}" if name else
+                                    "This sheet has no model")
+        self._refresh_preview()
+        self.canvas.fit_sheet()
+
+    def _import_graphic(self):
+        """Import an SVG / DXF drawing; it is placed with the next click on the sheet."""
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Import SVG or DXF", "",
+            "2-D drawings (*.svg *.dxf);;SVG (*.svg);;DXF (*.dxf);;All files (*)")
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data = read_drawing_graphic(path)
+        except (OSError, ValueError) as ex:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Import failed", f"{os.path.basename(path)}:\n{ex}")
+            self.drawing_status.setText(f"Import failed: {ex}")
+            return
+        QApplication.restoreOverrideCursor()
+        graphic_id = "g" + os.urandom(4).hex()
+        self.graphics[graphic_id] = data
+        self.canvas.set_mode("place_view", GRAPHIC_PREFIX + graphic_id)
+        self._sync_tool_buttons()
+        self.drawing_status.setText(
+            f"{data['name']}: {_drawing_fmt(data['width'])} × {_drawing_fmt(data['height'])} mm · "
+            "click the sheet to place it (Esc cancels)")
+
+    def _on_graphic_scale_changed(self, _index):
+        record = self.canvas.selected
+        if record is None or not _graphic_id(record.get("name")):
+            return
+        ratio = self.graphic_scale.currentData()
+        if ratio:
+            record["scale"] = float(ratio)
+        else:
+            record.pop("scale", None)
+        self._refresh_view_list()
+        self._refresh_preview()
+
+    def _placement_label(self, record):
+        name = record.get("name")
+        graphic = self.graphics.get(_graphic_id(name))
+        if graphic is not None:
+            return f"Imported: {graphic.get('name', 'graphic')}"
+        letter = _section_view_letter(name, self.sections)
+        if letter:
+            return f"Section {letter}-{letter}"
+        return {"top": "Top View", "front": "Front View", "left": "Left Side",
+                "right": "Right Side", "isometric": "Isometric"}.get(
+                    name, str(name or "View").title())
+
+    # sheet list ----------------------------------------------------------------
+    def _sheet_from_widgets(self):
+        """The sheet being edited, as stored in the drawing."""
+        return {
+            "name": self.sheets[self.active_sheet].get("name") or f"Sheet {self.active_sheet + 1}",
+            "source": copy.deepcopy(self.sheet_source),
+            "front": self.front_view.currentData(),
+            "rotation": [spin.value() for spin in self.rotation],
+            "scale_ratio": self.view_scale.currentData(),
+            "view_placements": [dict(value) for value in self.view_placements],
+            "dimensions": [dict(value) for value in self.dimensions],
+            "sections": [dict(section) for section in self.sections],
+            "sheet": self.sheet_size.currentData(),
+            "orientation": self.sheet_orientation.currentData(),
+            "title": self.title.text().strip(),
+            "number": self.number.text().strip(),
+        }
+
+    def _store_active_sheet(self):
+        self.sheets[self.active_sheet] = self._sheet_from_widgets()
+
+    def _load_sheet_into_widgets(self, sheet):
+        """Show a stored sheet in the editor (fields, views, dimensions, sections, model)."""
+        widgets = (self.front_view, self.view_scale, self.sheet_size, self.sheet_orientation,
+                   *self.rotation, self.title, self.number)
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.canvas.set_mode()
+            self.front_view.setCurrentIndex(max(0, self.front_view.findData(
+                tuple(sheet.get("front") or (0, 1, 0)))))
+            for spin, value in zip(self.rotation, sheet.get("rotation") or (0, 0, 0)):
+                spin.setValue(int(value) % 360)
+            ratio = sheet.get("scale_ratio")
+            self.view_scale.setCurrentIndex(0 if not ratio else min(
+                range(1, self.view_scale.count()),
+                key=lambda i: abs(math.log(self.view_scale.itemData(i) / float(ratio)))))
+            self.sheet_size.setCurrentIndex(max(0, self.sheet_size.findData(
+                _drawing_sheet(sheet)["name"])))
+            self.sheet_orientation.setCurrentIndex(max(0, self.sheet_orientation.findData(
+                _drawing_sheet(sheet)["orientation"])))
+            self.title.setText(str(sheet.get("title") or ""))
+            self.number.setText(str(sheet.get("number") or ""))
+            # the lists are changed in place: the canvas works on the same objects
+            self.view_placements[:] = [dict(item) for item in sheet.get("view_placements") or []]
+            self.dimensions[:] = [dict(item) for item in sheet.get("dimensions") or []]
+            self.sections[:] = [dict(item) for item in _drawing_sections(sheet)]
+            self.canvas.selected = None
+            self.canvas._selected_geometry = None
+            self.canvas._hover_geometry = None
+            self.canvas.select_dimension(None)
+            self._activate_source(sheet.get("source"))
+            self._fill_model_combo()
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+        self.page.setText(f"{self.active_sheet + 1} / {len(self.sheets)}")
+
+    def _rebuild_sheet_tabs(self):
+        self.sheet_tabs.blockSignals(True)
+        while self.sheet_tabs.count():
+            self.sheet_tabs.removeTab(0)
+        for index, sheet in enumerate(self.sheets):
+            self.sheet_tabs.addTab(sheet.get("name") or f"Sheet {index + 1}")
+            source = self.sheet_source if index == self.active_sheet else sheet.get("source")
+            self.sheet_tabs.setTabToolTip(
+                index, f"{self._source_name(source) or 'No model'} · "
+                       f"{_drawing_sheet(sheet)['name']} {_drawing_sheet(sheet)['orientation']}")
+        self.sheet_tabs.setCurrentIndex(self.active_sheet)
+        self.sheet_tabs.blockSignals(False)
+        # the + button right after the last tab (the bar would otherwise keep a minimum width)
+        self.sheet_tabs.setMaximumWidth(sum(self.sheet_tabs.tabRect(index).width()
+                                            for index in range(self.sheet_tabs.count())) + 2)
+        self.act_delete_sheet.setEnabled(len(self.sheets) > 1)
+        self.page.setText(f"{self.active_sheet + 1} / {len(self.sheets)}")
+
+    def _show_sheet(self, index, record_history=True):
+        """Switch to another sheet. A switch alone is not an undo step."""
+        self.active_sheet = index
+        self._load_sheet_into_widgets(self.sheets[index])
+        self._rebuild_sheet_tabs()
+        self._refresh_view_list()
+        self._refresh_dimension_list()
+        self._refresh_section_list(0 if self.sections else -1)
+        if record_history:
+            self._refresh_preview()
+        else:
+            self._restoring_history = True
+            try:
+                self._refresh_preview()
+            finally:
+                self._restoring_history = False
+            if getattr(self, "_history", None) is not None:
+                self._history.cur = self._history_state()
+        self.canvas.fit_sheet()
+        self._sync_tool_buttons()
+
+    def _on_sheet_tab_changed(self, index):
+        if index == self.active_sheet or not 0 <= index < len(self.sheets):
+            return
+        self._store_active_sheet()
+        self._show_sheet(index, record_history=False)
+        self.drawing_status.setText(f"{self.sheets[index].get('name')} · "
+                                    f"{self._source_name(self.sheet_source) or 'no model'}")
+
+    def _on_sheet_tab_moved(self, source, target):
+        """A tab was dragged to another place: the sheets are renumbered."""
+        self._store_active_sheet()
+        sheet = self.sheets.pop(source)
+        self.sheets.insert(target, sheet)
+        self.active_sheet = self.sheet_tabs.currentIndex()
+        self.page.setText(f"{self.active_sheet + 1} / {len(self.sheets)}")
+        self._refresh_preview()
+
+    def _new_sheet_name(self):
+        used = {sheet.get("name") for sheet in self.sheets}
+        return next(f"Sheet {number}" for number in range(1, len(self.sheets) + 2)
+                    if f"Sheet {number}" not in used)
+
+    def _add_sheet(self, duplicate=False):
+        """Add a sheet after the current one: a copy of it, or an empty sheet in the same format
+        showing the same model (choose another one in the Views panel)."""
+        self._store_active_sheet()
+        current = self.sheets[self.active_sheet]
+        if duplicate:
+            sheet = copy.deepcopy(current)
+            sheet["name"] = f"{current.get('name') or 'Sheet'} (copy)"
+        else:
+            sheet = {key: copy.deepcopy(current.get(key)) for key in
+                     ("source", "front", "rotation", "scale_ratio", "sheet", "orientation")}
+            sheet.update(name=self._new_sheet_name(), view_placements=[], dimensions=[],
+                         sections=[], title=current.get("title", ""), number="")
+        self.sheets.insert(self.active_sheet + 1, sheet)
+        self._show_sheet(self.active_sheet + 1)
+        self.drawing_status.setText(f"{sheet['name']} added · page {self.active_sheet + 1} of "
+                                    f"{len(self.sheets)}")
+
+    def _delete_sheet(self, index=None):
+        index = self.active_sheet if index is None else index
+        if len(self.sheets) < 2 or not 0 <= index < len(self.sheets):
+            self.drawing_status.setText("A drawing keeps at least one sheet")
+            return
+        self._store_active_sheet()
+        sheet = self.sheets[index]
+        name = sheet.get("name") or f"Sheet {index + 1}"
+        content = []
+        for key, word in (("view_placements", "view"), ("dimensions", "dimension"),
+                          ("sections", "section")):
+            count = len(sheet.get(key) or [])
+            if count:
+                content.append(f"{count} {word}{'s' if count != 1 else ''}")
+        question = QMessageBox(QMessageBox.Question, "Delete Sheet",
+                               f"Delete the sheet '{name}'?", QMessageBox.Yes | QMessageBox.No, self)
+        question.setInformativeText(
+            ("It holds " + ", ".join(content) + ". " if content else "The sheet is empty. ") +
+            "The other sheets are renumbered.")
+        question.setDefaultButton(QMessageBox.No)
+        if question.exec_() != QMessageBox.Yes:
+            self.drawing_status.setText(f"{name} kept")
+            return
+        del self.sheets[index]
+        target = min(self.active_sheet if index != self.active_sheet else index,
+                     len(self.sheets) - 1)
+        if index < self.active_sheet:
+            target = self.active_sheet - 1
+        self._show_sheet(target)
+        self.drawing_status.setText(f"{name} deleted (Ctrl+Z brings it back)")
+
+    def _rename_sheet(self, index=None):
+        index = self.active_sheet if index is None else index
+        if not 0 <= index < len(self.sheets):
+            return
+        old = self.sheets[index].get("name") or f"Sheet {index + 1}"
+        name, ok = QInputDialog.getText(self, "Rename Sheet", "Sheet name:", text=old)
+        name = name.strip()[:60]
+        if not ok or not name or name == old:
+            return
+        self._store_active_sheet()
+        self.sheets[index]["name"] = name
+        self._rebuild_sheet_tabs()
+        self._commit_history()
+
+    def _sheet_tab_menu(self, position):
+        index = self.sheet_tabs.tabAt(position)
+        if index < 0:
+            return
+        if index != self.active_sheet:
+            self.sheet_tabs.setCurrentIndex(index)       # switches the sheet
+        menu = QMenu(self)
+        for act in (self.act_add_sheet, self.act_duplicate_sheet, self.act_rename_sheet, None,
+                    self.act_delete_sheet):
+            menu.addSeparator() if act is None else menu.addAction(act)
+        menu.exec_(self.sheet_tabs.mapToGlobal(position))
+
+    def sheet_sources(self):
+        """The model of every sheet (None for a sheet without one)."""
+        self._store_active_sheet()
+        return [sheet.get("source") for sheet in self.sheets]
+
+    def sheet_jobs(self):
+        """(mesh, complete options) of every sheet, as exported."""
+        options = self.drawing_options()
+        jobs = []
+        for index, sheet_options in enumerate(drawing_sheet_options(options)):
+            source = sheet_options.get("source")
+            sheet_options["_geometry_cache"] = self._geometry_caches.setdefault(
+                self._source_key(source), {})
+            jobs.append((self._mesh_of(source), sheet_options))
+        return jobs
+
     # ── undo / redo ───────────────────────────────────────────────────────────
-    # what a snapshot holds: the content of the drawing (not grid / snap or the panel layout)
-    HISTORY_KEYS = ("front", "rotation", "scale_ratio", "view_placements", "dimensions",
-                    "sections", "sheet", "orientation", "projection", "project", "author",
-                    "date", "version", "page", "title", "number", "tolerance", "logo_path")
+    # what a snapshot holds: the content of the drawing, i.e. every sheet and the shared title
+    # block fields (not grid / snap or the panel layout; imported files are kept apart, they are
+    # never changed)
+    SHARED_HISTORY_KEYS = ("projection", "project", "author", "date", "version", "tolerance",
+                           "logo_path")
 
     def _history_state(self):
         options = self.drawing_options()
-        return json.dumps({key: options.get(key) for key in self.HISTORY_KEYS},
+        return json.dumps({"shared": {key: options.get(key) for key in self.SHARED_HISTORY_KEYS},
+                           "sheets": options["sheets"], "active": self.active_sheet},
                           sort_keys=True, default=_json_default)
 
     def _commit_history(self):
@@ -18073,42 +20435,26 @@ class TechnicalDrawingDialog(QDialog):
     def _apply_history_state(self, text):
         """Put a recorded drawing back into the editor (fields, views, dimensions, sections)."""
         state = json.loads(text)
+        shared = state.get("shared") or {}
         self._restoring_history = True
-        widgets = (self.front_view, self.view_scale, self.projection, self.sheet_size,
-                   self.sheet_orientation, *self.rotation, self.project, self.author, self.date,
-                   self.version, self.page, self.title, self.number, self.tolerance)
+        widgets = (self.projection, self.project, self.author, self.date, self.version,
+                   self.tolerance)
         for widget in widgets:
             widget.blockSignals(True)
         try:
-            self.canvas.set_mode()
-            self.front_view.setCurrentIndex(max(0, self.front_view.findData(
-                tuple(state.get("front") or (0, 1, 0)))))
-            for spin, value in zip(self.rotation, state.get("rotation") or (0, 0, 0)):
-                spin.setValue(int(value) % 360)
-            ratio = state.get("scale_ratio")
-            self.view_scale.setCurrentIndex(0 if not ratio else min(
-                range(1, self.view_scale.count()),
-                key=lambda i: abs(math.log(self.view_scale.itemData(i) / float(ratio)))))
-            self.projection.setCurrentIndex(max(0, self.projection.findData(state.get("projection"))))
-            self.sheet_size.setCurrentIndex(max(0, self.sheet_size.findData(state.get("sheet"))))
-            self.sheet_orientation.setCurrentIndex(
-                max(0, self.sheet_orientation.findData(state.get("orientation"))))
-            for key in ("project", "author", "date", "version", "page", "title", "number",
-                        "tolerance"):
-                getattr(self, key).setText(str(state.get(key) or ""))
-            path = state.get("logo_path") or ""
+            self.projection.setCurrentIndex(max(0, self.projection.findData(shared.get("projection"))))
+            for key in ("project", "author", "date", "version", "tolerance"):
+                getattr(self, key).setText(str(shared.get(key) or ""))
+            path = shared.get("logo_path") or ""
             if path != self.logo_path:
                 self.logo_path = path
                 self.logo_pixmap = QPixmap(path) if path and os.path.isfile(path) else QPixmap()
                 self.logo_field.setText(os.path.basename(path) if path else "")
-            # the lists are changed in place: the canvas works on the same objects
-            self.view_placements[:] = [dict(item) for item in state.get("view_placements") or []]
-            self.dimensions[:] = [dict(item) for item in state.get("dimensions") or []]
-            self.sections[:] = [dict(item) for item in state.get("sections") or []]
-            self.canvas.selected = None
-            self.canvas._selected_geometry = None
-            self.canvas._hover_geometry = None
-            self.canvas.select_dimension(None)
+            self.sheets = [dict(sheet) for sheet in state.get("sheets") or []] or \
+                [self._sheet_from_widgets()]
+            self.active_sheet = min(max(int(state.get("active", 0)), 0), len(self.sheets) - 1)
+            self._load_sheet_into_widgets(self.sheets[self.active_sheet])
+            self._rebuild_sheet_tabs()
             self._refresh_view_list()
             self._refresh_dimension_list()
             self._refresh_section_list()
@@ -18119,7 +20465,14 @@ class TechnicalDrawingDialog(QDialog):
             self._restoring_history = False
 
     def source_entry(self):
-        return self.current_source_entry
+        """The project solid of the first sheet that shows one (the drawing is listed under it in
+        the object explorer), else None."""
+        for source in self.sheet_sources():
+            if source and source.get("kind") == "project":
+                entry = self._project_entry(source.get("name"))
+                if entry is not None:
+                    return entry
+        return None
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -18286,53 +20639,35 @@ class TechnicalDrawingDialog(QDialog):
         self.canvas.set_grid(snap_enabled=enabled)
         self.drawing_status.setText("Snap to grid on" if enabled else "Snap to grid off")
 
-    def _on_source_changed(self, index):
-        if not 0 <= index < len(self.source_entries):
-            return
-        entry = self.source_entries[index]
-        if entry is self.current_source_entry:
-            return
-        self.current_source_entry = entry
-        self.mesh = self._mesh_for(entry)
-        self._geometry_cache.clear()
-        self.view_placements.clear()
-        self.dimensions.clear()
-        self.canvas.selected = None
-        self._update_object_info()
-        self._refresh_view_list()
-        self._refresh_dimension_list()
-        self._refresh_preview()
-
     def drawing_options(self):
-        return {
-            "front": self.front_view.currentData(),
-            "sections": [dict(section) for section in self.sections],
-            "rotation": [spin.value() for spin in self.rotation],
+        """The whole drawing: the fields of the sheet being edited at the top level (what the
+        sheet is rendered from), every sheet under "sheets", the shared title block fields and
+        the imported models and graphics."""
+        sheet = self._sheet_from_widgets()
+        self.sheets[self.active_sheet] = sheet
+        options = dict(sheet)
+        options.update({
             "view_scale": 1.0,
-            "scale_ratio": self.view_scale.currentData(),
-            "view_placements": [dict(value) for value in self.view_placements],
             "project": self.project.text().strip(),
             "author": self.author.text().strip(),
             "date": self.date.text().strip(),
             "version": self.version.text().strip(),
-            "page": self.page.text().strip(),
-            "title": self.title.text().strip(),
-            "number": self.number.text().strip(),
+            "page": f"{self.active_sheet + 1} / {len(self.sheets)}",
             "tolerance": self.tolerance.text().strip(),
             "projection": self.projection.currentData(),
             "logo": self.logo_pixmap,
             "logo_path": self.logo_path,
-            "dimensions": [dict(value) for value in self.dimensions],
             "grid_mm": self.sp_grid.value(),
             "snap_mm": self.sp_snap.value(),
             "snap": self.act_snap.isChecked(),
-            "sheet": self.sheet_size.currentData(),
-            "orientation": self.sheet_orientation.currentData(),
-        }
+            "sheets": [dict(item) for item in self.sheets],
+            "active_sheet": self.active_sheet,
+            "models": self.models,
+            "graphics": self.graphics,
+        })
+        return options
 
     def _refresh_preview(self, *_):
-        if self.mesh is None:
-            return
         picture = QPicture()
         sheet = _drawing_sheet(self.drawing_options())
         picture.setBoundingRect(QRect(0, 0, int(sheet["w"]), int(sheet["h"])))
@@ -18343,10 +20678,10 @@ class TechnicalDrawingDialog(QDialog):
             options.update(_geometry_cache=self._geometry_cache, _page_scale=1.0,
                            _projection_resolution=900, _isometric_resolution=1200,
                            _colors=DRAWING_SCREEN_COLORS)
-            layout = _draw_technical_drawing(
-                painter, self.mesh[0], self.mesh[1], options)
+            vertices, triangles = self.mesh if self.mesh is not None else (None, None)
+            layout = _draw_technical_drawing(painter, vertices, triangles, options)
             source_sketch = self.current_source_entry.get("parent") \
-                if self.current_source_entry is not None else None
+                if self.current_source_entry is not None and self.mesh is not None else None
             if source_sketch is not None and source_sketch.get("type") == "sketch":
                 self._attach_sketch_references(layout, source_sketch["sketch"], options)
         except (ValueError, RuntimeError, KeyError) as ex:
@@ -18364,18 +20699,24 @@ class TechnicalDrawingDialog(QDialog):
             self._preview_timer.start(80 if dragging else 40)
 
     def _update_object_info(self):
-        """Status bar: name and overall size of the drawn extrusion (with its child bodies)."""
-        name = self.current_source_entry.get("name", "Extrusion") \
-            if self.current_source_entry is not None else "Model"
-        text = f"Object: {name}"
-        if self.mesh is not None and len(self.mesh[1]):
+        """Status bar: name and overall size of the sheet's model (with its child bodies)."""
+        if not hasattr(self, "object_info"):
+            return
+        name = self._source_name(self.sheet_source)
+        if name is None:
+            text = "No model on this sheet"
+        elif self.mesh is None:
+            text = f"Model missing: {name}"
+        else:
+            kind = "Imported file" if self.sheet_source.get("kind") == "model" else "Object"
+            text = f"{kind}: {name}"
             vertices = np.asarray(self.mesh[0], dtype=float).reshape(-1, 3)
             used = vertices[np.unique(np.asarray(self.mesh[1], dtype=int))]
             size = used.max(axis=0) - used.min(axis=0)
             text += "  ·  " + " × ".join(_drawing_fmt(float(value)) for value in size) + " mm"
         self.object_info.setText(text)
-        self.object_info.setToolTip("Extrusion drawn on this sheet (select another extrusion in "
-                                    "the main window before opening Technical Drawing)")
+        self.object_info.setToolTip("Model drawn on this sheet (choose another one in the Views "
+                                    "panel; each sheet has its own)")
 
     def _on_sheet_changed(self, *_):
         """New sheet format: the placed views keep their relative position on the sheet (and
@@ -18460,7 +20801,8 @@ class TechnicalDrawingDialog(QDialog):
             rotated_curves = []
 
         for info in layout.get("placements", []):
-            if info.get("name") == "isometric":        # the shaded isometric is not picked from
+            # the shaded isometric is not picked from; imported graphics have their own geometry
+            if info.get("name") == "isometric" or _graphic_id(info.get("name")):
                 continue
             right, up = np.asarray(info["right"]), np.asarray(info["up"])
             info["reference_points"] = np.column_stack((rotated_points @ right,
@@ -18469,8 +20811,55 @@ class TechnicalDrawingDialog(QDialog):
                                                     rotated_segments @ up), axis=-1)
             info["reference_curves"] = [np.column_stack((curve @ right, curve @ up))
                                          for curve in rotated_curves]
+            if not info.get("hidden_shown", True):
+                self._keep_drawn_references(info)
+
+    @staticmethod
+    def _keep_drawn_references(info):
+        """Without hidden lines only the sketch references that lie on drawn lines can be
+        picked (a sketch edge behind the part is not shown, so it is not offered either)."""
+        drawn = [np.asarray(info.get("pick_segments", ()), dtype=float).reshape(-1, 2, 2)]
+        for curve in info.get("pick_curves", ()):
+            curve = np.asarray(curve, dtype=float).reshape(-1, 2)
+            if len(curve) >= 2:
+                drawn.append(np.stack((curve[:-1], curve[1:]), axis=1))
+        drawn = np.concatenate(drawn) if drawn else np.zeros((0, 2, 2))
+        extent = float(np.max(np.subtract(info["high"], info["low"]))) or 1.0
+        tolerance = extent * 1e-3
+
+        def on_drawn(points):
+            points = np.asarray(points, dtype=float).reshape(-1, 2)
+            if not len(drawn) or not len(points):
+                return np.zeros(len(points), dtype=bool)
+            a, b = drawn[:, 0], drawn[:, 1]
+            ab = b - a
+            length = np.maximum((ab * ab).sum(axis=1), 1e-24)
+            t = np.clip(((points[:, None, :] - a[None]) * ab[None]).sum(axis=2) / length, 0.0, 1.0)
+            nearest = a[None] + t[..., None] * ab[None]
+            return np.linalg.norm(points[:, None, :] - nearest, axis=2).min(axis=1) <= tolerance
+
+        points = np.asarray(info["reference_points"], dtype=float).reshape(-1, 2)
+        info["reference_points"] = points[on_drawn(points)]
+        segments = np.asarray(info["reference_segments"], dtype=float).reshape(-1, 2, 2)
+        if len(segments):
+            checks = np.stack((segments[:, 0], (segments[:, 0] + segments[:, 1]) / 2,
+                               segments[:, 1]), axis=1)
+            info["reference_segments"] = segments[on_drawn(checks.reshape(-1, 2)).reshape(-1, 3)
+                                                  .all(axis=1)]
+        info["reference_curves"] = [curve for curve in info["reference_curves"]
+                                    if on_drawn(curve[::max(1, len(curve) // 8)]).all()]
 
     def _begin_view_placement(self, name):
+        if self.mesh is None:
+            self.canvas.set_mode()
+            self._sync_tool_buttons()
+            self.drawing_status.setText(
+                "This sheet has no model · choose one in the Views panel (Model of this sheet); "
+                "STEP / STL parts are imported in the 3-D construction (File → Import)")
+            if self.views_dock.isHidden():
+                self.views_dock.show()
+            self.views_dock.raise_()
+            return
         if name == "section":
             # the section selected in the Views panel, else the first one without a view
             section = self._current_section() or next(
@@ -18509,13 +20898,11 @@ class TechnicalDrawingDialog(QDialog):
         self.view_list.clear()
         selected_row = -1
         for index, record in enumerate(self.view_placements):
-            letter = _section_view_letter(record.get("name"), self.sections)
-            label = f"Section {letter}-{letter}" if letter else \
-                {"top": "Top View", "front": "Front View", "left": "Left Side",
-                 "right": "Right Side", "isometric": "Isometric"}.get(
-                     record.get("name"), str(record.get("name", "View")).title())
+            label = self._placement_label(record)
             if record.get("name") in self.HIDDEN_LINE_VIEWS and not record.get("hidden_lines", True):
                 label += "  (no hidden lines)"
+            if _graphic_id(record.get("name")) and record.get("scale"):
+                label += f"  ({_drawing_scale_text(float(record['scale']) * DRAWING_UNITS_PER_MM)})"
             self.view_list.addItem(label)
             if record is current:
                 selected_row = index
@@ -18532,6 +20919,14 @@ class TechnicalDrawingDialog(QDialog):
         self.hidden_lines.setEnabled(applies)
         self.hidden_lines.setChecked(bool(record.get("hidden_lines", True)) if applies else True)
         self.hidden_lines.blockSignals(False)
+        graphic = record is not None and bool(_graphic_id(record.get("name")))
+        self.graphic_scale.blockSignals(True)
+        self.graphic_scale.setEnabled(graphic)
+        ratio = record.get("scale") if graphic else None
+        self.graphic_scale.setCurrentIndex(0 if not ratio else min(
+            range(1, self.graphic_scale.count()),
+            key=lambda i: abs(math.log(self.graphic_scale.itemData(i) / float(ratio)))))
+        self.graphic_scale.blockSignals(False)
 
     def _on_hidden_lines_toggled(self, checked):
         record = self.canvas.selected
@@ -18558,7 +20953,7 @@ class TechnicalDrawingDialog(QDialog):
             self._sync_hidden_lines_box()
             return
         self._refresh_view_list()
-        self.drawing_status.setText(f"Selected: {record['name'].title()} view")
+        self.drawing_status.setText(f"Selected: {self._placement_label(record)}")
         self.view_list.blockSignals(True)
         row = next((index for index, item in enumerate(self.view_placements)
                     if item is record), -1)
@@ -18667,27 +21062,27 @@ class TechnicalDrawingDialog(QDialog):
         self._refresh_preview()
 
     def _export_drawing(self):
-        """Export the current state of the drawing directly from the editor."""
-        if self.mesh is None:
-            return
+        """Export the current state of the drawing (all sheets) directly from the editor: a PDF
+        with one page per sheet, or one SVG / DXF file per sheet."""
         suggested = self.number.text().strip() or self.title.text().strip() or \
             self.project.text().strip() or "drawing"
         suggested = re.sub(r'[\\/:*?"<>|]+', "_", suggested)
         path, extension = _ask_drawing_export_path(self, suggested + ".pdf")
         if not path:
             return
-        options = self.drawing_options()
-        options["_geometry_cache"] = self._geometry_cache
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            write_technical_drawing(path, extension, self.mesh, options)
+            written = write_technical_drawing_sheets(path, extension, self.sheet_jobs())
         except (OSError, ValueError, RuntimeError) as ex:
             QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Drawing export failed", str(ex))
             self.drawing_status.setText(f"Export failed: {ex}")
             return
         QApplication.restoreOverrideCursor()
-        self.drawing_status.setText(f"Exported {os.path.basename(path)}")
+        pages = f" ({len(self.sheets)} pages)" if extension == ".pdf" and len(self.sheets) > 1 else ""
+        self.drawing_status.setText(
+            f"Exported {os.path.basename(path)}{pages}" if len(written) == 1 else
+            f"Exported {len(written)} files: " + ", ".join(os.path.basename(p) for p in written))
 
 
 def clamp_window_geometry(rect, available, minimum):
@@ -23194,7 +25589,8 @@ class MainWindow(QMainWindow):
                 "rect_p0": idx.get(id(rp)) if rp is not None else None,
                 "circle_ctr": sv.get("circle_ctr"), "arc_ctr": sv.get("arc_ctr"),
             "arc_start": sv.get("arc_start"), "polygon_ctr": sv.get("polygon_ctr"),
-            "ellipse_ctr": sv.get("ellipse_ctr"), "ellipse_axis": sv.get("ellipse_axis")}
+            "ellipse_ctr": sv.get("ellipse_ctr"), "ellipse_axis": sv.get("ellipse_axis"),
+            "bezier_pts": sv.get("bezier_pts")}
         return json.dumps({"sketch": d, "pending": pend}, sort_keys=True, default=_json_default)
 
     def _sketch_commit(self):
@@ -23211,6 +25607,7 @@ class MainWindow(QMainWindow):
         for k in ("circle_ctr", "arc_ctr", "arc_start", "polygon_ctr",
               "ellipse_ctr", "ellipse_axis"):
             sv[k] = tuple(pend[k]) if pend[k] is not None else None
+        sv["bezier_pts"] = [tuple(q) for q in pend.get("bezier_pts") or []] or None
         for item in sv.get("underlays", []):
             if item["reference"]:
                 self._project_sketch_level(sk, item)
@@ -26298,7 +28695,7 @@ class MainWindow(QMainWindow):
         self.state["sketch_view_state"]={
             "mode":DTOOL_SELECT,"draw_tool":"line","ctool":CTOOL_NONE,
             "wip_pts":[],"rect_p0":None,"circle_ctr":None,"polygon_ctr":None,
-            "ellipse_ctr":None,"ellipse_axis":None,
+            "ellipse_ctr":None,"ellipse_axis":None,"bezier_pts":None,
             "polygon_sides":self.sketch_panel.polygon_sides,
             "arc_ctr":None,"arc_start":None,"arc_sweep":0.0,"construction":False,
             "sel_seg":None,"sel_vtx1":None,"sel_vtx2":None,"_sel_segs":[],"sel_curve":None,
@@ -26390,7 +28787,7 @@ class MainWindow(QMainWindow):
         if sv.get("mode","draw") != "draw": self._on_mode_changed("draw")
         sv["draw_tool"]=tool
         sv["circle_ctr"]=None; sv["polygon_ctr"]=None; sv["free_pts"]=None
-        sv["ellipse_ctr"]=None; sv["ellipse_axis"]=None
+        sv["ellipse_ctr"]=None; sv["ellipse_axis"]=None; sv["bezier_pts"]=None
         sv["arc_ctr"]=None; sv["arc_start"]=None; sv["arc_sweep"]=0.0
         self.sketch_panel.set_tool(tool); self.view3d.update()
 
@@ -26457,21 +28854,25 @@ class MainWindow(QMainWindow):
         if sk is None or not (0 <= row < len(sk.constraints)): return sk, None
         return sk, sk.constraints[row]
 
-    def _on_constraint_selected(self, row):
-        _, c = self._constraint_at(row)
-        self.state["sketch_view_state"]["hl_constraint"] = c
+    def _on_constraint_selected(self, rows):
+        # hl_constraint: list of the constraints selected in the panel (None = none)
+        cs = [c for c in (self._constraint_at(r)[1] for r in rows) if c is not None]
+        self.state["sketch_view_state"]["hl_constraint"] = cs or None
         self.view3d.update()
 
-    def _on_constraint_remove(self, row):
-        sk, c = self._constraint_at(row)
-        if c is None: return
-        text = describe_constraint(sk, c)
-        sk.remove_constraint(c)
+    def _on_constraint_remove(self, rows):
+        sk = self.state.get("active_sketch")
+        cs = [c for c in (self._constraint_at(r)[1] for r in rows) if c is not None]
+        if sk is None or not cs: return
+        texts = [describe_constraint(sk, c) for c in cs]
+        for c in cs: sk.remove_constraint(c)
         self.state["sketch_view_state"]["hl_constraint"] = None
-        self.sketch_panel._pending_row = row        # keep marking: move on to the next one below
+        self.sketch_panel.lst_con.clearSelection()
+        self.sketch_panel._pending_row = min(rows)  # keep marking: move on to the next one below
         self.sketch_panel.refresh(sk)
         self._sketch_commit()
-        self._st(f"Removed constraint: {text}")
+        self._st(f"Removed constraint: {texts[0]}" if len(texts) == 1 else
+                 f"Removed {len(texts)} constraints")
         self.view3d.update()
 
     def _on_constraint_edit(self, row):
@@ -26576,7 +28977,8 @@ class MainWindow(QMainWindow):
 
         handled_pairs = set()
         for entry in objects:
-            if entry["type"] not in ("sketch", "imported", "surface") or entry.get("parent") is not None:
+            if entry["type"] not in ("sketch", "imported", "surface", "technical_drawing") or \
+                    entry.get("parent") is not None:
                 continue
             pair_id = profile_pairs.get(id(entry))
             if pair_id is None:
@@ -26915,6 +29317,14 @@ class MainWindow(QMainWindow):
             for component in self._assembly["components"]:
                 if component["kind"] == "project" and component.get("source_name") == old:
                     component["source_name"] = new_name
+            for drawing in self.state["objects"]:        # drawing sheets name their model
+                options = (drawing.get("options") or {}) \
+                    if drawing.get("type") == "technical_drawing" else {}
+                for sheet in [options, *(options.get("sheets") or [])]:
+                    source = sheet.get("source")
+                    if isinstance(source, dict) and source.get("kind") == "project" and \
+                            source.get("name") == old:
+                        source["name"] = new_name
         self._rebuild_tree(); self._mark_dirty()
         self._st(f"Renamed '{old}' → '{new_name}'")
 
@@ -26926,24 +29336,23 @@ class MainWindow(QMainWindow):
         self._set_measure_mode(False)
         if entry["type"] == "technical_drawing":
             parent = entry.get("parent")
-            if parent is None or parent.get("type") != "extrusion" or not parent.get("solid"):
-                QMessageBox.warning(self, "Drawing unavailable", "The source extrusion is unavailable.")
-                return
-            options = copy.deepcopy(entry.get("options", {}))
+            options = self._drawing_options_copy(entry.get("options", {}))
             logo_path = options.get("logo_path", "")
             options["logo"] = QPixmap(logo_path) if logo_path and os.path.isfile(logo_path) else QPixmap()
             self._begin_operation_progress("Opening Technical Drawing...")
             try:
                 self._update_operation_progress(None, "Preparing drawing mesh and preview...")
                 dialog = TechnicalDrawingDialog(
-                    self, entry.get("name", "Technical Drawing"),
-                    _drawing_source_mesh(parent, self.state["objects"]), options,
-                    source_entries=[parent], source_entry=parent, source_locked=True,
+                    self, entry.get("name", "Technical Drawing"), None, options,
+                    source_entries=self._drawing_sources(), source_entry=parent,
                     mesh_for=lambda source: _drawing_source_mesh(source, self.state["objects"]))
             finally:
                 self._end_operation_progress()
             if dialog.exec_() == QDialog.Accepted:
                 entry["options"] = self._drawing_options_for_storage(dialog.drawing_options())
+                # listed under the solid of its first sheet that shows one (else at the top)
+                entry["parent"] = dialog.source_entry()
+                self._rebuild_tree()
                 self._mark_dirty()
                 self._st(f"Updated drawing: {entry['name']}")
             return
@@ -27447,14 +29856,22 @@ class MainWindow(QMainWindow):
         elif sel["type"] == "technical_drawing":
             self.p_type.setText("Technical Drawing")
             self.p_parent.setText(par["name"] if par else "—")
-            options = sel.get("options", {})
-            sections = _drawing_sections(options)
-            sheet = _drawing_sheet(options)
-            self.p_extra.setText(
-                f"{sheet['name']} {sheet['orientation']} · "
-                f"{len(options.get('dimensions', []))} added measurement(s)" +
-                (f" · sections {', '.join(s['letter'] + '-' + s['letter'] for s in sections)}"
-                 if sections else ""))
+            sheets = drawing_sheet_options(sel.get("options", {}))
+            if len(sheets) == 1:
+                options = sheets[0]
+                sections = _drawing_sections(options)
+                sheet = _drawing_sheet(options)
+                self.p_extra.setText(
+                    f"{sheet['name']} {sheet['orientation']} · "
+                    f"{len(options.get('dimensions', []))} added measurement(s)" +
+                    (f" · sections {', '.join(s['letter'] + '-' + s['letter'] for s in sections)}"
+                     if sections else ""))
+            else:
+                self.p_extra.setText(
+                    f"{len(sheets)} sheets · " +
+                    ", ".join(_drawing_sheet(options)["name"] for options in sheets) + " · " +
+                    f"{sum(len(options.get('dimensions', [])) for options in sheets)} "
+                    "added measurement(s)")
         else:
             gear = sel.get("gear_parameters")
             gear_type_name = (f"Planetary {gear.get('planetary_role', 'member').lower()}"
@@ -29896,72 +32313,12 @@ class MainWindow(QMainWindow):
         for object_index, od in enumerate(data["objects"]):
             par = objs[od["parent"]] if od.get("parent") is not None else None
             if od["type"] == "technical_drawing":
-                if par is None or par.get("type") != "extrusion":
-                    raise ValueError(f"technical drawing {od['name']} must belong to an extrusion")
-                options = copy.deepcopy(od.get("options", {}))
-                if not isinstance(options, dict):
-                    raise ValueError(f"invalid drawing settings for {od['name']}")
-                rotation = [float(value) for value in options.get("rotation", (0, 0, 0))]
-                cut_offset = float(options.get("cut_offset", 0.0))
-                dimensions = options.get("dimensions", [])
-                placements = options.get("view_placements", [])
-                if len(rotation) != 3 or not np.isfinite(rotation).all() or \
-                        not math.isfinite(cut_offset) or not isinstance(dimensions, list) or \
-                        not isinstance(placements, list):
-                    raise ValueError(f"invalid drawing settings for {od['name']}")
-                options["rotation"] = [int(round(value / 90.0) * 90) % 360 for value in rotation]
-                options["cut_offset"] = cut_offset
-                options["view_scale"] = min(3.0, max(0.1, float(options.get("view_scale", 1.0))))
-                ratio = options.get("scale_ratio")
-                options["scale_ratio"] = float(ratio) if ratio is not None and \
-                    math.isfinite(float(ratio)) and float(ratio) > 0 else None
-                if options.get("projection") not in ("first", "third"):
-                    options.pop("projection", None)
-                for key in ("title", "number", "tolerance"):
-                    if key in options:
-                        options[key] = str(options[key])[:200]
-                options["section_view"] = min(2, max(0, int(options.get("section_view", 0))))
-                # cut sections A-A, B-B, … (older files: one section from section / cut_offset)
-                options["sections"] = _drawing_sections(options)
-                for key in ("section", "section_view", "cut_offset"):
-                    options.pop(key, None)
-                valid_names = {"front", "top", "right", "left", "isometric", "section"} | \
-                    {f"section-{item['letter']}" for item in options["sections"]}
-                options["view_placements"] = []
-                for item in placements:
-                    if not isinstance(item, dict) or item.get("name") not in valid_names:
-                        continue
-                    x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
-                    if math.isfinite(x) and math.isfinite(y):
-                        options["view_placements"].append(
-                            {"name": item["name"], "x": x, "y": y,
-                             "hidden_lines": bool(item.get("hidden_lines", True))})
-                options["dimensions"] = []
-                for item in dimensions[:50]:
-                    if not isinstance(item, dict):
-                        continue
-                    value = float(item.get("value", 0.0))
-                    if not math.isfinite(value):
-                        continue
-                    dimension = {"label": str(item.get("label", "Measurement"))[:80],
-                                 "value": value}
-                    kind = item.get("type")
-                    if kind in ("length", "radius", "diameter", "angle"):
-                        dimension["type"] = kind
-                    if item.get("view") in valid_names:
-                        raw_points = item.get("points")
-                        if raw_points is None and isinstance(item.get("a"), (list, tuple)) and \
-                                isinstance(item.get("b"), (list, tuple)):
-                            raw_points = [item["a"], item["b"]]
-                        if isinstance(raw_points, list) and len(raw_points) in (2, 3) and \
-                                all(isinstance(point, (list, tuple)) and len(point) == 2
-                                    for point in raw_points):
-                            points = [[float(v) for v in point] for point in raw_points]
-                            if np.isfinite(points).all():
-                                dimension.update(view=item["view"], points=points)
-                                if len(points) == 2:
-                                    dimension.update(a=points[0], b=points[1])
-                    options["dimensions"].append(dimension)
+                if par is not None and par.get("type") not in ("extrusion", "imported"):
+                    raise ValueError(f"technical drawing {od['name']} must belong to a solid")
+                try:
+                    options = _validated_drawing_options(od.get("options", {}))
+                except (TypeError, ValueError) as ex:
+                    raise ValueError(f"invalid drawing settings for {od['name']}: {ex}") from ex
                 e = {"type": "technical_drawing", "name": od["name"], "parent": par,
                      "options": options, "visible": od.get("visible", True), "tree_item": None}
             elif od["type"] == "sketch":
@@ -30292,7 +32649,25 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _drawing_options_for_storage(options):
-        return _json_safe_value({key: value for key, value in options.items() if key != "logo"})
+        """Drawing options as saved: JSON values; of the imported models and graphics only those a
+        sheet still uses (they are JSON lists already and are not converted again)."""
+        stored = _json_safe_value({key: value for key, value in options.items()
+                                   if key not in ("logo", "models", "graphics") and
+                                   not str(key).startswith("_")})
+        sheets = stored.get("sheets") or [stored]
+        used_models = {(sheet.get("source") or {}).get("id") for sheet in sheets
+                       if (sheet.get("source") or {}).get("kind") == "model"}
+        used_graphics = {_graphic_id(record.get("name")) for sheet in sheets
+                         for record in sheet.get("view_placements") or []}
+        models = {key: value for key, value in (options.get("models") or {}).items()
+                  if key in used_models}
+        graphics = {key: value for key, value in (options.get("graphics") or {}).items()
+                    if key in used_graphics}
+        if models:
+            stored["models"] = models
+        if graphics:
+            stored["graphics"] = graphics
+        return stored
 
     def _open_assembly(self):
         dialog = self._assembly_dialog
@@ -30333,31 +32708,26 @@ class MainWindow(QMainWindow):
         if selected is not None and selected.get("type") == "technical_drawing":
             self._export_technical_drawing(selected)
             return
-        sources = [entry for entry in self.state.get("objects", [])
-                   if entry.get("type") == "extrusion" and not entry.get("cut") and
-                   not entry.get("preview") and entry.get("solid")]
-        if not sources:
-            QMessageBox.warning(self, "No extrusion", "Create an extrusion before making a drawing.")
-            return
-        initial_source = next((entry for entry in sources if entry is selected), sources[0])
+        # the drawing starts with the selected solid, or with an empty sheet when no solid is
+        # selected (a model is then chosen or imported in the editor; each sheet has its own)
+        sources = self._drawing_sources()
+        initial_source = next((entry for entry in sources if entry is selected), None)
         project_name = os.path.splitext(os.path.basename(self._file or ""))[0]
         self._begin_operation_progress("Opening Technical Drawing...")
         try:
             self._update_operation_progress(None, "Preparing drawing mesh and preview...")
             dialog = TechnicalDrawingDialog(
-                self, project_name, _drawing_source_mesh(initial_source, self.state["objects"]),
-                source_entries=sources, source_entry=initial_source,
+                self, project_name, None, source_entries=sources, source_entry=initial_source,
                 mesh_for=lambda source: _drawing_source_mesh(source, self.state["objects"]))
         finally:
             self._end_operation_progress()
         if dialog.exec_() != QDialog.Accepted:
             return
         source = dialog.source_entry()
-        if source is None:
-            return
-        siblings = [entry for entry in self.state["objects"]
-                    if entry.get("type") == "technical_drawing" and entry.get("parent") is source]
-        name = f"Technical Drawing {len(siblings) + 1}"
+        taken = {entry.get("name") for entry in self.state["objects"]
+                 if entry.get("type") == "technical_drawing"}
+        name = next(f"Technical Drawing {number}" for number in range(1, len(taken) + 2)
+                    if f"Technical Drawing {number}" not in taken)
         drawing = {"type": "technical_drawing", "name": name, "parent": source,
                    "visible": True,
                    "options": self._drawing_options_for_storage(dialog.drawing_options())}
@@ -30366,30 +32736,60 @@ class MainWindow(QMainWindow):
         self._rebuild_tree()
         self._mark_dirty()
         self.view3d.update()
-        self._st(f"Created {name} under {source['name']}")
+        self._st(f"Created {name}" + (f" under {source['name']}" if source is not None else ""))
+
+    def _drawing_sources(self):
+        """Solids a drawing sheet can show: extrusions (not cut tools) and imported models."""
+        return [entry for entry in self.state.get("objects", [])
+                if entry.get("type") in ("extrusion", "imported") and not entry.get("cut") and
+                not entry.get("preview") and entry.get("solid") and entry["solid"][1]]
+
+    def _drawing_jobs(self, entry, options):
+        """(mesh, complete options) of every sheet of a stored drawing, as exported."""
+        sources = self._drawing_sources()
+        models = options.get("models") or {}
+        jobs = []
+        for sheet in drawing_sheet_options(options):
+            source = sheet["source"] if "source" in sheet else \
+                TechnicalDrawingDialog._source_of_entry(entry.get("parent"))   # older drawings
+            mesh = None
+            if source and source.get("kind") == "project":
+                solid = next((item for item in sources if item.get("name") == source.get("name")),
+                             None)
+                if solid is not None:
+                    mesh = _drawing_source_mesh(solid, self.state["objects"])
+            elif source and source.get("kind") == "model":
+                model = models.get(source.get("id"))
+                if model:
+                    mesh = (model["vertices"], model["triangles"])
+            jobs.append((mesh, sheet))
+        return jobs
+
+    @staticmethod
+    def _drawing_options_copy(options):
+        """Copy of stored drawing options for the editor; the imported models and graphics (large,
+        never changed in place) are shared."""
+        return {key: value if key in ("models", "graphics") else copy.deepcopy(value)
+                for key, value in options.items()}
 
     def _export_technical_drawing(self, entry):
         if self._busy():
             return
         if entry is None or entry.get("type") != "technical_drawing":
             return
-        parent = entry.get("parent")
-        if parent is None or parent.get("type") != "extrusion" or not parent.get("solid"):
-            QMessageBox.warning(self, "Drawing unavailable", "The source extrusion is unavailable.")
-            return
         path, extension = _ask_drawing_export_path(self)
         if not path:
             return
-        options = copy.deepcopy(entry.get("options", {}))
+        options = self._drawing_options_copy(entry.get("options", {}))
         logo_path = options.get("logo_path", "")
         options["logo"] = QPixmap(logo_path) if logo_path and os.path.isfile(logo_path) else QPixmap()
         self._begin_operation_progress(f"Exporting {os.path.basename(path)}...")
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            self._update_operation_progress(None, "Preparing drawing mesh...")
-            mesh = _drawing_source_mesh(parent, self.state["objects"])
+            self._update_operation_progress(None, "Preparing drawing meshes...")
+            jobs = self._drawing_jobs(entry, options)
             self._update_operation_progress(None, "Writing drawing...")
-            write_technical_drawing(path, extension, mesh, options)
+            written = write_technical_drawing_sheets(path, extension, jobs)
         except (OSError, ValueError, RuntimeError) as ex:
             QMessageBox.critical(self, "Drawing export failed", str(ex))
             self._st(f"Drawing export failed: {ex}")
@@ -30397,7 +32797,8 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self._end_operation_progress()
-        self._st(f"Technical drawing → {path}")
+        self._st(f"Technical drawing → {path}" if len(written) == 1 else
+                 f"Technical drawing → {len(written)} files ({', '.join(map(os.path.basename, written))})")
 
     @staticmethod
     def _write_technical_drawing_svg(path, mesh, options):

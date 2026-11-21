@@ -252,7 +252,17 @@ Workflow:
     when the target part moves, Apply restores it, unticking releases it.
     A part whose source changed is marked (outdated); Update Selected / Update All re-read the
     sources and keep the placement. Save / Open handle .asby files and Export writes the complete
-    assembly as STEP or STL. The assembly is also saved in the project file (key "assembly"),
+    assembly as STEP or STL. Measure and Cut Surface open their own tab next to the Alignments on
+    the right while they are on. Cut Surface (toolbar / Tools menu) cuts the whole assembly at a
+    movable plane (Move / Rotate fields or the coloured arrows and rings in the view, "Keep the
+    other side", "Show the cut plane"); the cut faces are hatched and Export
+    then writes only the remaining part. The cut is saved with the assembly (key "section").
+    Apply makes it permanent for all cut objects or the selected one (Cancel closes the cut): the part on the
+    arrow's side is removed, or with "Split the objects" each object becomes "<name> part 1" /
+    "<name> part 2" at the same place, placeable on its own. Applied cuts are kept per
+    component in local coordinates (key "cuts") and re-applied by Update; Undo takes them back.
+    Applied cut faces stay hatched (body faces keep their local "section" frame; the view moves
+    it with the part, assembly_world_faces). The assembly is also saved in the project file (key "assembly"),
     outside the undo history. The menu bar (File / Edit / View / Tools) holds the toolbar
     actions (Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+Z / Ctrl+Y / Ctrl+W). Closing the window
     with unsaved changes asks Save / Discard (back to the last saved state) / Cancel; when the
@@ -261,8 +271,10 @@ Workflow:
      then click Cut Surface. A grey transparent plane, shown only while it is edited, is placed with
      the XYZ move / XYZ rotation fields or by dragging the coloured arrows in the 3-D view (the same
      X, then Y, then Z rotation convention as imported models and the assembly). The extrusion is
-     cut at the plane live: the side the orange arrow points to is hidden ("Keep the other side"
+     cut at the plane live: the side the orange arrow points to is removed ("Keep the other side"
      swaps them) and the cut face is drawn light grey with 45° hatching, as in technical drawings.
+     STEP / STL export
+     (and the assembly) use the cut object; selecting the Cut Surface exports its extrusion.
      OK stores the plane as the top child of that extrusion; it cuts that body and every extrusion
      built on it (descendants), never remove-material tool bodies. Its explorer checkbox switches
      the cut on / off, Edit reopens the placement panel. Several Cut Surfaces are applied one
@@ -291,9 +303,13 @@ Key implementation notes:
     _on_tree_click looks up the real entry via next(o for o in objects if id(o)==eid).
   - Sketch.frame = (origin, u, v, w): sketch x/y axes in 3-D and extrusion direction.
   - Cut Surface entries {type "cut_surface", parent = extrusion, position, rotation, flip, size,
-    visible = cut active} are applied by _apply_cuts as the last body stage (after cuts and
-    chamfer/fillet/thread features): csg_subtract with a half-space box; the new face has
-    face["section"] = plane frame and is drawn shaded + hatched. body["_pre_section"] keeps the
+    split, visible = cut active} are applied by _apply_cuts as the last body stage (after cuts and
+    chamfer/fillet/thread features): clip_mesh_by_plane (csg_subtract with a half-space box as
+    fallback); the new face has face["section"] = plane frame and is drawn shaded + hatched.
+    A splitting one yields several pieces (apply_cut_surfaces): body["solid"] joins them (piece 0
+    first, keeping the face numbers) and body["_pieces"] keeps them with a side key (names of
+    the splitting Cut Surfaces a piece lies behind) for mesh_pieces_keyed;
+    assembly_project_groups makes one assembly component per side key ("source_piece"). body["_pre_section"] keeps the
     mesh before the Cut Surfaces so moving the plane does not redo the earlier stages.
   - Solid entries carry "faces" (top/bottom/side per edge) used for per-face hover
     highlighting, planar-face sketches, and datum surfaces tangent to curved faces.
@@ -350,7 +366,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "1.8b"
+APP_VERSION = "1.9b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -8276,26 +8292,8 @@ class View3D(QGLWidget):
             handle_specs = [(end, tangent, mw.sp_angle_draft,
                              "Draft angle", "°", 1.0)]
         elif getattr(mw, "_cut_panel_active", False) and mw._cut_edit is not None:
-            anchor = np.asarray(mw._cut_edit["position"], float)
-            handle_specs = [(anchor, np.eye(3)[index], mw.sp_cut_position[index],
-                             "Move Cut Surface along " + "XYZ"[index], " mm", 1.0,
-                             None, "axis_" + "xyz"[index]) for index in range(3)]
-            # Rotation arcs. The angles apply X, then Y, then Z, so the world axis each one turns
-            # about is: X -> Rz*Ry*e_x, Y -> Rz*e_y, Z -> e_z.
-            rx, ry, rz = (float(value) for value in mw._cut_edit["rotation"])
-            turn_z = _import_rotation_matrix((0.0, 0.0, rz))
-            turn_zy = turn_z @ _import_rotation_matrix((0.0, ry, 0.0))
-            for index, axis in enumerate((turn_zy[:, 0], turn_z[:, 1], np.array([0.0, 0.0, 1.0]))):
-                axis = _unit(np.asarray(axis, float))
-                # the ring lies in the plane perpendicular to the axis; its angle grows
-                # counter-clockwise about +axis, the way the rotation field grows
-                helper = np.eye(3)[int(np.argmin(np.abs(axis)))]
-                arm = _unit(np.cross(axis, helper))
-                ring = {"center": anchor, "u": arm, "v": np.cross(axis, arm),
-                        "start": 20.0, "stop": 290.0}
-                handle_specs.append((anchor, axis, mw.sp_cut_rotation[index],
-                                     "Rotate Cut Surface around " + "XYZ"[index], "°", 1.0,
-                                     ring, "axis_" + "xyz"[index]))
+            handle_specs = cut_plane_handle_specs(mw._cut_edit, mw.sp_cut_position,
+                                                  mw.sp_cut_rotation)
             handle_specs = self._visible_move_rotate(handle_specs, mw.chk_cut_show_move,
                                                      mw.chk_cut_show_rotate)
         elif getattr(mw, "_surface_panel_active", False) and surface_preview is not None:
@@ -8491,6 +8489,22 @@ class View3D(QGLWidget):
                 handle_specs = [(anchor, axis, control, name, " mm", factor)]
         else:
             return [] if all_handles else None
+        handles = self._handles_from_specs(handle_specs)
+        return handles if all_handles else (handles[0] if handles else None)
+
+    def _handle_drag_options(self, control):
+        """(step, fine-drag modifier, fixed pixels per unit or None) of a handle's field."""
+        mw = self._main_window
+        step = 0.1 if control is mw.sp_thread_length else \
+            1.0 if control in (mw.sp_feat_angle, mw.sp_ring_rotation,
+                               mw.sp_angle_draft, *mw.sp_cut_rotation) else None
+        fine = Qt.ControlModifier if control in (mw.sp_thread_length, mw.sp_angle_draft) else \
+            Qt.ControlModifier | Qt.ShiftModifier
+        return step, fine, (4.0 if control is mw.sp_angle_draft else None)
+
+    def _handles_from_specs(self, handle_specs):
+        """Screen-space drag handles of handle specs (anchor, axis, control, name, unit, factor
+        [, rotation centre or ring dict [, colour]])."""
         handles = []
         for spec in handle_specs:
             if len(spec) > 6 and isinstance(spec[6], dict):
@@ -8521,18 +8535,14 @@ class View3D(QGLWidget):
             upper = np.maximum(start, tip) + 12.0
             shift = np.maximum(8.0 - lower, 0.0) + np.minimum(
                 np.array([self.width() - 8.0, self.height() - 8.0]) - upper, 0.0)
+            step, fine_modifier, fixed_pixels = self._handle_drag_options(control)
             handle = {"control": control, "factor": factor, "name": name, "unit": unit,
-                                "step": 0.1 if control is mw.sp_thread_length else
-                                    1.0 if control in (mw.sp_feat_angle, mw.sp_ring_rotation,
-                                                       mw.sp_angle_draft, *mw.sp_cut_rotation) else None,
-                            "fine_modifier": Qt.ControlModifier if control in
-                                (mw.sp_thread_length, mw.sp_angle_draft) else
-                                            Qt.ControlModifier | Qt.ShiftModifier,
-                            "start": start + shift, "tip": tip + shift,
-                            "color": spec[7] if len(spec) > 7 else None,
-                            "direction": screen_direction, "pixels_per_mm": pixels_per_mm}
-            if control is mw.sp_angle_draft:
-                handle["pixels_per_mm"] = 4.0
+                      "step": step, "fine_modifier": fine_modifier,
+                      "start": start + shift, "tip": tip + shift,
+                      "color": spec[7] if len(spec) > 7 else None,
+                      "direction": screen_direction, "pixels_per_mm": pixels_per_mm}
+            if fixed_pixels is not None:
+                handle["pixels_per_mm"] = fixed_pixels
             if len(spec) > 6 and spec[6] is not None:
                 center_screen, center_valid = self._project([spec[6]])
                 if center_valid[0]:
@@ -8552,7 +8562,7 @@ class View3D(QGLWidget):
                                   start=arc_points[0], tip=arc_points[-1], direction=tangent,
                                   pixels_per_mm=radius * math.pi / 180.0)
             handles.append(handle)
-        return handles if all_handles else (handles[0] if handles else None)
+        return handles
 
     @staticmethod
     def _visible_move_rotate(specs, show_move, show_rotate):
@@ -8862,6 +8872,11 @@ class View3D(QGLWidget):
         entry = getattr(mw, "_cut_edit", None) if mw is not None else None
         if entry is None or not getattr(mw, "_cut_panel_active", False):
             return
+        self._draw_cut_plane(entry)
+
+    def _draw_cut_plane(self, entry):
+        """A Cut Surface plane {position, rotation, flip, size}: grey, transparent, with an
+        orange arrow towards the side it removes."""
         origin, u, v, normal = cut_surface_frame(entry["position"], entry["rotation"])
         half = float(entry.get("size", 100.0)) / 2.0
         points = [origin - half*u - half*v, origin + half*u - half*v,
@@ -18050,11 +18065,77 @@ def cut_surface_frame(position, rotation):
     matrix = _import_rotation_matrix(rotation)
     return (np.asarray(position, float), matrix[:, 0], matrix[:, 1], matrix[:, 2])
 
+def cut_plane_handle_specs(entry, position_controls, rotation_controls):
+    """Drag handle specs of a Cut Surface plane {position, rotation}: X / Y / Z move arrows
+    and rotation rings that drive the given fields. The angles apply X, then Y, then Z, so
+    the world axis each ring turns about is X -> Rz*Ry*e_x, Y -> Rz*e_y, Z -> e_z."""
+    anchor = np.asarray(entry["position"], float)
+    specs = [(anchor, np.eye(3)[index], position_controls[index],
+              "Move Cut Surface along " + "XYZ"[index], " mm", 1.0, None, "axis_" + "xyz"[index])
+             for index in range(3)]
+    rx, ry, rz = (float(value) for value in entry["rotation"])
+    turn_z = _import_rotation_matrix((0.0, 0.0, rz))
+    turn_zy = turn_z @ _import_rotation_matrix((0.0, ry, 0.0))
+    for index, axis in enumerate((turn_zy[:, 0], turn_z[:, 1], np.array([0.0, 0.0, 1.0]))):
+        axis = _unit(np.asarray(axis, float))
+        # the ring lies in the plane perpendicular to the axis; its angle grows
+        # counter-clockwise about +axis, the way the rotation field grows
+        helper = np.eye(3)[int(np.argmin(np.abs(axis)))]
+        arm = _unit(np.cross(axis, helper))
+        ring = {"center": anchor, "u": arm, "v": np.cross(axis, arm), "start": 20.0, "stop": 290.0}
+        specs.append((anchor, axis, rotation_controls[index],
+                      "Rotate Cut Surface around " + "XYZ"[index], "°", 1.0, ring,
+                      "axis_" + "xyz"[index]))
+    return specs
+
 def cut_surface_signature(entry):
     """Everything that influences the geometry a Cut Surface produces (cache key)."""
     return json.dumps([[float(x) for x in entry.get("position", (0, 0, 0))],
                        [float(x) for x in entry.get("rotation", (0, 0, 0))],
-                       bool(entry.get("flip"))])
+                       bool(entry.get("flip")), bool(entry.get("split"))])
+
+def join_mesh_pieces(pieces):
+    """One mesh (verts, tris, faces) of several separate meshes: the vertices / triangles are
+    appended and each face's triangle indices shifted. Piece 0 keeps its face numbers."""
+    verts, tris, faces = [], [], []
+    for piece_verts, piece_tris, piece_faces in pieces:
+        vertex_offset, tri_offset = len(verts), len(tris)
+        verts += [tuple(point) for point in piece_verts]
+        tris += [(a + vertex_offset, b + vertex_offset, c + vertex_offset)
+                 for a, b, c in piece_tris]
+        faces += [dict(face, tris=[index + tri_offset for index in face.get("tris", ())])
+                  for face in piece_faces]
+    return verts, tris, faces
+
+def apply_cut_surfaces(mesh, sections, key=()):
+    """The Cut Surfaces applied one after the other to mesh = (verts, tris, faces). A plain
+    Cut Surface removes one side of every piece; one with `split` keeps both sides as separate
+    pieces (the side it would keep first). Returns [(side key, piece)] of the non-empty pieces;
+    the side key names the splitting Cut Surfaces the piece lies on the other side of (empty =
+    the main part). The first piece has the face numbering of the uncut body."""
+    pieces = [(tuple(key), mesh)]
+    for section in sections:
+        result = []
+        for piece_key, piece in pieces:
+            parts = [(piece_key, apply_cut_surface(piece, section))]
+            if section.get("split"):
+                parts.append((tuple(sorted(piece_key + (section.get("name", "cut"),))),
+                              apply_cut_surface(piece, dict(section, flip=not section.get("flip")))))
+            result += [part for part in parts if len(part[1][1])]
+        pieces = result
+    return pieces
+
+def mesh_pieces_keyed(entry):
+    """The separate solids of a body as [(side key, (verts, tris, faces))]: the pieces
+    splitting Cut Surfaces made (see apply_cut_surfaces), otherwise [((), the body)]."""
+    pieces = entry.get("_pieces")      # (the joined vertex list they belong to, keys, pieces)
+    if pieces and pieces[0] is entry["solid"][0]:
+        return list(zip(pieces[1], pieces[2]))
+    return [((), (entry["solid"][0], entry["solid"][1], entry.get("faces", [])))]
+
+def mesh_pieces_of(entry):
+    """The separate solids of a body as [(verts, tris, faces)]."""
+    return [piece for _, piece in mesh_pieces_keyed(entry)]
 
 def _earcut_loops(outer, holes):
     """Earcut of an outer 2-D polygon with holes (any orientation). Returns CCW index triples
@@ -18093,6 +18174,56 @@ def _earcut_loops(outer, holes):
         result.append((a, b, c) if cross > 0 else (a, c, b))
     return result, pts, outer, holes
 
+def _repair_t_junctions(points, tris, tri_face, tolerance, max_passes=500):
+    """Close open seams caused by T-junctions: a triangle edge used only once that has
+    endpoints of other open edges lying on it is split there (the triangle becomes a fan).
+    Returns (tris, tri_face)."""
+    P = np.asarray(points, float)
+    tris = [tuple(t) for t in tris]; tri_face = list(tri_face)
+    for _ in range(max_passes):
+        undirected = {}
+        for index, (a, b, c) in enumerate(tris):
+            for x, y in ((a, b), (b, c), (c, a)):
+                undirected.setdefault((min(x, y), max(x, y)), []).append((index, x, y))
+        open_edges = [uses[0] for uses in undirected.values() if len(uses) % 2]
+        if not open_edges:
+            break
+        open_vertices = np.array(sorted({v for _, x, y in open_edges for v in (x, y)}), np.int64)
+        changed = False
+        for index, a, b in open_edges:
+            start, end = P[a], P[b]
+            span = end - start
+            length2 = float(span @ span)
+            if length2 < 1e-30:
+                continue
+            candidates = open_vertices[(open_vertices != a) & (open_vertices != b)]
+            if not len(candidates):
+                continue
+            offset = P[candidates] - start
+            along = offset @ span / length2
+            distance = np.linalg.norm(offset - along[:, None] * span, axis=1)
+            inside = (along > 1e-9) & (along < 1 - 1e-9) & (distance <= tolerance)
+            if not inside.any():
+                continue
+            order = np.argsort(along[inside])
+            chain = [a] + candidates[inside][order].tolist() + [b]
+            tri = tris[index]
+            apex = next(v for v in tri if v not in (a, b))
+            face = tri_face[index]
+            fan = [(chain[k], chain[k + 1], apex) for k in range(len(chain) - 1)]
+            tris[index] = fan[0]
+            tris += fan[1:]; tri_face += [face] * (len(fan) - 1)
+            changed = True
+            break
+        if not changed:
+            break
+    return tris, tri_face
+
+# the 27 grid cells around a cell (the own cell first)
+_NEIGHBOUR_CELLS = [np.array(offset, np.int64) for offset in
+                    sorted(((i, j, k) for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)),
+                           key=lambda offset: sum(map(abs, offset)))]
+
 def clip_mesh_by_plane(mesh, origin, normal):
     """Keep the part of a triangle mesh on the -normal side of the plane (origin, normal) and
     close it with a planar cap face. A single linear pass instead of a general boolean.
@@ -18127,12 +18258,19 @@ def clip_mesh_by_plane(mesh, origin, normal):
         if index is None:
             t = d[a] / (d[a] - d[b])
             point = V[a] + (V[b] - V[a]) * t
-            # cut points at the same place (duplicate vertices, T-junctions) are one point
-            spot = tuple(np.round(point / quantum).astype(np.int64).tolist())
-            index = point_at.get(spot)
+            # cut points at the same place (duplicate vertices, T-junctions) are one point; the
+            # neighbouring grid cells count too (two almost equal points can round apart)
+            cell = np.round(point / quantum).astype(np.int64)
+            index = None
+            for offset in _NEIGHBOUR_CELLS:
+                candidate = point_at.get(tuple((cell + offset).tolist()))
+                if candidate is not None and \
+                        float(np.abs(new_points[candidate - base] - point).max()) <= quantum:
+                    index = candidate
+                    break
             if index is None:
                 new_points.append(point)
-                index = point_at[spot] = base + len(new_points) - 1
+                index = point_at[tuple(cell.tolist())] = base + len(new_points) - 1
             edge_point[key] = index
         return index
 
@@ -18246,6 +18384,18 @@ def clip_mesh_by_plane(mesh, origin, normal):
     cap_index = len(faces)
     all_tris = out_tris + oriented_cap
     all_face = out_face + [cap_index] * len(oriented_cap)
+    # cut points merged with each other (a vertex on the plane) leave triangles like (p, c, p):
+    # they have no area and their two real edges cancel, so dropping them keeps the mesh closed
+    # (and STEP export accepts it)
+    keep = [len({a, b, c}) == 3 for a, b, c in all_tris]
+    if not all(keep):
+        all_tris = [t for t, ok in zip(all_tris, keep) if ok]
+        all_face = [fi for fi, ok in zip(all_face, keep) if ok]
+    # an earlier cut can leave nearly equal points on this cut's outline; open seams that
+    # remain are T-junctions: split the triangle edge at the points lying on it
+    if not _mesh_is_closed(all_tris):
+        all_tris, all_face = _repair_t_junctions(all_points, all_tris, all_face,
+                                                 1e-5 * span + 1e-9)
     # drop vertices that are no longer used and renumber
     flat_ids = np.asarray(all_tris, np.int64).reshape(-1, 3)
     used_ids, inverse = np.unique(flat_ids.ravel(), return_inverse=True)
@@ -18261,11 +18411,93 @@ def apply_cut_surface(mesh, entry):
     """Hide the part of mesh = (verts, tris, faces) lying on the side the Cut Surface's normal
     points to (the opposite side with `flip`). The remaining part is closed by a section face
     (kind "section end", `section` = the plane frame) that is drawn shaded."""
-    verts, tris, faces = mesh
-    if not len(tris): return mesh
     origin, u, v, normal = cut_surface_frame(entry.get("position", (0, 0, 0)),
                                              entry.get("rotation", (0, 0, 0)))
     if entry.get("flip"): normal = -normal
+    return cut_mesh_by_plane(mesh, origin, normal, u, v)
+
+def _mesh_component_labels(T):
+    """Label (smallest vertex index) of the connected part each triangle of T (m, 3) belongs
+    to; triangles are connected through shared vertex indices."""
+    labels = np.arange(int(T.max()) + 1)
+    while True:
+        tri_label = labels[T].min(axis=1)
+        new = labels.copy()
+        np.minimum.at(new, T.ravel(), np.repeat(tri_label, 3))
+        new = new[new]
+        if np.array_equal(new, labels):
+            break
+        labels = new
+    return labels[T[:, 0]]
+
+def cut_mesh_by_plane(mesh, origin, normal, u=None, v=None):
+    """Remove the part of mesh = (verts, tris, faces) on the +normal side of the plane through
+    origin and close the rest with a section face (`section` = (origin, u, v, normal)).
+    A mesh of several separate solids (e.g. an imported STEP whose solids touch) is cut solid by
+    solid: cut points of touching solids would otherwise merge and break the cut outline. The
+    face numbering stays; all section faces become one face at the end."""
+    verts, tris, faces = mesh
+    if not len(tris): return mesh
+    origin = np.asarray(origin, float)
+    normal = _unit(np.asarray(normal, float))
+    if u is None or v is None:
+        helper = np.eye(3)[int(np.argmin(np.abs(normal)))]
+        u = _unit(np.cross(helper, normal)); v = np.cross(normal, u)
+    T = np.asarray(tris, np.int64).reshape(-1, 3)
+    distance = (np.asarray(verts, float).reshape(-1, 3)[np.unique(T.ravel())] - origin) @ normal
+    if float(distance.max()) <= 1e-6:             # the plane does not touch the body: unchanged
+        return mesh
+    if float(distance.min()) >= -1e-6:            # everything lies on the removed side
+        return [], [], [dict(face, tris=[]) for face in faces]
+    component = _mesh_component_labels(T)
+    groups = np.unique(component)
+    if len(groups) > 1:
+        tri_face = np.full(len(T), -1, np.int64)
+        for fi, face in enumerate(faces):
+            if face.get("tris"):
+                tri_face[np.asarray(face["tris"], np.int64)] = fi
+        out_verts, out_tris, face_tris, cap_tris = [], [], [[] for _ in faces], []
+        section = None
+        for label in groups.tolist():
+            rows = np.flatnonzero(component == label)
+            sub_faces = [dict(face, tris=[]) for face in faces]
+            for new_index, row in enumerate(rows.tolist()):
+                if tri_face[row] >= 0:
+                    sub_faces[tri_face[row]]["tris"].append(new_index)
+            part = _cut_mesh_by_plane_single((verts, T[rows].tolist(), sub_faces),
+                                             origin, normal, u, v)
+            part_verts, part_tris, part_faces = part
+            if not len(part_tris):
+                continue
+            if len(part_faces) not in (len(faces), len(faces) + 1):
+                return _cut_mesh_by_plane_single(mesh, origin, normal, u, v)   # (fallback)
+            vertex_offset, tri_offset = len(out_verts), len(out_tris)
+            out_verts += [tuple(point) for point in part_verts]
+            out_tris += [(a + vertex_offset, b + vertex_offset, c + vertex_offset)
+                         for a, b, c in part_tris]
+            for fi in range(len(faces)):
+                face_tris[fi] += [index + tri_offset for index in part_faces[fi].get("tris", ())]
+            if len(part_faces) == len(faces) + 1:
+                cap_tris += [index + tri_offset for index in part_faces[-1].get("tris", ())]
+                section = part_faces[-1].get("section", section)
+        if not out_tris:
+            return [], [], [dict(face, tris=[]) for face in faces]
+        # drop the vertices no part uses (each part carried the whole vertex list)
+        flat = np.asarray(out_tris, np.int64).reshape(-1, 3)
+        used, inverse = np.unique(flat.ravel(), return_inverse=True)
+        out_tris = [tuple(t) for t in inverse.reshape(-1, 3).tolist()]
+        out_verts = [out_verts[i] for i in used.tolist()]
+        out_faces = [dict(face, tris=face_tris[fi]) for fi, face in enumerate(faces)]
+        if cap_tris:
+            out_faces.append({"kind": SECTION_FACE_LABEL + "end", "planar": False,
+                              "tris": cap_tris, "section": section})
+        return out_verts, out_tris, out_faces
+    return _cut_mesh_by_plane_single(mesh, origin, normal, u, v)
+
+def _cut_mesh_by_plane_single(mesh, origin, normal, u, v):
+    """cut_mesh_by_plane for one connected solid."""
+    verts, tris, faces = mesh
+    if not len(tris): return mesh
     V = np.asarray(verts, float).reshape(-1, 3)
     V = V[np.unique(np.asarray(tris, np.int64).ravel())]   # booleans may leave unused vertices
     distance = (V - origin) @ normal
@@ -18303,43 +18535,87 @@ def _nice_spacing(value):
             return step * 10.0 ** exponent
     return 10.0 ** (exponent + 1)
 
+def _face_regions(tri_ids):
+    """Connected parts of a face: lists of row indices into tri_ids (m, 3) whose triangles
+    share vertices (the separate wall / slab strips of one cut, for example)."""
+    parent = {}
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for a, b, c in tri_ids.tolist():
+        ra = find(a)
+        for other in (b, c):
+            ro = find(other)
+            if ro != ra:
+                parent[ro] = ra
+    groups = {}
+    for row, a in enumerate(tri_ids[:, 0].tolist()):
+        groups.setdefault(find(a), []).append(row)
+    return list(groups.values())
+
 def section_hatch_lines(verts, tris, face_tris, frame, angle=45.0, lines_across=26):
     """Hatching of a planar section face (parallel lines at 45 deg, as in technical drawings).
     Returns a float32 array (2n, 3) of line-segment end points. The lines are anchored in world
-    space, so the pattern stays put while the plane is dragged within itself."""
+    space, so the pattern stays put while the plane is dragged within itself. Each separate
+    region of the face (e.g. the strips a cut leaves of several walls) is hatched on its own:
+    at 45 degrees to its long axis when it is elongated (measured from the plane's u axis the
+    lines could run along a thin strip and vanish in its edges), and dense enough that a narrow
+    strip still gets several lines across it."""
     face_tris = np.asarray(face_tris, dtype=int)
     if not len(face_tris): return np.empty((0, 3), np.float32)
     origin, u, v, normal = (np.asarray(a, float) for a in frame)
-    a = math.radians(angle)
-    along = math.cos(a) * u + math.sin(a) * v
-    across = -math.sin(a) * u + math.cos(a) * v
-    P = np.asarray(verts, float)[np.asarray(tris, int).reshape(-1, 3)[face_tris]]     # (m, 3, 3)
-    x, y = P @ along, P @ across
-    extent = max(float(np.ptp(P @ u)), float(np.ptp(P @ v)), 1e-6)
-    spacing = _nice_spacing(extent / lines_across)
-    y_low, y_high = y.min(axis=1), y.max(axis=1)
-    first = math.ceil(float(y_low.min()) / spacing)
-    last = math.floor(float(y_high.max()) / spacing)
-    # lifted a hair off the face (towards the viewer) so the lines never sink into the fill
-    plane_shift = normal * (float(origin @ normal) + 0.05 * spacing)
+    tri_ids = np.asarray(tris, int).reshape(-1, 3)[face_tris]
+    P_all = np.asarray(verts, float)[tri_ids]                                  # (m, 3, 3)
+    flat_all = P_all.reshape(-1, 3)
+    extent_all = max(float(np.ptp(flat_all @ u)), float(np.ptp(flat_all @ v)), 1e-6)
+    face_spacing = _nice_spacing(extent_all / lines_across)      # one spacing for the face
     out = []
-    for k in range(first, last + 1):
-        c = (k + 0.0137) * spacing                  # nudged: never exactly through a vertex
-        hit = (y_low < c) & (y_high > c)
-        if not hit.any(): continue
-        xs, ys = x[hit], y[hit]
-        crossings = []
-        for i, j in ((0, 1), (1, 2), (2, 0)):
-            dy = ys[:, j] - ys[:, i]
-            valid = (ys[:, i] - c) * (ys[:, j] - c) < 0
-            t = np.where(valid, (c - ys[:, i]) / np.where(dy == 0, 1.0, dy), 0.0)
-            crossings.append(np.where(valid, xs[:, i] + t * (xs[:, j] - xs[:, i]), np.nan))
-        crossings = np.stack(crossings, axis=1)
-        low, high = np.nanmin(crossings, axis=1), np.nanmax(crossings, axis=1)
-        for x0, x1 in zip(low.tolist(), high.tolist()):
-            if x1 - x0 < 1e-9: continue          # sliver triangle: no visible segment
-            out.append(x0 * along + c * across + plane_shift)
-            out.append(x1 * along + c * across + plane_shift)
+    for rows in _face_regions(tri_ids):
+        P = P_all[rows]
+        flat = np.column_stack([P.reshape(-1, 3) @ u, P.reshape(-1, 3) @ v])
+        base = 0.0                     # compact regions keep the plane's u axis (steady)
+        if len(flat) >= 3:
+            eigenvalues, eigenvectors = np.linalg.eigh(np.cov(flat.T))
+            if eigenvalues[1] > 4.0 * max(eigenvalues[0], 1e-12):     # clearly elongated
+                major = eigenvectors[:, 1]
+                base = math.atan2(float(major[1]), float(major[0]))
+        axis_u = math.cos(base) * u + math.sin(base) * v
+        axis_v = -math.sin(base) * u + math.cos(base) * v
+        length = max(float(np.ptp(P.reshape(-1, 3) @ axis_u)), 1e-6)
+        width = max(float(np.ptp(P.reshape(-1, 3) @ axis_v)), 1e-6)
+        spacing = face_spacing
+        # a narrow strip (a cut through a thin wall / floor) gets closer lines, but not so close
+        # that they merge into a grey band: about 1.5 lines per strip width
+        if min(length, width) / 1.5 < spacing:
+            spacing = _nice_spacing(max(min(length, width) / 1.5, max(length, width) / 120.0))
+        a = base + math.radians(angle)
+        along = math.cos(a) * u + math.sin(a) * v
+        across = -math.sin(a) * u + math.cos(a) * v
+        x, y = P @ along, P @ across
+        y_low, y_high = y.min(axis=1), y.max(axis=1)
+        first = math.ceil(float(y_low.min()) / spacing)
+        last = math.floor(float(y_high.max()) / spacing)
+        # lifted a hair off the face (towards the viewer) so the lines never sink into the fill
+        plane_shift = normal * (float(origin @ normal) + 0.05 * spacing)
+        for k in range(first, last + 1):
+            c = (k + 0.0137) * spacing                  # nudged: never exactly through a vertex
+            hit = (y_low < c) & (y_high > c)
+            if not hit.any(): continue
+            xs, ys = x[hit], y[hit]
+            crossings = []
+            for i, j in ((0, 1), (1, 2), (2, 0)):
+                dy = ys[:, j] - ys[:, i]
+                valid = (ys[:, i] - c) * (ys[:, j] - c) < 0
+                t = np.where(valid, (c - ys[:, i]) / np.where(dy == 0, 1.0, dy), 0.0)
+                crossings.append(np.where(valid, xs[:, i] + t * (xs[:, j] - xs[:, i]), np.nan))
+            crossings = np.stack(crossings, axis=1)
+            low, high = np.nanmin(crossings, axis=1), np.nanmax(crossings, axis=1)
+            for x0, x1 in zip(low.tolist(), high.tolist()):
+                if x1 - x0 < 1e-9: continue          # sliver triangle: no visible segment
+                out.append(x0 * along + c * across + plane_shift)
+                out.append(x1 * along + c * across + plane_shift)
     return np.asarray(out, np.float32).reshape(-1, 3)
 
 def profile_samples(loops, n_grid=9, max_edge_pts=96):
@@ -23162,18 +23438,67 @@ def assembly_part_entries(root, objects):
         seen.add(id(entry)); parts.append(entry)
     return parts
 
+def _assembly_mesh_signature(vertices, triangles):
+    V = np.asarray(vertices, float).reshape(-1, 3)
+    return [len(V), len(triangles), round(float(V.sum()), 6), round(float((V*V).sum()), 6)]
+
 def assembly_signature(parts):
     """Cheap fingerprint of the meshes of a source; changes when the geometry changes."""
-    out = []
+    return [_assembly_mesh_signature(*part["solid"][:2]) for part in parts]
+
+def assembly_project_groups(root, objects):
+    """The assembly objects a parent solid gives: [{"key", "bodies", "signature"}]. Normally
+    one (key ()); a splitting Cut Surface makes the parts on its far side separate objects
+    (key = the names of the Cut Surfaces they lie behind), so they can be placed on their own.
+    The main part (key ()) comes first."""
+    parts = assembly_part_entries(root, objects)
+    fused = {id(source["entry"]) for part in parts if part.get("source_format") == "bridge"
+             for source in part.get("bridge_sources", []) if source.get("entry") is not None}
+    groups = {}
     for part in parts:
-        V = np.asarray(part["solid"][0], float).reshape(-1, 3)
-        out.append([len(V), len(part["solid"][1]),
-                    round(float(V.sum()), 6), round(float((V*V).sum()), 6)])
-    return out
+        for key, (vertices, triangles, faces) in mesh_pieces_keyed(part):
+            group = groups.setdefault(tuple(key), {"key": tuple(key), "bodies": [],
+                                                    "signature": []})
+            group["bodies"].append(assembly_body(
+                part["name"], vertices, triangles, faces, part.get("color", DEFAULT_SOLID_COLOR),
+                part.get("opacity", 1.0), id(part) in fused, part.get("material")))
+            group["signature"].append(_assembly_mesh_signature(vertices, triangles))
+    return [groups[key] for key in sorted(groups, key=lambda key: (len(key), key))]
+
+def assembly_group_name(root_name, groups, group):
+    """"name" for the only object of a parent solid, "name part N" for split parts."""
+    if len(groups) == 1:
+        return root_name
+    return f"{root_name} part {next(i for i, g in enumerate(groups, 1) if g is group)}"
 
 def _assembly_faces(faces):
-    return [{"planar": bool(face.get("planar", False)),
-             "tris": [int(index) for index in face.get("tris", ())]} for face in faces or []]
+    """Faces of an assembly snapshot: planar flag, triangles and - for faces a cut made - the
+    cut plane frame (origin, u, v, normal) as lists in the body's own coordinates (hatching)."""
+    out = []
+    for face in faces or []:
+        record = {"planar": bool(face.get("planar", False)),
+                  "tris": [int(index) for index in face.get("tris", ())]}
+        if face.get("section") is not None:
+            record["section"] = [[float(x) for x in vector] for vector in face["section"]]
+        out.append(record)
+    return out
+
+def assembly_world_faces(component, faces, offset=None):
+    """The faces with their cut plane frames moved / rotated like the component (world)."""
+    if not any(face.get("section") is not None for face in faces):
+        return faces
+    rotation = _import_rotation_matrix(component["rotation"])
+    pivot = np.asarray(component["pivot"], float)
+    shift = np.asarray(component["position"], float) + \
+        (np.asarray(offset, float) if offset is not None else 0.0)
+    out = []
+    for face in faces:
+        if face.get("section") is not None:
+            origin, u, v, normal = (np.asarray(vector, float) for vector in face["section"])
+            face = dict(face, section=((origin - pivot) @ rotation.T + pivot + shift,
+                                       rotation @ u, rotation @ v, rotation @ normal))
+        out.append(face)
+    return out
 
 def assembly_body(name, vertices, triangles, faces, color=DEFAULT_SOLID_COLOR, opacity=1.0,
                   fused=False, material=None):
@@ -23190,11 +23515,14 @@ def assembly_body_from_entry(entry, fused=False):
                          entry.get("material"))
 
 def assembly_bodies_from_parts(parts):
-    """Snapshots of the parts; solids already contained in a Bridge are flagged so they are
-    not exported twice."""
+    """Snapshots of the parts (all pieces); solids already contained in a Bridge are flagged
+    so they are not exported twice."""
     fused = {id(source["entry"]) for part in parts if part.get("source_format") == "bridge"
              for source in part.get("bridge_sources", []) if source.get("entry") is not None}
-    return [assembly_body_from_entry(part, id(part) in fused) for part in parts]
+    return [assembly_body(part["name"], vertices, triangles, faces,
+                          part.get("color", DEFAULT_SOLID_COLOR), part.get("opacity", 1.0),
+                          id(part) in fused, part.get("material"))
+            for part in parts for vertices, triangles, faces in mesh_pieces_of(part)]
 
 def assembly_world_vertices(component, vertices):
     """Rotation about the component pivot, then translation by its position."""
@@ -23275,11 +23603,31 @@ def assembly_component(assembly, name):
 def assembly_find_source(name, objects):
     return next((o for o in objects if o.get("name") == name and _assembly_is_solid(o)), None)
 
+def assembly_add_split_components(assembly, first, groups, make):
+    """Components for split parts: placed exactly like `first` (same position, rotation and
+    pivot), so the parts still fit together. make(group) -> (name, bodies, fields)."""
+    added = []
+    for group in groups:
+        name, bodies, fields = make(group)
+        component = assembly_add_component(assembly, name, first["kind"], bodies, **fields)
+        for key in ("position", "rotation", "pivot"):
+            component[key] = list(first[key])
+        added.append(component)
+    return added
+
+def assembly_add_project_components(assembly, root, objects):
+    """The components of a parent solid: one, or one per split part (assembly_project_groups)."""
+    groups = assembly_project_groups(root, objects)
+    def make(group):
+        return (assembly_group_name(root["name"], groups, group), group["bodies"],
+                {"source_name": root["name"], "source_piece": list(group["key"]),
+                 "signature": group["signature"]})
+    name, bodies, fields = make(groups[0])
+    first = assembly_add_component(assembly, name, "project", bodies, **fields)
+    return [first] + assembly_add_split_components(assembly, first, groups[1:], make)
+
 def assembly_add_project_component(assembly, root, objects):
-    parts = assembly_part_entries(root, objects)
-    return assembly_add_component(
-        assembly, root["name"], "project", assembly_bodies_from_parts(parts),
-        source_name=root["name"], signature=assembly_signature(parts))
+    return assembly_add_project_components(assembly, root, objects)[0]
 
 def assembly_file_stamp(path):
     stat = os.stat(path)
@@ -23342,8 +23690,17 @@ def assembly_add_file_components(assembly, path, window=None, progress=None):
         specs = window._read_project_solids(path)
         if not specs:
             raise ValueError("The project contains no parent solids")
-        return [assembly_add_component(assembly, spec["name"], "file", spec["bodies"], path=path,
-                                       file_stamp=stamp, file_root=spec["name"]) for spec in specs]
+        added = []
+        for spec in specs:
+            component = assembly_add_component(
+                assembly, spec["name"], "file", spec["bodies"], path=path, file_stamp=stamp,
+                file_root=spec["root"], file_piece=list(spec["key"]))
+            first = next((c for c in added if c.get("file_root") == spec["root"]), None)
+            if first is not None:          # a split part: placed like the main part
+                for key in ("position", "rotation", "pivot"):
+                    component[key] = list(first[key])
+            added.append(component)
+        return added
     vertices, triangles, faces = assembly_read_file(path, progress)
     stem = os.path.splitext(os.path.basename(path))[0] or "Imported"
     return [assembly_add_component(assembly, stem, "file",
@@ -23353,14 +23710,25 @@ def assembly_add_file_components(assembly, path, window=None, progress=None):
 def assembly_add_file_component(assembly, path, progress=None):
     return assembly_add_file_components(assembly, path, None, progress)[0]
 
-def assembly_component_status(component, objects):
-    """"ok", "outdated" (the source changed after the snapshot) or "missing" (source gone)."""
+def assembly_component_status(component, objects, assembly=None):
+    """"ok", "outdated" (the source changed after the snapshot, or - with `assembly` - it was
+    split and a split part has no component yet) or "missing" (source gone)."""
     if component["kind"] == "project":
         root = assembly_find_source(component.get("source_name"), objects)
         if root is None:
             return "missing"
-        current = assembly_signature(assembly_part_entries(root, objects))
-        return "ok" if current == component.get("signature") else "outdated"
+        groups = assembly_project_groups(root, objects)
+        key = tuple(component.get("source_piece") or ())
+        group = next((g for g in groups if g["key"] == key), None)
+        if group is None:
+            return "outdated" if not key else "missing"
+        if assembly is not None and len(groups) > 1:
+            present = {tuple(c.get("source_piece") or ()) for c in assembly["components"]
+                       if c.get("kind") == "project" and
+                       c.get("source_name") == component.get("source_name")}
+            if any(g["key"] not in present for g in groups):
+                return "outdated"          # Update adds the missing split parts
+        return "ok" if group["signature"] == component.get("signature") else "outdated"
     path = component.get("path")
     try:
         stamp = assembly_file_stamp(path) if path else None
@@ -23371,31 +23739,63 @@ def assembly_component_status(component, objects):
     return "ok" if stamp == component.get("file_stamp") else "outdated"
 
 def assembly_refresh_component(component, objects, window=None):
-    """Re-read the source of a component; position and rotation stay as they are."""
+    """Re-read the source of a component; position, rotation and applied cuts stay. Returns
+    [(group, make)] of split parts the assembly has no component for yet (the caller adds them
+    with assembly_add_split_components)."""
+    new_parts = _assembly_refresh_source(component, objects, window)
+    if component.get("cuts"):
+        component["bodies"] = assembly_apply_cuts(component["bodies"], component["cuts"])
+    return new_parts
+
+def _assembly_refresh_source(component, objects, window=None):
     if component["kind"] == "project":
         root = assembly_find_source(component.get("source_name"), objects)
         if root is None:
             raise ValueError(f"'{component.get('source_name')}' no longer exists in the project")
-        parts = assembly_part_entries(root, objects)
-        component["bodies"] = assembly_bodies_from_parts(parts)
-        component["signature"] = assembly_signature(parts)
-        return
+        groups = assembly_project_groups(root, objects)
+        key = tuple(component.get("source_piece") or ())
+        group = next((g for g in groups if g["key"] == key), None)
+        if group is None:
+            if key:
+                raise ValueError("this split part no longer exists (the Cut Surface no longer "
+                                 "splits the object)")
+            group = groups[0]
+        component["bodies"] = group["bodies"]
+        component["signature"] = group["signature"]
+        component["source_piece"] = list(group["key"])
+        def make(new_group):
+            return (assembly_group_name(root["name"], groups, new_group), new_group["bodies"],
+                    {"source_name": root["name"], "source_piece": list(new_group["key"]),
+                     "signature": new_group["signature"]})
+        return [(g, make) for g in groups if g is not group]
     path = component.get("path")
     if not path or not os.path.isfile(path):
         raise ValueError(f"the file is missing: {path}")
     if component.get("file_root") is not None:
         if window is None:
             raise ValueError("A SimpleCAD project can only be updated by the application")
-        spec = next((s for s in window._read_project_solids(path)
-                     if s["name"] == component["file_root"]), None)
+        key = tuple(component.get("file_piece") or ())
+        specs = [s for s in window._read_project_solids(path) if s["root"] == component["file_root"]]
+        spec = next((s for s in specs if s["key"] == key), None)
+        if spec is None and not key and specs:
+            spec = specs[0]
         if spec is None:
             raise ValueError(f"'{component['file_root']}' is no longer in {os.path.basename(path)}")
         component["bodies"] = spec["bodies"]
+        component["file_piece"] = list(spec["key"])
+        component["file_stamp"] = assembly_file_stamp(path)
+        stamp = component["file_stamp"]
+        def make(new_spec):
+            return (new_spec["name"], new_spec["bodies"],
+                    {"path": path, "file_stamp": stamp, "file_root": new_spec["root"],
+                     "file_piece": list(new_spec["key"])})
+        return [(s, make) for s in specs if s is not spec]
     else:
         vertices, triangles, faces = assembly_read_file(path)
         stem = os.path.splitext(os.path.basename(path))[0] or "Imported"
         component["bodies"] = [assembly_body(stem, vertices, triangles, faces)]
     component["file_stamp"] = assembly_file_stamp(path)
+    return []
 
 def assembly_reference_point(item):
     """(world point, description) a picked corner / edge / surface / object centre stands for."""
@@ -23588,8 +23988,58 @@ def assembly_explosion_handle_origin(component, direction, clearance=2.0):
     point = vertices[int(np.argmax(vertices @ direction))]
     return point + direction * clearance
 
+def assembly_active_section(assembly):
+    """The assembly's Cut Surface {position, rotation, flip, size, active} while it is switched
+    on, else None."""
+    section = assembly.get("section")
+    return section if section and section.get("active") else None
+
+def assembly_cut_body(component, body, section, offset=None):
+    """(world vertices, triangles, faces) of an assembly body, cut by `section` (None = whole;
+    with `split` both sides stay). `offset` moves the body first (exploded view)."""
+    world = assembly_world_vertices(component, body["vertices"])
+    if offset is not None:
+        world = world + offset
+    vertices = [tuple(point) for point in world.tolist()]
+    faces = assembly_world_faces(component, body["faces"], offset)
+    if section is None or not body["triangles"]:
+        return vertices, body["triangles"], faces
+    mesh = (vertices, body["triangles"], faces)
+    kept = apply_cut_surface(mesh, section)
+    if not section.get("split"):
+        return kept
+    other = apply_cut_surface(mesh, dict(section, flip=not section.get("flip")))
+    return join_mesh_pieces([piece for piece in (kept, other) if len(piece[1])])
+
+def assembly_plane_to_local(component, origin, normal):
+    """A world plane (origin, normal) in the component's own (snapshot) coordinates."""
+    rotation = _import_rotation_matrix(component["rotation"])
+    pivot = np.asarray(component["pivot"], float)
+    local_origin = (np.asarray(origin, float) - pivot -
+                    np.asarray(component["position"], float)) @ rotation + pivot
+    return local_origin, np.asarray(normal, float) @ rotation
+
+def assembly_apply_cuts(bodies, cuts):
+    """The bodies cut by the planes {origin, normal} (local coordinates; the +normal side is
+    removed). Bodies that are cut away completely are left out; the cut faces are planar
+    (they can be used for alignments)."""
+    out = []
+    for body in bodies:
+        mesh = (body["vertices"], body["triangles"], body["faces"])
+        for cut in cuts:
+            mesh = cut_mesh_by_plane(mesh, cut["origin"], cut["normal"])
+        if not len(mesh[1]):
+            continue
+        faces = [dict(face, planar=True) if face.get("section") is not None else face
+                 for face in mesh[2]]
+        out.append(assembly_body(body["name"], mesh[0], mesh[1], faces, body["color"],
+                                 body["opacity"], body.get("fused", False), body.get("material")))
+    return out
+
 def assembly_export_mesh(assembly):
-    """(vertices, triangles) of all visible parts in assembly coordinates, or None."""
+    """(vertices, triangles) of all visible parts in assembly coordinates, or None. An active
+    Cut Surface cuts them as in the view: only the remaining part is exported."""
+    section = assembly_active_section(assembly)
     vertices, triangles = [], []
     for component in assembly["components"]:
         if not component["visible"]:
@@ -23597,10 +24047,10 @@ def assembly_export_mesh(assembly):
         for body in component["bodies"]:
             if body.get("fused") or not body["triangles"]:
                 continue
+            body_vertices, body_triangles, _ = assembly_cut_body(component, body, section)
             offset = len(vertices)
-            vertices += [tuple(point) for point in
-                         assembly_world_vertices(component, body["vertices"]).tolist()]
-            triangles += [(a + offset, b + offset, c + offset) for a, b, c in body["triangles"]]
+            vertices += list(body_vertices)
+            triangles += [(a + offset, b + offset, c + offset) for a, b, c in body_triangles]
     return (vertices, triangles) if triangles else None
 
 # persistence -------------------------------------------------------------------
@@ -23611,7 +24061,8 @@ def assembly_to_data(assembly, keep_empty=False):
     for component in assembly["components"]:
         data = {key: component[key] for key in (
             "name", "kind", "visible", "position", "rotation", "pivot", "source_name", "path",
-            "signature", "file_stamp", "file_root") if key in component}
+            "signature", "file_stamp", "file_root", "source_piece", "file_piece", "cuts")
+            if key in component}
         data["bodies"] = [{
             "name": body["name"], "color": body["color"], "opacity": body["opacity"],
             "fused": body.get("fused", False), "material": body.get("material"),
@@ -23622,7 +24073,14 @@ def assembly_to_data(assembly, keep_empty=False):
             "components": components,
             "constraints": copy.deepcopy(assembly["constraints"]),
             "explosion_distance": float(assembly.get(
-                "explosion_distance", ASSEMBLY_EXPLOSION_DISTANCE))}
+                "explosion_distance", ASSEMBLY_EXPLOSION_DISTANCE)),
+            **({"section": {"position": [float(x) for x in assembly["section"]["position"]],
+                            "rotation": [float(x) for x in assembly["section"]["rotation"]],
+                            "flip": bool(assembly["section"].get("flip")),
+                            "split": bool(assembly["section"].get("split")),
+                            "size": float(assembly["section"].get("size", 100.0)),
+                            "active": bool(assembly["section"].get("active"))}}
+               if assembly.get("section") else {})}
 
 def assembly_from_data(data):
     assembly = assembly_new()
@@ -23632,6 +24090,17 @@ def assembly_from_data(data):
     assembly["name"] = str(data.get("name", assembly["name"]))
     assembly["explosion_distance"] = max(
         0.0, float(data.get("explosion_distance", ASSEMBLY_EXPLOSION_DISTANCE)))
+    section = data.get("section")
+    if section:
+        position = [float(x) for x in section.get("position", (0, 0, 0))]
+        rotation = [float(x) for x in section.get("rotation", (0, 0, 0))]
+        size = float(section.get("size", 100.0))
+        if len(position) == 3 and len(rotation) == 3 and \
+                np.isfinite(position + rotation + [size]).all() and size > 0:
+            assembly["section"] = {"position": position, "rotation": rotation,
+                                   "flip": bool(section.get("flip")),
+                                   "split": bool(section.get("split")), "size": size,
+                                   "active": bool(section.get("active"))}
     for item in data.get("components", []):
         if item.get("kind") not in ("project", "file"):
             raise ValueError("invalid assembly component")
@@ -23645,9 +24114,14 @@ def assembly_from_data(data):
                                      body.get("opacity", 1.0), body.get("fused", False),
                                      body.get("material"))
                        for body in item.get("bodies", [])]}
-        for key in ("source_name", "path", "signature", "file_stamp", "file_root"):
+        for key in ("source_name", "path", "signature", "file_stamp", "file_root",
+                    "source_piece", "file_piece"):
             if key in item:
                 component[key] = item[key]
+        if item.get("cuts"):
+            component["cuts"] = [{"origin": [float(x) for x in cut["origin"]],
+                                  "normal": [float(x) for x in cut["normal"]]}
+                                 for cut in item["cuts"]]
         assembly["components"].append(component)
     for item in data.get("constraints", []):
         if item.get("kind") not in ("coincident", "mate"):
@@ -23800,6 +24274,30 @@ class AssemblyView3D(View3D):
         self.fit_all()
 
     # ── gizmo geometry ────────────────────────────────────────────────────────
+    # ── Cut Surface of the assembly (plane + move / rotate handles of the dialog's fields) ──
+    section_editor = None          # the AssemblyDialog; it decides when the plane is shown
+
+    def _dimension_handle_data(self, all_handles=False):
+        editor = self.section_editor
+        if self._mvp is None or editor is None or not editor.section_editing():
+            return [] if all_handles else None
+        specs = cut_plane_handle_specs(editor.assembly["section"], editor.sp_cut_position,
+                                       editor.sp_cut_rotation)
+        specs = self._visible_move_rotate(specs, editor.chk_cut_show_move,
+                                          editor.chk_cut_show_rotate)
+        handles = self._handles_from_specs(specs)
+        return handles if all_handles else (handles[0] if handles else None)
+
+    def _handle_drag_options(self, control):
+        editor = self.section_editor
+        rotation = editor is not None and any(control is spin for spin in editor.sp_cut_rotation)
+        return (1.0 if rotation else None), Qt.ControlModifier | Qt.ShiftModifier, None
+
+    def _draw_cut_surface(self):
+        editor = self.section_editor
+        if editor is not None and editor.section_editing():
+            self._draw_cut_plane(editor.assembly["section"])
+
     def _gizmo_active(self):
         return self.gizmo_center is not None and self._mvp is not None
 
@@ -23850,17 +24348,28 @@ class AssemblyView3D(View3D):
         return float((np.array([pos.x(), pos.y()]) - drag["screen_origin"]) @
                      drag["screen_direction"] / drag["pixels_per_mm"])
 
+    # the same on-screen size as the main window's handles (_dimension_handle_data /
+    # _ring_handle): arrows end 68 px from the centre, rings have a 38 px radius
+    GIZMO_ARROW_PIXELS = 68.0
+    GIZMO_RING_RATIO = View3D.RING_HANDLE_PIXELS / GIZMO_ARROW_PIXELS
+
+    def _gizmo_pixel(self, point=None):
+        """World length of one screen pixel at the gizmo centre (or `point`)."""
+        point = self.gizmo_center if point is None else point
+        clip = self._mvp @ np.append(np.asarray(point, float), 1.0)
+        depth = max(float(clip[3]), 0.1)
+        return 2.0 * depth * math.tan(math.radians(22.5)) / max(1, self.height())
+
     def _gizmo_length(self):
-        clip = self._mvp @ np.append(np.asarray(self.gizmo_center, float), 1.0)
-        depth = max(float(clip[3]), 1e-3)
-        return depth * 0.10 * min(1.0, math.sqrt(350.0 / depth))
+        return self.GIZMO_ARROW_PIXELS * self._gizmo_pixel()
 
     @staticmethod
     def _gizmo_ring(axis, centre, length, start, stop, count):
         """Points of a ring about the axis; the angle grows counter-clockwise about +axis."""
         u, v = np.eye(3)[(axis + 1) % 3], np.eye(3)[(axis + 2) % 3]
         angles = np.radians(np.linspace(start, stop, count))
-        return centre + 0.62*length*(np.cos(angles)[:, None]*u + np.sin(angles)[:, None]*v)
+        return centre + AssemblyView3D.GIZMO_RING_RATIO*length*(
+            np.cos(angles)[:, None]*u + np.sin(angles)[:, None]*v)
 
     def _gizmo_twist_handle_data(self):
         if self.gizmo_twist is None or not self._gizmo_active():
@@ -23871,8 +24380,9 @@ class AssemblyView3D(View3D):
         u = np.cross(axis, helper)
         u /= np.linalg.norm(u)
         v = np.cross(axis, u)
-        origin, length = np.asarray(self.gizmo_twist["origin"], float), self._gizmo_length()
-        radius = 0.62 * length
+        origin = np.asarray(self.gizmo_twist["origin"], float)
+        length = self.GIZMO_ARROW_PIXELS * self._gizmo_pixel(origin)
+        radius = self.GIZMO_RING_RATIO * length
         arc_angles = np.radians(np.linspace(*_GIZMO_ARC, 49))
         circle_angles = np.radians(np.arange(361.0))
         arc = origin + radius * (np.cos(arc_angles)[:, None] * u +
@@ -24064,6 +24574,7 @@ class AssemblyView3D(View3D):
         Cut Surface): red / green / blue per axis with a dark outline; the touched handle is
         lighter and wider; rings carry an arrowhead at both ends."""
         centre, length = np.asarray(self.gizmo_center, float), self._gizmo_length()
+        pixel = self._gizmo_pixel()
         drag, hover = self._gizmo_drag, self._gizmo_hover
         font = QFont("Arial", 9, QFont.Bold)
         outline_color = (0.07, 0.08, 0.09)
@@ -24083,7 +24594,8 @@ class AssemblyView3D(View3D):
                 glVertex3f(*point)
             glEnd()
             for tip, tangent in ((ring[0], start_tangent), (ring[-1], end_tangent)):
-                self._draw_cone(tip, tangent, 0.15*length, (0.07 if outline else 0.05)*length)
+                self._draw_cone(tip, tangent, (16.0 if outline else 12.0)*pixel,
+                                (9.0 if outline else 6.0)*pixel)
 
         labels = []
         kinds = ("move", "rotate") if self.gizmo_standard_handles else ()
@@ -24094,21 +24606,22 @@ class AssemblyView3D(View3D):
                     else hover == (kind, axis)
                 if kind == "move":
                     direction = np.eye(3)[axis]
-                    shaft = centre + direction*length*0.82
-                    label_at = centre + direction*length*1.08
+                    start_point = centre + direction*10.0*pixel        # as the main window
+                    shaft = centre + direction*(length - 16.0*pixel)
+                    label_at = centre + direction*(length + 12.0*pixel)
                 else:
                     ring = self._gizmo_ring(axis, centre, length, *_GIZMO_ARC, 49)
                     u, v = np.eye(3)[(axis + 1) % 3], np.eye(3)[(axis + 2) % 3]
                     start, end = (math.radians(a) for a in _GIZMO_ARC)
                     start_tangent = math.sin(start)*u - math.cos(start)*v   # backwards
                     end_tangent = -math.sin(end)*u + math.cos(end)*v
-                    label_at = ring[-1] + end_tangent*0.2*length
+                    label_at = ring[-1] + end_tangent*14.0*pixel
                 for outline, width, stroke in strokes(color, active):
                     glColor3f(*stroke); glLineWidth(width)
                     if kind == "move":
-                        glBegin(GL_LINES); glVertex3f(*centre); glVertex3f(*shaft); glEnd()
-                        self._draw_cone(shaft, direction, 0.2*length,
-                                        (0.085 if outline else 0.06)*length)
+                        glBegin(GL_LINES); glVertex3f(*start_point); glVertex3f(*shaft); glEnd()
+                        self._draw_cone(shaft, direction, 16.0*pixel,
+                                        (9.0 if outline else 6.0)*pixel)
                     else:
                         draw_ring(ring, start_tangent, end_tangent, outline)
                 labels.append((label_at, "XYZ"[axis], strokes(color, active)[1][2]))
@@ -24123,7 +24636,7 @@ class AssemblyView3D(View3D):
             for outline, width, stroke in strokes((0.25, 1.0, 0.35), active):
                 glColor3f(*stroke); glLineWidth(width)
                 draw_ring(ring, start_tangent, twist["tangent"], outline)
-            labels.append((twist["tip"] + twist["tangent"]*0.2*length, "R",
+            labels.append((twist["tip"] + twist["tangent"]*14.0*pixel, "R",
                            strokes((0.25, 1.0, 0.35), active)[1][2]))
         glLineWidth(1.0)
         # letters in the handle colour on a dark shadow, like the main window's value labels
@@ -24324,6 +24837,12 @@ class AssemblyDialog(QDialog):
             "measurement.png", "Measure",
             "Measure edges and corners on assembly parts",
             self._on_measure_toggled, checkable=True)
+        self.act_section = action(
+            "extrusion_cut.png", "Cut Surface",
+            "Cut Surface — cut the whole assembly at a movable plane to look inside. The part on "
+            "the arrow's side is removed; Export then writes only the remaining part. Click again "
+            "to switch the cut off.",
+            self._on_section_toggled, checkable=True)
         self._view_actions = []
         for icon, text, rot_x, rot_z in (
                 ("view_isometric.png", "Isometric", -54.735610317245346, -135.0),
@@ -24341,7 +24860,7 @@ class AssemblyDialog(QDialog):
         for act in (self.act_new, self.act_open, self.act_save, self.act_save_as, None,
                     self.act_import, self.act_export, None, self.act_undo, self.act_redo, None,
                     self.act_measure, self.act_remove, None,
-                    self.act_align, self.act_exploded, self.act_fit_together, None,
+                    self.act_align, self.act_exploded, self.act_fit_together, self.act_section, None,
                     *self._view_actions, self.act_origin, self.act_show_all, None):
             toolbar.addSeparator() if act is None else toolbar.addAction(act)
         self.act_update_selected = action(
@@ -24382,7 +24901,7 @@ class AssemblyDialog(QDialog):
             view_menu.addSeparator() if act is None else view_menu.addAction(act)
         tools_menu = menu_bar.addMenu("&Tools")
         for act in (self.act_align, self.act_exploded, self.act_fit_together, self.act_measure,
-                    None, self.act_update_selected, self.act_update_all):
+                    self.act_section, None, self.act_update_selected, self.act_update_all):
             tools_menu.addSeparator() if act is None else tools_menu.addAction(act)
 
         self.tree = QTreeWidget()
@@ -24450,25 +24969,112 @@ class AssemblyDialog(QDialog):
         self.txt_measure.setReadOnly(True)
         self.txt_measure.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.txt_measure.setFont(QFont("Consolas", 9))
-        self._measurement_panel = QFrame()
-        self._measurement_panel.setFrameShape(QFrame.StyledPanel)
+        # Measurement tab of the right panel (only while Measure is on)
+        self._measurement_panel = QWidget()
         measurement_layout = QVBoxLayout(self._measurement_panel)
         measurement_layout.setContentsMargins(6, 6, 6, 6)
         measurement_layout.setSpacing(4)
-        measurement_layout.addWidget(QLabel("<b>Measurement</b>"))
         measurement_layout.addWidget(self.txt_measure)
-        self._measurement_panel.setMaximumHeight(170)
-        self._measurement_panel.hide()
+
+        # Cut Surface tab (right panel, next to the Alignments): the same fields as the Cut
+        # Surface of the main window
+        self._section_panel = QWidget()
+        section_layout = QVBoxLayout(self._section_panel)
+        section_layout.setContentsMargins(6, 6, 6, 6)
+        section_layout.setSpacing(4)
+        self._section_fields = QWidget()
+        fields_layout = QVBoxLayout(self._section_fields)
+        fields_layout.setContentsMargins(0, 0, 0, 0)
+        fields_layout.setSpacing(4)
+        section_layout.addWidget(self._section_fields)
+        self.chk_cut_show_move = QCheckBox("Show move arrows")
+        self.chk_cut_show_move.setToolTip("Show the X / Y / Z move arrows in the 3-D view")
+        self.chk_cut_show_move.setChecked(True)
+        self.chk_cut_show_rotate = QCheckBox("Show rotation rings")
+        self.chk_cut_show_rotate.setToolTip("Show the X / Y / Z rotation rings in the 3-D view")
+        self.chk_cut_show_rotate.setChecked(True)
+        # one form, so the move and rotate fields line up; each "Show …" check box sits above
+        # the fields it belongs to
+        section_form = QFormLayout()
+        section_form.setContentsMargins(0, 0, 0, 0)
+        section_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        section_form.addRow(self.chk_cut_show_move)
+        self.sp_cut_position = []
+        for axis in "XYZ":
+            spin = self._spin(-1000000.0, 1000000.0, " mm", 1.0, "")
+            spin.valueChanged.connect(self._on_section_field_changed)
+            self.sp_cut_position.append(spin)
+            section_form.addRow(f"Move {axis}:", spin)
+        section_form.addRow(self.chk_cut_show_rotate)
+        self.sp_cut_rotation = []
+        for axis in "XYZ":
+            spin = self._spin(-360000.0, 360000.0, "°", 5.0, "")
+            spin.valueChanged.connect(self._on_section_field_changed)
+            self.sp_cut_rotation.append(spin)
+            section_form.addRow(f"Rotate around {axis}:", spin)
+        fields_layout.addLayout(section_form)
+        self.chk_cut_flip = QCheckBox("Keep the other side")
+        self.chk_cut_flip.setToolTip("Swap the removed and the remaining part of the assembly")
+        self.chk_cut_flip.toggled.connect(self._on_section_field_changed)
+        self.chk_cut_show_plane = QCheckBox("Show the cut plane")
+        self.chk_cut_show_plane.setToolTip("Show the grey cut plane and its move / rotate handles")
+        self.chk_cut_show_plane.setChecked(True)
+        self.chk_cut_split = QCheckBox("Split the objects (keep both parts)")
+        self.chk_cut_split.setToolTip(
+            "Ticked: Apply splits each cut object into two objects (\"… part 1\" / \"… part 2\") "
+            "that can be placed on their own. Unticked: Apply removes the part on the arrow's side")
+        self.chk_cut_split.toggled.connect(self._on_section_field_changed)
+        for box in (self.chk_cut_show_move, self.chk_cut_show_rotate):
+            _style_checkbox_like_explorer(box)
+        for box in (self.chk_cut_flip, self.chk_cut_split, self.chk_cut_show_plane):
+            _style_checkbox_like_explorer(box)
+            fields_layout.addWidget(box)
+        for box in (self.chk_cut_show_plane, self.chk_cut_show_move, self.chk_cut_show_rotate):
+            box.toggled.connect(lambda _on: self.view.update())
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Apply to:"))
+        self.cb_cut_target = QComboBox()
+        self.cb_cut_target.addItem("All cut objects", "all")
+        self.cb_cut_target.addItem("Selected object", "selected")
+        self.cb_cut_target.setToolTip("Which objects Apply cuts: every visible object the plane "
+                                      "crosses, or only the selected one")
+        target_row.addWidget(self.cb_cut_target, 1)
+        fields_layout.addLayout(target_row)
+        self.btn_cut_apply = QPushButton("✔ Apply")
+        self.btn_cut_apply.setToolTip(
+            "Make the cut permanent: remove the part on the arrow's side, or with Split make two "
+            "objects. The cut objects keep it when they are updated; Undo takes it back")
+        self.btn_cut_apply.clicked.connect(self._apply_section_cut)
+        self.btn_cut_cancel = QPushButton("✖ Cancel")
+        self.btn_cut_cancel.setToolTip("Close the Cut Surface without cutting: the whole "
+                                       "assembly is shown again")
+        self.btn_cut_cancel.clicked.connect(lambda _checked=False: self.act_section.setChecked(False))
+        cut_buttons = QHBoxLayout()
+        cut_buttons.addWidget(self.btn_cut_apply); cut_buttons.addWidget(self.btn_cut_cancel)
+        fields_layout.addLayout(cut_buttons)
+        section_note = QLabel("The assembly is cut at the grey plane: the part on the arrow's "
+                              "side is hidden (with Split both parts stay) and the cut faces are "
+                              "hatched. Apply makes the cut permanent, Cancel closes it without "
+                              "cutting; until then it is only a view (Export writes the cut "
+                              "view). Rotations apply X, then Y, then Z.")
+        section_note.setWordWrap(True)
+        section_note.setStyleSheet("color:#aab2bd;font-size:9px;")
+        section_layout.addWidget(section_note)
+        section_layout.addStretch(1)
+        self._section_timer = QTimer(self)
+        self._section_timer.setSingleShot(True)
+        self._section_timer.setInterval(60)
+        self._section_timer.timeout.connect(self._section_settled)
 
         left = QSplitter(Qt.Vertical)
         left.addWidget(self.tree)
         left.addWidget(props)
-        left.addWidget(self._measurement_panel)
-        left.setStretchFactor(0, 3); left.setStretchFactor(1, 2); left.setStretchFactor(2, 2)
+        left.setStretchFactor(0, 3); left.setStretchFactor(1, 2)
 
         self._view_state = {"objects": [], "selected": None, "mode": MODE_NORMAL,
                             "active_sketch": None, "sketch_view_state": {}}
         self.view = AssemblyView3D(self._view_state)
+        self.view.section_editor = self
         self.view.setMinimumSize(480, 360)
         self.view.bodyClicked.connect(self._on_body_clicked)
         self.view.sigMeasureChanged.connect(self._on_reference_changed)
@@ -24509,7 +25115,12 @@ class AssemblyDialog(QDialog):
         right_layout.addWidget(hint)
 
         self._component_panel, self._component_panel_state = collapsible_panel("Components", left)
-        self._alignments_panel, self._alignments_panel_state = collapsible_panel("Alignments", right)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setDocumentMode(True)
+        self.right_tabs.addTab(right, "Alignments")
+        # the Cut Surface and Measurement tabs are added while those tools are on
+        self._alignments_panel, self._alignments_panel_state = collapsible_panel(
+            "Alignments & tools", self.right_tabs)
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self._component_panel); split.addWidget(view_area); split.addWidget(self._alignments_panel)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 1); split.setStretchFactor(2, 0)
@@ -24666,10 +25277,11 @@ class AssemblyDialog(QDialog):
     # ── scene (render entries of the 3-D view) ────────────────────────────────
     def _refresh_status(self):
         objects = self._window.state["objects"]
-        self._status = {id(c): assembly_component_status(c, objects)
+        self._status = {id(c): assembly_component_status(c, objects, self.assembly)
                         for c in self.assembly["components"]}
 
     def _rebuild_scene(self):
+        self._sync_section_ui()
         keep = []
         for component in self.assembly["components"]:
             entries = []
@@ -24710,10 +25322,17 @@ class AssemblyDialog(QDialog):
             if direction is not None:
                 explosion["direction"] = direction
             offset = np.asarray(explosion["direction"], float) * explosion["distance"]
+        section = assembly_active_section(self.assembly)
         for body in component["bodies"]:
             entry = body["_render"]
             world = assembly_world_vertices(component, body["vertices"]) + offset
-            entry["solid"] = ([tuple(point) for point in world.tolist()], body["triangles"])
+            if section is None:
+                entry["solid"] = ([tuple(point) for point in world.tolist()], body["triangles"])
+                entry["faces"] = assembly_world_faces(component, body["faces"], offset)
+            else:                                 # the Cut Surface removes one side
+                vertices, triangles, faces = assembly_cut_body(component, body, section, offset)
+                entry["solid"] = (vertices, triangles)
+                entry["faces"] = faces
             for key in _ASSEMBLY_CACHE_KEYS:      # _ec is keyed by id(), which can be reused
                 entry.pop(key, None)
             if len(world):
@@ -25496,9 +26115,10 @@ class AssemblyDialog(QDialog):
         dialog.resize(380, 360)
         if dialog.exec_() != QDialog.Accepted:
             return
-        added = [assembly_add_project_component(self.assembly, roots[row], objects)
-                 for row in range(listing.count())
-                 if listing.item(row).checkState() == Qt.Checked]
+        added = [component for row in range(listing.count())
+                 if listing.item(row).checkState() == Qt.Checked
+                 for component in assembly_add_project_components(self.assembly, roots[row],
+                                                                  objects)]
         if not added:
             return
         self._after_components_changed(select=added[-1])
@@ -25581,10 +26201,32 @@ class AssemblyDialog(QDialog):
         try:
             for component in components:
                 try:
-                    assembly_refresh_component(component, objects, self._window)
+                    new_parts = assembly_refresh_component(component, objects, self._window)
                     updated.append(component["name"])
                 except Exception as ex:
                     failed.append(f"{component['name']}: {ex}")
+                    continue
+                # split parts without a component yet (the source was split since it was added)
+                piece_key = "file_piece" if component["kind"] == "file" else "source_piece"
+                source_key = "file_root" if component["kind"] == "file" else "source_name"
+                present = {tuple(c.get(piece_key) or ()) for c in self.assembly["components"]
+                           if c.get(source_key) == component.get(source_key) and
+                           c.get("path") == component.get("path")}
+                for group, make in new_parts:
+                    if tuple(group["key"]) in present:
+                        continue
+                    present.add(tuple(group["key"]))
+                    added = assembly_add_split_components(self.assembly, component, [group], make)
+                    updated += [c["name"] for c in added]
+                    # the original object is now "part 1" (alignments follow the new name)
+                    first_name = f"{component.get(source_key)} part 1"
+                    if added and component["name"] == component.get(source_key) and                             assembly_component(self.assembly, first_name) is None:
+                        for constraint in self.assembly["constraints"]:
+                            for side in ("moving", "target"):
+                                if constraint[side] == component["name"]:
+                                    constraint[side] = first_name
+                        updated[updated.index(component["name"])] = first_name
+                        component["name"] = first_name
         finally:
             QApplication.restoreOverrideCursor()
         if updated:
@@ -25702,6 +26344,177 @@ class AssemblyDialog(QDialog):
         self._set_status(f"Exported the assembly to {path}")
         return path
 
+    # ── Cut Surface ───────────────────────────────────────────────────────────
+    def section_editing(self):
+        """True while the cut plane and its handles are shown in the view."""
+        return assembly_active_section(self.assembly) is not None and \
+            self.chk_cut_show_plane.isChecked()
+
+    def _section_size(self):
+        """Edge length of the drawn cut plane: a bit larger than all visible parts."""
+        boxes = [assembly_bounds(component) for component in self.assembly["components"]
+                 if component["visible"]]
+        boxes = [box for box in boxes if box is not None]
+        if not boxes:
+            return 100.0
+        low = np.min([box[0] for box in boxes], axis=0)
+        high = np.max([box[1] for box in boxes], axis=0)
+        return max(float(np.linalg.norm(high - low)) * 1.3, 10.0)
+
+    def _sync_section_ui(self):
+        """Action, panel and fields show the assembly's Cut Surface (after undo, open, new)."""
+        section = self.assembly.get("section")
+        active = bool(section and section.get("active"))
+        blocked = self.act_section.blockSignals(True)
+        self.act_section.setChecked(active)
+        self.act_section.blockSignals(blocked)
+        # the Cut Surface tab only exists while the cut is on (the toolbar button brings it back)
+        self._show_tool_tab(self._section_panel, "Cut Surface", active, select=False)
+        if section:
+            for spins, key in ((self.sp_cut_position, "position"),
+                               (self.sp_cut_rotation, "rotation")):
+                for spin, value in zip(spins, section[key]):
+                    if abs(spin.value() - float(value)) > 1e-9:
+                        spin.blockSignals(True); spin.setValue(float(value)); spin.blockSignals(False)
+            for box, key in ((self.chk_cut_flip, "flip"), (self.chk_cut_split, "split")):
+                box.blockSignals(True); box.setChecked(bool(section.get(key))); box.blockSignals(False)
+
+    def _show_tool_tab(self, widget, title, show, select=True):
+        """Add (and with `select` open, expanding the panel) or remove a tool tab of the right
+        panel."""
+        index = self.right_tabs.indexOf(widget)
+        if show and index < 0:
+            self.right_tabs.addTab(widget, title)
+        elif not show and index >= 0:
+            self.right_tabs.removeTab(index)
+        if show and select:
+            if self._alignments_panel_state["collapsed"]:
+                self._toggle_panel(self._alignments_panel_state)
+            self.right_tabs.setCurrentWidget(widget)
+
+    def _on_section_toggled(self, on):
+        if self._loading:
+            return
+        section = self.assembly.get("section")
+        if on and section is None:
+            boxes = [assembly_bounds(component) for component in self.assembly["components"]
+                     if component["visible"]]
+            boxes = [box for box in boxes if box is not None]
+            centre = ((np.min([box[0] for box in boxes], axis=0) +
+                       np.max([box[1] for box in boxes], axis=0)) / 2.0) if boxes else np.zeros(3)
+            section = self.assembly["section"] = {
+                "position": [round(float(x), 3) for x in centre], "rotation": [0.0, 0.0, 0.0],
+                "flip": False, "size": 100.0, "active": False}
+        if section is None:
+            return
+        section["active"] = bool(on)
+        if on:
+            section["size"] = self._section_size()
+        self._sync_section_ui()                 # (adds / removes the Cut Surface tab)
+        if on:
+            self._show_tool_tab(self._section_panel, "Cut Surface", True)
+        self._apply_section()
+        self._changed()
+        self._set_status("Cut Surface on: move / rotate the plane with the fields or the handles "
+                         "in the view; Export writes only the remaining part" if on else
+                         "Cut Surface off: the whole assembly is shown and exported")
+
+    def _on_section_field_changed(self, *_):
+        section = self.assembly.get("section")
+        if section is None or not section.get("active"):
+            return
+        section["position"] = [spin.value() for spin in self.sp_cut_position]
+        section["rotation"] = [spin.value() for spin in self.sp_cut_rotation]
+        section["flip"] = self.chk_cut_flip.isChecked()
+        section["split"] = self.chk_cut_split.isChecked()
+        self.view.update()                 # the plane follows at once
+        self._section_timer.start()        # the cut bodies once the values settle
+
+    def _apply_section_cut(self):
+        """Apply: cut the objects for good. Without Split the part on the arrow's side is
+        removed; with Split each object the plane crosses becomes two objects ("… part 1" /
+        "… part 2") at the same place. The cut is kept in local coordinates ("cuts"), so it
+        follows the object and survives Update."""
+        section = assembly_active_section(self.assembly)
+        if section is None:
+            return
+        if self.cb_cut_target.currentData() == "selected":
+            if self._selected is None:
+                self._set_status("Select the object to cut first (or apply to all cut objects)")
+                return
+            targets = [self._selected]
+        else:
+            targets = [c for c in self.assembly["components"] if c["visible"]]
+        origin, _, _, normal = cut_surface_frame(section["position"], section["rotation"])
+        if section.get("flip"):
+            normal = -normal
+        split = bool(section.get("split"))
+        tolerance = 1e-6
+        cut_names, skipped = [], []
+        for component in targets:
+            used = [assembly_world_vertices(component, body["vertices"])[
+                        np.unique(np.asarray(body["triangles"], np.int64).ravel())]
+                    for body in component["bodies"] if body["triangles"]]
+            if not used:
+                continue
+            distance = (np.vstack(used) - origin) @ normal
+            if float(distance.max()) <= tolerance:
+                continue                                  # not touched by the plane
+            if float(distance.min()) >= -tolerance:
+                skipped.append(component["name"])         # completely on the removed side
+                continue
+            local_origin, local_normal = assembly_plane_to_local(component, origin, normal)
+            keep = {"origin": [float(x) for x in local_origin],
+                    "normal": [float(x) for x in local_normal]}
+            other = {"origin": keep["origin"], "normal": [-x for x in keep["normal"]]}
+            previous = list(component.get("cuts", []))
+            if split:
+                base = component["name"]
+                fields = {key: copy.deepcopy(component[key]) for key in (
+                    "source_name", "path", "signature", "file_stamp", "file_root",
+                    "source_piece", "file_piece") if key in component}
+                fields["cuts"] = previous + [other]
+                second = assembly_add_component(
+                    self.assembly, f"{base} part 2", component["kind"],
+                    assembly_apply_cuts(component["bodies"], [other]), **fields)
+                for key in ("position", "rotation", "pivot"):
+                    second[key] = list(component[key])
+                second["visible"] = component["visible"]
+                first_name = f"{base} part 1"
+                if assembly_component(self.assembly, first_name) is None:
+                    for constraint in self.assembly["constraints"]:
+                        for side in ("moving", "target"):
+                            if constraint[side] == base:
+                                constraint[side] = first_name
+                    component["name"] = first_name
+                cut_names += [component["name"], second["name"]]
+            else:
+                cut_names.append(component["name"])
+            component["cuts"] = previous + [keep]
+            component["bodies"] = assembly_apply_cuts(component["bodies"], [keep])
+        if not cut_names:
+            self._set_status("The cut plane crosses no object" + (
+                f" ({', '.join(skipped)} lie completely on the removed side)" if skipped else ""))
+            return
+        section["active"] = False                       # show the result
+        self._after_components_changed()
+        text = (f"Split into {', '.join(cut_names)}" if split else f"Cut {', '.join(cut_names)}")
+        if skipped:
+            text += f" — not changed (completely on the removed side): {', '.join(skipped)}"
+        self._set_status(text + ". Undo takes it back.")
+
+    def _section_settled(self):
+        self._apply_section()
+        self._changed()
+
+    def _apply_section(self):
+        """Re-cut every component with the current Cut Surface (or show them whole again)."""
+        self._section_timer.stop()
+        for component in self.assembly["components"]:
+            if all(body.get("_render") is not None for body in component["bodies"]):
+                self._apply_transform(component)
+        self.view.update()
+
     # ── alignment picking ─────────────────────────────────────────────────────
     def _on_align_toggled(self, on):
         if on and self.act_measure.isChecked():
@@ -25719,7 +26532,7 @@ class AssemblyDialog(QDialog):
         if on and self._explosion_offsets:
             self._fit_together()
         self.view.set_measure_mode(on)
-        self._measurement_panel.setVisible(on)
+        self._show_tool_tab(self._measurement_panel, "Measurement", on)
         self.txt_measure.clear()
         self._update_gizmo()
         if on:
@@ -26582,6 +27395,10 @@ class MainWindow(QMainWindow):
             self.sp_surface_position.append(spin)
             surface_form.addRow(label, spin)
             label.hide(); spin.hide()
+        # "Show move arrows" above the offset fields, "Show rotation rings" above the rotate fields
+        self.chk_surface_show_move, self.chk_surface_show_rotate = \
+            self._handle_visibility_checkboxes(None)
+        surface_form.addRow(self.chk_surface_show_move)
         self.sp_surface_offset=[]
         for axis in "XYZ":
             spin=QDoubleSpinBox(); spin.setRange(-1000000,1000000)
@@ -26590,6 +27407,7 @@ class MainWindow(QMainWindow):
             spin.valueChanged.connect(self._update_surface_preview)
             self.sp_surface_offset.append(spin)
             surface_form.addRow(f"{axis} offset:", spin)
+        surface_form.addRow(self.chk_surface_show_rotate)
         self.sp_surface_rotation=[]
         for axis in "XYZ":
             spin=QDoubleSpinBox(); spin.setRange(-360000,360000)
@@ -26608,8 +27426,6 @@ class MainWindow(QMainWindow):
             self.sp_surface_size.append(spin)
             surface_form.addRow(f"Display {axis.lower()}:", spin)
         surface_lay.addLayout(surface_form)
-        self.chk_surface_show_move, self.chk_surface_show_rotate = \
-            self._handle_visibility_checkboxes(surface_lay)
         surface_note=QLabel("Planar faces align directly. Other curved faces use an automatic tangent "
                             "at their highest point. Detected spheres and cylinders have controls to "
                             "move the tangent point over the surface. Offsets and rotations use the "
@@ -26643,6 +27459,9 @@ class MainWindow(QMainWindow):
         self.lbl_cut_title.setWordWrap(True)
         cut_lay.addWidget(self.lbl_cut_title)
         cut_form=QFormLayout()
+        # "Show move arrows" above the move fields, "Show rotation rings" above the rotate fields
+        self.chk_cut_show_move, self.chk_cut_show_rotate = self._handle_visibility_checkboxes(None)
+        cut_form.addRow(self.chk_cut_show_move)
         self.sp_cut_position=[]
         for axis in "XYZ":
             spin=QDoubleSpinBox(); spin.setRange(-1000000,1000000)
@@ -26650,6 +27469,7 @@ class MainWindow(QMainWindow):
             spin.valueChanged.connect(self._cut_panel_changed)
             self.sp_cut_position.append(spin)
             cut_form.addRow(f"Move {axis}:", spin)
+        cut_form.addRow(self.chk_cut_show_rotate)
         self.sp_cut_rotation=[]
         for axis in "XYZ":
             spin=QDoubleSpinBox(); spin.setRange(-360000,360000)
@@ -26663,10 +27483,8 @@ class MainWindow(QMainWindow):
         self.chk_cut_flip.toggled.connect(self._cut_panel_changed)
         _style_checkbox_like_explorer(self.chk_cut_flip)
         cut_lay.addWidget(self.chk_cut_flip)
-        self.chk_cut_show_move, self.chk_cut_show_rotate = \
-            self._handle_visibility_checkboxes(cut_lay)
         cut_note=QLabel("The extrusion is cut at the grey surface: the part on the side of the "
-                        "arrow is hidden, the rest is shown with a shaded section face. Drag the "
+                        "arrow is removed, the rest is shown with a shaded section face. Export uses the cut object. Drag the "
                         "straight arrows (move) and arcs (rotate) in the 3-D view, coloured per "
                         "axis, or use the fields. Rotations apply X, then Y, then Z. The extrusion and the "
                         "extrusions built on it are cut. Untick the Cut Surface in the explorer to show the whole "
@@ -28004,7 +28822,9 @@ class MainWindow(QMainWindow):
             box = QCheckBox(text); box.setChecked(True); box.setToolTip(tip)
             _style_checkbox_like_explorer(box)
             box.toggled.connect(lambda _on: self.view3d.update())
-            layout.addWidget(box); boxes.append(box)
+            if layout is not None:             # (None: the caller places them)
+                layout.addWidget(box)
+            boxes.append(box)
         return boxes
 
     def _surface_frame(self, parent, face, offset, rotation, tangent_position=None):
@@ -33547,14 +34367,22 @@ class MainWindow(QMainWindow):
     def _set_solid(entry, mesh):
         """Store a freshly extruded mesh as the body's base; _apply_cuts derives the solid."""
         v, t, f = mesh
+        entry.pop("_pieces", None)
         entry["base"] = (v, t, f); entry["solid"] = (v, t); entry["faces"] = f
         entry["_base_ver"] = entry.get("_base_ver", 0) + 1
         entry.pop("_cut_key", None); entry.pop("_feat_key", None); entry.pop("_feat_mesh", None)
         MainWindow._cache_normals(entry)
 
     def _other_bodies(self, src):
-        """Meshes (verts, tris) of the other visible solid bodies (for outside chamfers/fillets)."""
-        return [(o["solid"][0], o["solid"][1]) for o in self.state["objects"]
+        """Meshes (verts, tris) of the other visible solid bodies (for outside chamfers/fillets).
+        A Cut Surface only changes what is shown: the bodies are taken as they are before it
+        (_pre_section), so turning or moving a cut never changes a fillet."""
+        def mesh(o):
+            pre = o.get("_pre_section")
+            if pre is not None and self._section_entries(o):
+                return pre[0], pre[1]
+            return o["solid"][0], o["solid"][1]
+        return [mesh(o) for o in self.state["objects"]
             if o is not src and o.get("type") in ("extrusion", "imported") and not o.get("cut")
                 and not o.get("preview") and o.get("solid") and entry_visible(o)]
 
@@ -33627,11 +34455,12 @@ class MainWindow(QMainWindow):
     def _apply_sections(self, body, pre, sections, key):
         """body["solid"] / ["faces"] = the finished mesh `pre` with every active Cut Surface applied.
         A Cut Surface that cannot be applied is reported (status bar + tree tooltip) and skipped."""
-        mesh = pre
+        pieces = [((), pre)]
         for section in sections:
             own_body = section.get("parent") is body
             try:
-                mesh = apply_cut_surface(mesh, section)
+                pieces = [part for key, piece in pieces
+                          for part in apply_cut_surfaces(piece, [section], key)]
                 if own_body: section.pop("_error", None)
                 tip = ""
             except Exception as ex:
@@ -33650,6 +34479,20 @@ class MainWindow(QMainWindow):
                         finally: self.obj_tree.blockSignals(blocked)
                 except RuntimeError:
                     pass
+        # a splitting Cut Surface leaves several separate solids: they are drawn as one body
+        # (piece 0 first, so its face numbers stay those of the uncut body) and exported /
+        # handed to the assembly as separate solids (mesh_pieces_of)
+        keys = [key for key, _ in pieces]
+        pieces = [piece for _, piece in pieces]
+        if not pieces:
+            mesh = ([], [], [dict(face, tris=[]) for face in pre[2]])
+        elif len(pieces) == 1:
+            mesh = pieces[0]
+        else:
+            mesh = join_mesh_pieces(pieces)
+        # kept while a piece lies on the far side of a splitting Cut Surface (the assembly
+        # makes such parts components of their own)
+        body["_pieces"] = (mesh[0], keys, pieces) if len(pieces) > 1 or any(keys) else None
         body["solid"] = (mesh[0], mesh[1]); body["faces"] = mesh[2]
         body["_cs_key"] = key
 
@@ -35432,7 +36275,7 @@ class MainWindow(QMainWindow):
         Objects explorer, or the one selected in the 3-D view (also through one of its faces or
         a fillet / chamfer on it). Cut tools are never exported themselves."""
         def solid(entry):
-            if entry is not None and entry.get("type") == "feature":
+            if entry is not None and entry.get("type") in ("feature", "cut_surface"):
                 entry = entry.get("parent")
             ok = entry is not None and entry.get("type") in ("extrusion", "imported") and \
                 not entry.get("preview") and not entry.get("cut") and entry.get("solid")
@@ -35522,9 +36365,13 @@ class MainWindow(QMainWindow):
             self._apply_cuts()
         finally:
             self.state["objects"] = saved
-        return [{"name": root["name"],
-                 "bodies": assembly_bodies_from_parts(assembly_part_entries(root, objects))}
-                for root in assembly_root_entries(objects)]
+        specs = []
+        for root in assembly_root_entries(objects):
+            groups = assembly_project_groups(root, objects)
+            specs += [{"name": assembly_group_name(root["name"], groups, group),
+                       "root": root["name"], "key": group["key"], "bodies": group["bodies"]}
+                      for group in groups]
+        return specs
 
     def _assembly_closed(self, dialog):
         if self._assembly_dialog is dialog:

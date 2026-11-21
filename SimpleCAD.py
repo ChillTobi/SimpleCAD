@@ -77,6 +77,22 @@ Workflow:
      Select geometry, then Mirror Horizontal or Mirror Vertical and click a matching sketch line
      or sketch axis. The copies remain constrained to their originals and follow changes to the
      axis. Text cannot be mirrored. Endpoints on the axis remain separate, so they can move away.
+     Group (Select mode) makes the selected geometry one rigid body: it keeps its shape (lines,
+     radii, angles are fixed in itself) but can still move and turn, and constraints to geometry
+     outside the group still act on it. Clicking a grouped element or anywhere inside the
+     group's frame selects the whole group; dragging it moves it by its centre (which snaps),
+     dragging one of its points turns it. Grouping geometry that touches existing groups
+     merges them. Ungroup dissolves the group(s) of the selection.
+     Select mode: a rubber band selects every touched line, circle, arc, ellipse and point
+     (groups and text whole); dragging any selected element moves the whole selection.
+     Geometry under the cursor wins over constraint symbols drawn on it. Del deletes the
+     selected sketch geometry.
+     Multiple (draw tools): select closed contour(s), choose a Matrix (rows × columns, spacing)
+     or Circular (number, total angle, start angle — both clockwise from the sketch +Y axis —
+     radius, optional rotation) arrangement in the dialog, then click to place the copies — they follow the
+     cursor, centred on it, like a paste. Support geometry is added through the copy centres:
+     Matrix — a line through every row and every column; Circular 360° — a circle;
+     Circular below 360° — an arc plus lines from the centre to the first and the last copy.
      On a face, the face outline is shown as fixed (violet) reference geometry; it cannot
      be deleted, cut or trimmed. In Constrain mode it can serve as a fixed reference;
      if the extrusion's source sketch is parallel to the face and below it, its geometry is
@@ -301,7 +317,7 @@ from PyQt5.QtWidgets import (
     QShortcut, QFormLayout, QColorDialog, QDialog, QDialogButtonBox, QPlainTextEdit, QToolButton,
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QKeySequenceEdit, QTabWidget, QStyle,
     QComboBox, QMenuBar, QSizePolicy, QGridLayout, QAbstractItemView, QProgressBar, QHeaderView,
-    QTabBar
+    QTabBar, QStackedWidget
 )
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QByteArray, QBuffer, QMarginsF, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
@@ -315,7 +331,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "1.6b"
+APP_VERSION = "1.7b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -594,7 +610,7 @@ def _json_default(obj):
 
 # ── add-ons ───────────────────────────────────────────────────────────────────
 # Optional modules next to SimpleCAD.py (or bundled into the executable) that add a feature,
-# e.g. simplecad_thermal.py → the Thermal Study window. A missing add-on hides its toolbar
+# e.g. simplecad_thermal.py → the Thermal window. A missing add-on hides its toolbar
 # button and menu entries; an add-on that fails to load is logged and hidden the same way.
 # Add-ons import this module as "SimpleCAD" (also when it runs as the main script).
 # Each add-on defines ADDON_TITLE and ADDON_VERSION (listed in Help → About). Keep this list in
@@ -818,6 +834,49 @@ class Ellipse:
                  minor[0]*math.sin(2*math.pi*i/count),
                  center[1] + major[1]*math.cos(2*math.pi*i/count) +
                  minor[1]*math.sin(2*math.pi*i/count)) for i in range(count)]
+
+class SketchGroup:
+    """Rigid group of sketch elements. Its members keep their shape relative to each other
+    (they move and rotate as one body); constraints to geometry outside the group still act.
+    ref holds each member vertex's position in the group's own frame, radii the circle radii."""
+    def __init__(self, segments=(), circles=(), arcs=(), ellipses=(), points=()):
+        self.segments = list(segments); self.circles = list(circles); self.arcs = list(arcs)
+        self.ellipses = list(ellipses); self.points = list(points)
+        self.ref = {}; self.radii = {}
+        self.snapshot()
+
+    def elements(self):
+        return self.segments + self.circles + self.arcs + self.ellipses + self.points
+
+    def vertices(self):
+        verts = set(self.points)
+        for s in self.segments: verts |= {s.v0, s.v1}
+        for c in self.circles: verts.add(c.center)
+        for a in self.arcs: verts |= {a.center, a.v_start, a.v_end}
+        for e in self.ellipses: verts.update(e.vertices())
+        return verts
+
+    def snapshot(self):
+        """Take the current shape as the rigid reference shape."""
+        self.ref = {v: (v.x, v.y) for v in self.vertices()}
+        self.radii = {c: c.radius for c in self.circles}
+
+    def contains(self, element):
+        if isinstance(element, Vertex): return element in self.vertices()
+        return any(element is e for e in self.elements())
+
+    def bounds(self):
+        xs, ys = [], []
+        for v in self.vertices(): xs.append(v.x); ys.append(v.y)
+        for c in self.circles:
+            xs += [c.center.x-c.radius, c.center.x+c.radius]
+            ys += [c.center.y-c.radius, c.center.y+c.radius]
+        for e in self.ellipses:
+            for x, y in e.tess(): xs.append(x); ys.append(y)
+        for a in self.arcs:
+            for x, y in a.tess(): xs.append(x); ys.append(y)
+        if not xs: return None
+        return min(xs), min(ys), max(xs), max(ys)
 
 class PlanetaryRatioSpinBox(QDoubleSpinBox):
     """Step across valid planetary tooth-count ratios rather than arbitrary decimals."""
@@ -1188,10 +1247,41 @@ class SketchSystem:
                 self.tix[group] = n; n += 2
         for c in sk.circles:
             if not c.locked: self.rix[c] = n; n += 1
+        # rigid groups: per group the position of its reference centre (gx, gy) and, when it
+        # has two or more points, its rotation (stored as arc length rot*L, so it is in mm)
+        self.gix, self.ginfo = {}, {}
+        circle_set, segment_set = set(sk.circles), set(sk.segments)
+        for group in getattr(sk, "groups", []):
+            pts, circles = sk.group_solver_points(group, segment_set, circle_set)
+            pts = [v for v in pts if v in group.ref]
+            circles = [c for c in circles if c in group.radii and c in self.rix]
+            if not pts: continue
+            cx = sum(group.ref[v][0] for v in pts)/len(pts)
+            cy = sum(group.ref[v][1] for v in pts)/len(pts)
+            local = {v: (group.ref[v][0]-cx, group.ref[v][1]-cy) for v in pts}
+            L = math.sqrt(sum(x*x + y*y for x, y in local.values())/len(pts))
+            rot = L > 1e-6
+            self.gix[group] = n; n += 3 if rot else 2
+            self.ginfo[group] = (pts, circles, local, max(L, 1.0), rot)
         self.n = n
         self.eqs = []          # (owner, row0, nrows, var indices, func)
         self.m = 0
         X0 = self.pack()
+        for group, (pts, circles, local, L, rot) in self.ginfo.items():
+            g = self.gix[group]
+            for v in pts:
+                lx, ly = local[v]
+                def f(X, v=v, lx=lx, ly=ly, g=g, L=L, rot=rot):
+                    x, y = self.P(v, X)
+                    if rot:
+                        t = X[g+2]/L; cs, sn = math.cos(t), math.sin(t)
+                        return [x - (X[g] + cs*lx - sn*ly), y - (X[g+1] + sn*lx + cs*ly)]
+                    return [x - (X[g] + lx), y - (X[g+1] + ly)]
+                self._add(group, [v], [], f, X0=X0, extra=range(g, g+(3 if rot else 2)))
+            for c in circles:
+                def f(X, c=c, r0=group.radii[c]):
+                    return [self.R(c, X) - r0]
+                self._add(group, [], [c], f, X0=X0)
         for c in sk.constraints:
             eq = self._equations(c)
             if eq: self._add(c, *eq, X0=X0)
@@ -1215,7 +1305,7 @@ class SketchSystem:
                 return [cx_a-cx_b, cy_a-cy_b, perpendicular]
             self._add(ellipse, ellipse.vertices(), [], f, X0=X0)
 
-    def _add(self, owner, verts, circles, f, X0):
+    def _add(self, owner, verts, circles, f, X0, extra=()):
         idx = []
         for v in verts:
             i = self.vix.get(v)
@@ -1226,6 +1316,7 @@ class SketchSystem:
         for c in circles:
             i = self.rix.get(c)
             if i is not None: idx.append(i)
+        idx += [j for j in extra if j not in idx]
         nrows = len(f(X0))
         self.eqs.append((owner, self.m, nrows, idx, f)); self.m += nrows
 
@@ -1477,6 +1568,18 @@ class SketchSystem:
         X = [0.0]*self.n
         for v, i in self.vix.items(): X[i] = v.x; X[i+1] = v.y
         for c, i in self.rix.items(): X[i] = c.radius
+        for group, i in self.gix.items():
+            # best-fit rigid placement of the reference shape onto the current points
+            pts, _, local, L, rot = self.ginfo[group]
+            cur = [self.P(v, X) for v in pts]
+            mx = sum(p[0] for p in cur)/len(cur); my = sum(p[1] for p in cur)/len(cur)
+            X[i] = mx; X[i+1] = my
+            if rot:
+                s_dot = s_cross = 0.0
+                for v, (x, y) in zip(pts, cur):
+                    lx, ly = local[v]; bx, by = x-mx, y-my
+                    s_dot += lx*bx + ly*by; s_cross += lx*by - ly*bx
+                X[i+2] = math.atan2(s_cross, s_dot)*L
         return X
 
     def unpack(self, X):
@@ -2026,8 +2129,98 @@ class Sketch:
         self.reference_generated_levels = []
         self.legacy_reference_levels = False
         self.text_groups = []
+        self.groups      = []   # rigid SketchGroups (Group / Ungroup in Select mode)
         self.constraints = []
         self._an_key = None; self._an = None
+
+    # ── rigid groups ─────────────────────────────────────────────────────────
+    def group_for(self, element):
+        """The rigid group containing element (segment / circle / arc / ellipse / vertex)."""
+        return next((g for g in getattr(self, "groups", []) if g.contains(element)), None)
+
+    def group_solver_points(self, group, segment_set=None, circle_set=None):
+        """(points, circles) through which the solver holds a group rigid. Members no longer
+        in the sketch are skipped; a text label (rigid, translate-only) is represented by two
+        of its points instead of every glyph vertex."""
+        segment_set = set(self.segments) if segment_set is None else segment_set
+        circle_set = set(self.circles) if circle_set is None else circle_set
+        segs = [s for s in group.segments if s in segment_set]
+        verts = set(v for v in group.points if v in self.points_free)
+        texts = set()
+        for s in segs:
+            text = self.text_group_for(s)
+            if text is not None: texts.add(text)
+            else: verts |= {s.v0, s.v1}
+        circles = [c for c in group.circles if c in circle_set]
+        verts.update(c.center for c in circles)
+        arcs, ellipses = set(self.arcs), set(self.ellipses)
+        for a in group.arcs:
+            if a in arcs: verts |= {a.center, a.v_start, a.v_end}
+        for e in group.ellipses:
+            if e in ellipses: verts.update(e.vertices())
+        for text in texts:
+            glyph = sorted({v for s in text.segments for v in (s.v0, s.v1)},
+                           key=lambda v: (v.x, v.y))
+            verts.update(glyph[:1] + glyph[-1:])
+        ordered = [v for v in self.vertices if v in verts]
+        ordered += [v for v in verts if v not in ordered]
+        return ordered, circles
+
+    def _group_members(self, segs=(), circles=(), arcs=(), ellipses=(), points=()):
+        """Editable members of a selection (text labels are taken as a whole)."""
+        segs = self.expand_text_selection(s for s in segs if not s.reference)
+        return ([s for s in self.segments if s in segs],
+                [c for c in self.circles if c in circles and not c.reference],
+                [a for a in self.arcs if a in arcs and not a.reference],
+                [e for e in self.ellipses if e in ellipses and not e.reference],
+                [v for v in self.points_free if v in points and not v.locked])
+
+    def make_group(self, segs=(), circles=(), arcs=(), ellipses=(), points=()):
+        """Group the given elements rigidly; existing groups they touch are merged into the
+        new group. Returns (group, number of merged groups) or (None, 0)."""
+        members = self._group_members(segs, circles, arcs, ellipses, points)
+        if not any(members): return None, 0
+        touched = [g for g in self.groups
+                   if any(g.contains(e) for part in members for e in part)]
+        for g in touched:
+            members[0].extend(s for s in g.segments if s in self.segments)
+            members[1].extend(c for c in g.circles if c in self.circles)
+            members[2].extend(a for a in g.arcs if a in self.arcs)
+            members[3].extend(e for e in g.ellipses if e in self.ellipses)
+            members[4].extend(v for v in g.points if v in self.points_free)
+        lists = (self.segments, self.circles, self.arcs, self.ellipses, self.points_free)
+        members = [[e for e in lst if e in set(part)] for lst, part in zip(lists, members)]
+        self.groups = [g for g in self.groups if g not in touched]
+        group = SketchGroup(*members)
+        self.groups.append(group)
+        self._an_key = None
+        return group, len(touched)
+
+    def ungroup(self, elements):
+        """Dissolve every group containing one of the elements. Returns the count."""
+        elements = list(elements)
+        gone = [g for g in self.groups if any(g.contains(e) for e in elements)]
+        self.groups = [g for g in self.groups if g not in gone]
+        if gone: self._an_key = None
+        return len(gone)
+
+    def prune_groups(self):
+        """Drop group members that left the sketch and groups that became empty."""
+        segs, circles, arcs = set(self.segments), set(self.circles), set(self.arcs)
+        ellipses, points = set(self.ellipses), set(self.points_free)
+        keep = []
+        for g in getattr(self, "groups", []):
+            g.segments = [s for s in g.segments if s in segs]
+            g.circles = [c for c in g.circles if c in circles]
+            g.arcs = [a for a in g.arcs if a in arcs]
+            g.ellipses = [e for e in g.ellipses if e in ellipses]
+            g.points = [v for v in g.points if v in points]
+            verts = g.vertices()
+            g.ref = {v: p for v, p in g.ref.items() if v in verts}
+            for v in verts - set(g.ref): g.ref[v] = (v.x, v.y)   # (should not happen)
+            g.radii = {c: r for c, r in g.radii.items() if c in set(g.circles)}
+            if g.elements(): keep.append(g)
+        self.groups = keep
 
     def _make_text_box_vertices(self, segments):
         """Create locked virtual points on a text bounding box: corners, edge mids, center."""
@@ -2315,6 +2508,11 @@ class Sketch:
             v = new if v is old else v
             if v not in pts: pts.append(v)
         self.points_free = pts
+        for g in getattr(self, "groups", []):
+            if old in g.ref:
+                pos = g.ref.pop(old)
+                g.ref.setdefault(new, pos)
+            g.points = [new if v is old else v for v in g.points]
         for c in self.constraints:
             for attr in ("vertex", "vertex_move", "vertex_target", "a", "b"):
                 if getattr(c, attr, None) is old: setattr(c, attr, new)
@@ -2348,6 +2546,7 @@ class Sketch:
         self.vertices = [v for v in self.vertices if v not in orphans]
         gone = segs | circles | arcs | ellipses | orphans
         self.constraints = [c for c in self.constraints if not (constraint_refs(c) & gone)]
+        self.prune_groups()
 
     def remove_unused_references(self, elements):
         """Remove the given reference segments / circles / arcs unless a constraint uses them
@@ -2446,6 +2645,8 @@ class Sketch:
         if target.reference: return False, "reference geometry cannot be cut"
         if self.text_group_for(target) is not None:
             return False, "text is rigid; move or resize the whole label in Select mode"
+        if self.group_for(target) is not None:
+            return False, "grouped geometry is rigid; ungroup it first"
         cv, cuts, lo, hi = self.trim_range(target, click)
         if lo is None and hi is None:
             self.remove_geometry(segs=[target] if isinstance(target, Segment) else (),
@@ -2589,22 +2790,27 @@ class Sketch:
         self._an_key = None
         return len(new_segments) + len(pairs) + len(new_arcs) + len(new_ellipses) + len(new_points)
 
-    def extract(self, segs=(), circles=(), arcs=(), points=()):
+    def extract(self, segs=(), circles=(), arcs=(), points=(), ellipses=()):
         """Independent copy of elements plus the constraints among them (Fix constraints and
-        reference geometry are left out). Used by Copy / Cut."""
+        reference geometry are left out). Used by Copy / Cut and Multiple. Ellipses come
+        with any of their points; rigid groups whose members are all copied are copied too."""
         segs = self.expand_text_selection(segs)
         segs    = [s for s in self.segments if s in segs and not s.reference]
         circles = [c for c in self.circles if c in circles and not c.reference]
         arcs    = [a for a in self.arcs if a in arcs and not a.reference]
+        points  = set(points)
+        ellipses = [e for e in self.ellipses if not e.reference and
+                    (e in ellipses or set(e.vertices()) & points)]
         points  = [v for v in self.points_free if v in points]
         text_groups = [group for group in self.text_groups
                        if any(segment in segs for segment in group.segments)]
-        if not (segs or circles or arcs or points):
+        if not (segs or circles or arcs or points or ellipses):
             return None
         verts = set(points)
         for s in segs:    verts |= {s.v0, s.v1}
         for c in circles: verts.add(c.center)
         for arc in arcs:  verts.update((arc.center, arc.v_start, arc.v_end))
+        for e in ellipses: verts.update(e.vertices())
         for group in text_groups: verts.update(group.vertices())
         ordered_verts = [v for v in self.vertices if v in verts]
         ordered_verts.extend(v for v in verts if v not in self.vertices)
@@ -2617,13 +2823,17 @@ class Sketch:
             "arcs": [Arc(vertex_map[a.center], vertex_map[a.v_start], vertex_map[a.v_end],
                          a.construction) for a in arcs],
             "points": [vertex_map[v] for v in points],
+            "ellipses": [Ellipse(*(vertex_map[v] for v in e.vertices()),
+                                 construction=e.construction) for e in ellipses],
             "text_groups": [],
+            "groups": [],
             "constraints": [],
         }
         object_map = dict(vertex_map)
         object_map.update(zip(segs, data["segments"]))
         object_map.update(zip(circles, data["circles"]))
         object_map.update(zip(arcs, data["arcs"]))
+        object_map.update(zip(ellipses, data["ellipses"]))
         for group in text_groups:
             data["text_groups"].append(SketchText(
                 group.label, [object_map[s] for s in group.segments],
@@ -2631,6 +2841,11 @@ class Sketch:
                 font_family=group.font_family, font_size=group.font_size,
                 bold=group.bold, italic=group.italic, underline=group.underline,
                 align=group.align))
+        for group in self.groups:
+            members = group.elements()
+            if members and all(e in object_map for e in members):
+                data["groups"].append(SketchGroup(*([object_map[e] for e in part] for part in (
+                    group.segments, group.circles, group.arcs, group.ellipses, group.points))))
         allowed = set(segs) | set(circles) | set(arcs) | verts
         for constraint in self.constraints:
             refs = constraint_refs(constraint)
@@ -2666,6 +2881,9 @@ class Sketch:
         x0, x1 = min(v.x for v in vertices), max(v.x for v in vertices)
         y0, y1 = min(v.y for v in vertices), max(v.y for v in vertices)
         cx, cy = (x0+x1)/2, (y0+y1)/2
+        if data.get("anchor_xy") is not None:
+            ax, ay = data["anchor_xy"]
+            data["anchor_xy"] = (ax, 2*cy - ay) if axis == "x" else (2*cx - ax, ay)
         for vertex in vertices:
             if axis == "x":
                 vertex.y = 2*cy - vertex.y
@@ -2710,13 +2928,22 @@ class Sketch:
             "arcs": [Arc(vertex_map[a.center], vertex_map[a.v_start], vertex_map[a.v_end],
                          a.construction) for a in data["arcs"]],
             "points": [vertex_map[v] for v in data["points"]],
+            "ellipses": [Ellipse(*(vertex_map[v] for v in e.vertices()),
+                                 construction=e.construction)
+                         for e in data.get("ellipses", [])],
             "text_groups": [],
+            "groups": [],
             "constraints": [],
         }
         object_map = dict(vertex_map)
         object_map.update(zip(data["segments"], inserted["segments"]))
         object_map.update(zip(data["circles"], inserted["circles"]))
         object_map.update(zip(data["arcs"], inserted["arcs"]))
+        object_map.update(zip(data.get("ellipses", []), inserted["ellipses"]))
+        for group in data.get("groups", []):
+            # the copy is rigid in its own (possibly mirrored) current shape
+            inserted["groups"].append(SketchGroup(*([object_map[e] for e in part] for part in (
+                group.segments, group.circles, group.arcs, group.ellipses, group.points))))
         for group in data["text_groups"]:
             inserted["text_groups"].append(SketchText(
                 group.label, [object_map[s] for s in group.segments],
@@ -2734,10 +2961,89 @@ class Sketch:
         self.circles.extend(inserted["circles"])
         self.arcs.extend(inserted["arcs"])
         self.points_free.extend(inserted["points"])
+        self.ellipses.extend(inserted["ellipses"])
         self.text_groups.extend(inserted["text_groups"])
+        self.groups.extend(inserted["groups"])
         self.constraints.extend(inserted["constraints"])
         self._an_key = None; self._an = None
         return inserted
+
+    @staticmethod
+    def clip_bounds(data):
+        """Bounding box (x0, y0, x1, y1) of clipboard geometry including curve extents."""
+        xs = [v.x for v in data["vertices"]]; ys = [v.y for v in data["vertices"]]
+        for c in data["circles"]:
+            xs += [c.center.x-c.radius, c.center.x+c.radius]
+            ys += [c.center.y-c.radius, c.center.y+c.radius]
+        for curve in list(data["arcs"]) + list(data.get("ellipses", [])):
+            for x, y in curve.tess(): xs.append(x); ys.append(y)
+        if not xs: return 0.0, 0.0, 0.0, 0.0
+        return min(xs), min(ys), max(xs), max(ys)
+
+    @staticmethod
+    def clip_closed(data):
+        """True when the copied profile consists of closed contours only (every line / arc
+        end meets exactly one other end; circles and ellipses are closed by themselves)."""
+        degree = {}
+        for e in list(data["segments"]) + list(data["arcs"]):
+            a, b = (e.v0, e.v1) if isinstance(e, Segment) else (e.v_start, e.v_end)
+            if a is b: return False
+            degree[a] = degree.get(a, 0) + 1; degree[b] = degree.get(b, 0) + 1
+        if not degree and not (data["circles"] or data.get("ellipses")): return False
+        return all(d == 2 for d in degree.values())
+
+    # orientation-bound constraints that a rotated copy cannot keep
+    @staticmethod
+    def _orientation_bound(c):
+        if isinstance(c, (CHorizontal, CVertical)): return True
+        if isinstance(c, CDimension) and isinstance(c.target, tuple) and c.orient in ("H", "V"):
+            return True
+        if isinstance(c, CDistance) and c.pair == "vv" and getattr(c, "orient", "D") in ("H", "V"):
+            return True
+        return isinstance(c, CMirrorPoint) and not isinstance(c.axis, Segment)
+
+    @staticmethod
+    def pattern_clipboard(data, placements, support=None):
+        """Several copies of clipboard data in one snapshot. placements: [(dx, dy, angle)] —
+        each copy is rotated by angle (rad) about the centre of the source bounds, then shifted
+        by (dx, dy). Rotated copies drop horizontal / vertical constraints (they no longer
+        hold); everything else among the copied elements is kept. support: support geometry
+        {"lines": [(a, b)], "arcs": [(centre, start, end)], "circles": [(centre, r)]} with
+        points as offsets from the source centre (see SketchPatternDialog.support_geometry);
+        coinciding points share one vertex."""
+        x0, y0, x1, y1 = Sketch.clip_bounds(data)
+        cx, cy = (x0+x1)/2, (y0+y1)/2
+        out = Sketch("XY"); Sketch._ctr[0] -= 1      # scratch sketch: keep the name counter
+        for dx, dy, angle in placements:
+            ins = out.insert(data)
+            cs, sn = math.cos(angle), math.sin(angle)
+            for v in ins["vertices"]:
+                x, y = v.x-cx, v.y-cy
+                v.x, v.y = cx + cs*x - sn*y + dx, cy + sn*x + cs*y + dy
+            if abs(math.remainder(angle, 2*math.pi)) > 1e-9:
+                bound = [c for c in ins["constraints"] if Sketch._orientation_bound(c)]
+                out.constraints = [c for c in out.constraints if not any(c is b for b in bound)]
+            for g in ins["groups"]: g.snapshot()
+        result = {"vertices": out.vertices, "segments": out.segments, "circles": out.circles,
+                  "arcs": out.arcs, "points": out.points_free, "ellipses": out.ellipses,
+                  "text_groups": out.text_groups, "groups": out.groups,
+                  "constraints": out.constraints}
+        bx0, by0, bx1, by1 = Sketch.clip_bounds(result)
+        result["anchor_xy"] = ((bx0+bx1)/2, (by0+by1)/2)   # centre of the copies only
+        if support:
+            made = {}
+            def vertex(q):
+                key = (round(q[0], 6), round(q[1], 6))
+                if key not in made:
+                    made[key] = Vertex(cx+q[0], cy+q[1]); result["vertices"].append(made[key])
+                return made[key]
+            for a, b in support.get("lines", []):
+                result["segments"].append(Segment(vertex(a), vertex(b), construction=True))
+            for c, s, e in support.get("arcs", []):
+                result["arcs"].append(Arc(vertex(c), vertex(s), vertex(e), construction=True))
+            for c, r in support.get("circles", []):
+                result["circles"].append(Circle(vertex(c), r, construction=True))
+        return result
 
     def _solve_with(self, system, prefer_lock=()):
         X = system.pack()
@@ -2829,7 +3135,8 @@ class Sketch:
                    for ellipse in self.ellipses),
                tuple((id(c), getattr(c, "value", None), getattr(c, "dim_mode", None),
                       getattr(c, "mode", None)) for c in self.constraints),
-               tuple(id(p) for p in self.points_free))
+               tuple(id(p) for p in self.points_free),
+               tuple((id(g), len(g.ref), len(g.elements())) for g in getattr(self, "groups", [])))
         if key != self._an_key:
             self._an = SketchSystem(self).analyse(); self._an_key = key
         return self._an
@@ -6676,6 +6983,9 @@ class View3D(QGLWidget):
         self._drag_seg  = None
         self._drag_vtx  = None
         self._drag_curve = None   # ("circle"|"arc", index) being dragged in select mode
+        self._drag_group = None   # rigid SketchGroup being dragged as a whole
+        self._drag_multi = None   # vertices of a multi-selection being dragged together
+        self._drag_anchor_pt = None   # snapping reference point of a group drag (its centre)
         self._drag_text = None
         self._text_resize = None
         self._drag_last = None
@@ -7163,6 +7473,8 @@ class View3D(QGLWidget):
                 handle_specs.append((anchor, axis, mw.sp_cut_rotation[index],
                                      "Rotate Cut Surface around " + "XYZ"[index], "°", 1.0,
                                      ring, "axis_" + "xyz"[index]))
+            handle_specs = self._visible_move_rotate(handle_specs, mw.chk_cut_show_move,
+                                                     mw.chk_cut_show_rotate)
         elif getattr(mw, "_surface_panel_active", False) and surface_preview is not None:
             parent = mw._surface_reference_parent
             face = mw._surface_reference_face
@@ -7175,12 +7487,34 @@ class View3D(QGLWidget):
             except ValueError:
                 return [] if all_handles else None
             anchor = np.asarray(surface_preview["frame"][0], float)
+            # one arrow per offset field along the reference frame's X / Y / Z (normal),
+            # coloured red / green / blue like the axes
             handle_specs = [
-                (anchor, np.asarray(base_frame[1], float), mw.sp_surface_offset[0],
-                 "Surface X offset", " mm", 1.0),
-                (anchor, np.asarray(base_frame[2], float), mw.sp_surface_offset[1],
-                 "Surface Y offset", " mm", 1.0),
-            ]
+                (anchor, _unit(np.asarray(base_frame[1 + index], float)),
+                 mw.sp_surface_offset[index], f"Surface {'XYZ'[index]} offset", " mm", 1.0,
+                 None, "axis_" + "xyz"[index])
+                for index in range(3)]
+            # rotation rings as for the Cut Surface. The angles apply X, then Y, then Z in the
+            # reference frame (datum_surface_frame), so the axis each one turns about is
+            # basis·Rz·Ry·e_x, basis·Rz·e_y and basis·e_z
+            basis = np.column_stack([np.asarray(base_frame[i], float) for i in (1, 2, 3)])
+            rx, ry, rz = (spin.value() for spin in mw.sp_surface_rotation)
+            turn_z = _import_rotation_matrix((0.0, 0.0, rz))
+            turn_zy = turn_z @ _import_rotation_matrix((0.0, ry, 0.0))
+            for index, local in enumerate((turn_zy[:, 0], turn_z[:, 1],
+                                           np.array([0.0, 0.0, 1.0]))):
+                axis = _unit(basis @ np.asarray(local, float))
+                # the ring lies in the plane perpendicular to the axis; its angle grows
+                # counter-clockwise about +axis, the way the rotation field grows
+                helper = np.eye(3)[int(np.argmin(np.abs(axis)))]
+                arm = _unit(np.cross(axis, helper))
+                ring = {"center": anchor, "u": arm, "v": np.cross(axis, arm),
+                        "start": 20.0, "stop": 290.0}
+                handle_specs.append((anchor, axis, mw.sp_surface_rotation[index],
+                                     "Rotate Surface around " + "XYZ"[index], "°", 1.0,
+                                     ring, "axis_" + "xyz"[index]))
+            handle_specs = self._visible_move_rotate(handle_specs, mw.chk_surface_show_move,
+                                                     mw.chk_surface_show_rotate)
         elif self._mode == MODE_THREADPICK and mw._thread_targets and \
                 mw.cb_thread_extent.currentData() != "whole" and mw.sp_thread_length.isEnabled():
             target = mw._thread_targets[-1]
@@ -7341,7 +7675,10 @@ class View3D(QGLWidget):
                 pixels_per_mm = (self.height() / (2.0 * max(depth, 0.1) *
                                                   math.tan(math.radians(22.5))) *
                                  float(np.linalg.norm(axis)))
-                screen_direction = np.array([0.0, -1.0])
+                # axis points at the viewer: show it upwards; a Z move arrow diagonally, so it
+                # does not cover the Y arrow (which points up in that view)
+                screen_direction = np.array([0.70710678, -0.70710678]) \
+                    if len(spec) > 7 and spec[7] == "axis_z" else np.array([0.0, -1.0])
             else:
                 screen_direction = projected / pixels_per_mm
             start = screen[0] + 10.0*screen_direction
@@ -7382,6 +7719,14 @@ class View3D(QGLWidget):
                                   pixels_per_mm=radius * math.pi / 180.0)
             handles.append(handle)
         return handles if all_handles else (handles[0] if handles else None)
+
+    @staticmethod
+    def _visible_move_rotate(specs, show_move, show_rotate):
+        """Keep the move arrows / rotation rings whose 'Show …' check box is ticked
+        (a rotation ring is a spec carrying its ring dict at index 6)."""
+        def is_ring(spec): return len(spec) > 6 and isinstance(spec[6], dict)
+        return [spec for spec in specs
+                if (show_rotate.isChecked() if is_ring(spec) else show_move.isChecked())]
 
     RING_HANDLE_PIXELS = 38.0       # on-screen radius of a 3-D rotation ring
 
@@ -8419,6 +8764,7 @@ class View3D(QGLWidget):
                 self._paint_coplanar_underlay(p)
                 self._paint_sketch_underlays(p)
                 self._paint_sketch(p, sk)
+                self._paint_groups(p, sk, self.state.get("sketch_view_state", {}))
                 self._paint_paste_preview(p, sk, self.state.get("sketch_view_state", {}))
             self._paint_hud(p)
             if self.show_fps:
@@ -8637,6 +8983,32 @@ class View3D(QGLWidget):
             p.setPen(QPen(QColor(255, 255, 255, 220), 1.5)); p.setBrush(Qt.NoBrush)
             p.drawEllipse(pp, 7, 7)
 
+    def _paint_groups(self, p, sk, sv):
+        """Dashed frame around every rigid group (brighter while the group is selected)."""
+        groups = getattr(sk, "groups", [])
+        if not groups:
+            return
+        selected = set()
+        if sv.get("mode") == DTOOL_SELECT:
+            segs, circles, arcs, points = self._selection_geometry(sv, sk)
+            selected = segs | circles | arcs | points | self._extra_vertices(sv, sk)
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        font = QFont(p.font()); font.setPointSizeF(7.5); p.setFont(font)
+        for group in groups:
+            box = group.bounds()
+            if box is None: continue
+            x0, y0, x1, y1 = box
+            a, b = self.to_px((x0, y0)), self.to_px((x1, y1))
+            rect = QRectF(a, b).normalized().adjusted(-7, -7, 7, 7)
+            active = any(group.contains(e) for e in selected)
+            color = QColor(200, 140, 255, 230 if active else 120)
+            p.setPen(QPen(color, 1.6 if active else 1.0, Qt.DashLine))
+            p.drawRoundedRect(rect, 4, 4)
+            p.setPen(QPen(color))
+            p.drawText(QPointF(rect.left()+3, rect.top()-3), "Group")
+        p.restore()
+
     def _paint_paste_preview(self, p, sk, sv):
         data = sv.get("paste_preview")
         if data is None:
@@ -8644,8 +9016,7 @@ class View3D(QGLWidget):
         vertices = Sketch.clip_vertices(data)
         if not vertices:
             return
-        x0 = min(vertex.x for vertex in vertices)
-        y0 = min(vertex.y for vertex in vertices)
+        x0, y0 = self._paste_origin(data)
         dx, dy = self._cursor_mm[0] - x0, self._cursor_mm[1] - y0
         move = lambda point: (point[0] + dx, point[1] + dy)
         color = QColor(80, 225, 240, 210)
@@ -8663,6 +9034,14 @@ class View3D(QGLWidget):
         for arc in data["arcs"]:
             start_angle, sweep = arc.angles()
             p.drawArc(*self._arc_px(move(arc.center.xy()), arc.radius(), start_angle, sweep))
+        for ellipse in data.get("ellipses", []):
+            pts = [self.to_px(move(q)) for q in ellipse.tess()]
+            if pts: p.drawPolygon(QPolygonF(pts))
+        if data.get("anchor") == "center":
+            c = self.to_px(tuple(self._cursor_mm))
+            p.setPen(QPen(color, 1.0))
+            p.drawLine(QPointF(c.x()-8, c.y()), QPointF(c.x()+8, c.y()))
+            p.drawLine(QPointF(c.x(), c.y()-8), QPointF(c.x(), c.y()+8))
         p.setPen(QPen(color, 1.5))
         for point in data["points"]:
             center = self.to_px(move(point.xy()))
@@ -9452,7 +9831,9 @@ class View3D(QGLWidget):
                 p.drawText(8,72, f"Support geometry / points: {opt} optional DOF (not required)")
         if sv.get("paste_preview") is not None:
             p.setPen(QColor(80,225,240)); p.setFont(QFont("Arial",9))
-            p.drawText(8,54,"Paste preview — X/Y mirror · click to place · Esc / right-click to cancel")
+            what = "Multiple preview (centred at the cursor)" \
+                if sv["paste_preview"].get("anchor") == "center" else "Paste preview"
+            p.drawText(8,54,f"{what} — X/Y mirror · click to place · Esc / right-click to cancel")
         elif mode == DTOOL_SELECT and ctool == CTOOL_NONE:
             p.setPen(QColor(170,170,170)); p.setFont(QFont("Arial",9))
             p.drawText(8,54,"Drag geometry (constraints are kept) · drag dimensions to move them · "
@@ -9705,7 +10086,7 @@ class View3D(QGLWidget):
             self._rband_cur    = None
             self._drag_seg = None; self._drag_vtx = None; self._drag_last = None
             self._drag_curve = None; self._drag_origin = None; self._drag_dim = None
-            self._drag_text = None; self._text_resize = None
+            self._drag_text = None; self._text_resize = None; self._drag_group = None; self._drag_multi = None; self._drag_anchor_pt = None
         self._last_pos = None
         if self._mode != MODE_SKETCH:
             self._hover3d = None
@@ -9960,38 +10341,57 @@ class View3D(QGLWidget):
         self._arc_last_ang = ang
 
     def _finish_rband(self, sv, sk, p0, p1):
-        """Select all segments that touch the rubber-band rect (partial overlap ok)."""
+        """Select every element (lines, circles, arcs, ellipses, points) that touches the
+        rubber-band rect (partial overlap ok). Touched groups and text labels are selected
+        as a whole."""
         rx0,rx1 = min(p0.x(),p1.x()), max(p0.x(),p1.x())
         ry0,ry1 = min(p0.y(),p1.y()), max(p0.y(),p1.y())
-        def in_rect(v):
-            pp = self.to_px(v.xy())
-            return rx0<=pp.x()<=rx1 and ry0<=pp.y()<=ry1
-        def seg_touches(seg):
-            # either endpoint inside, or segment crosses rect
-            if in_rect(seg.v0) or in_rect(seg.v1): return True
-            pp0=self.to_px(seg.v0.xy()); pp1=self.to_px(seg.v1.xy())
-            return seg_dist_px((rx0+rx1)/2,(ry0+ry1)/2,
-                               pp0.x(),pp0.y(),pp1.x(),pp1.y()) < max(rx1-rx0,ry1-ry0)/2
-        sel_segs = [i for i,seg in enumerate(sk.segments) if not seg.reference and seg_touches(seg)]
-        expanded = sk.expand_text_selection(sk.segments[i] for i in sel_segs)
-        sel_segs = [i for i, seg in enumerate(sk.segments) if seg in expanded]
-        reference_vertices = sk.reference_vertices()
-        sel_verts= [i for i,v  in enumerate(sk.vertices) if v not in reference_vertices and in_rect(v)]
-        sv["sel_curve"] = None
-        sv["_sel_extra"] = []
-        if sel_segs:
-            sv["sel_seg"]  = sel_segs[0]
-            sv["_sel_segs"]= sel_segs
-            sv["sel_vtx1"] = None
-            self._sel_info = f"{len(sel_segs)} segment(s) selected"
-        elif sel_verts:
-            sv["sel_vtx1"] = sel_verts[0]
-            sv["_sel_segs"]= []
-            sv["sel_seg"]  = None
-            v = sk.vertices[sel_verts[0]]
-            self._sel_info = f"Vertex {sel_verts[0]}  ({v.x:.1f}, {v.y:.1f})"
-        else:
-            self._sel_info = ""
+        def inside(q):
+            return rx0 <= q.x() <= rx1 and ry0 <= q.y() <= ry1
+        def crosses(a, b):
+            """Screen segment a-b touches the rect (end inside or crossing an edge)."""
+            if inside(a) or inside(b): return True
+            corners = [QPointF(rx0, ry0), QPointF(rx1, ry0), QPointF(rx1, ry1), QPointF(rx0, ry1)]
+            def cross(o, p, q): return (p.x()-o.x())*(q.y()-o.y()) - (p.y()-o.y())*(q.x()-o.x())
+            for c, d in zip(corners, corners[1:] + corners[:1]):
+                if cross(a, b, c)*cross(a, b, d) <= 0 and cross(c, d, a)*cross(c, d, b) <= 0:
+                    return True
+            return False
+        def poly_touches(pts):
+            px = [self.to_px(q) for q in pts]
+            return any(crosses(a, b) for a, b in zip(px, px[1:])) or \
+                   (len(px) == 1 and inside(px[0]))
+        def circle_touches(c):
+            ctr = self.to_px(c.center.xy()); r = c.radius*self.scale
+            nx = min(max(ctr.x(), rx0), rx1); ny = min(max(ctr.y(), ry0), ry1)
+            if math.hypot(ctr.x()-nx, ctr.y()-ny) > r: return False      # rect outside
+            far = max(math.hypot(ctr.x()-x, ctr.y()-y) for x in (rx0, rx1) for y in (ry0, ry1))
+            return far >= r          # not when the rect lies completely inside the circle
+        segs = {s for s in sk.segments if not s.reference and poly_touches([s.v0.xy(), s.v1.xy()])}
+        circles = {c for c in sk.circles if not c.reference and circle_touches(c)}
+        arcs = {a for a in sk.arcs if not a.reference and poly_touches(a.tess())}
+        ellipses = {e for e in sk.ellipses if not e.reference and
+                    poly_touches(e.tess() + e.tess()[:1])}
+        points = {v for v in sk.points_free if not v.locked and inside(self.to_px(v.xy()))}
+        for g in list(getattr(sk, "groups", [])):          # groups are selected whole
+            if any(g.contains(e) for e in segs | circles | arcs | ellipses | points):
+                segs.update(g.segments); circles.update(g.circles); arcs.update(g.arcs)
+                ellipses.update(g.ellipses); points.update(g.points)
+        segs = sk.expand_text_selection(segs)
+        sel_segs = [i for i, s in enumerate(sk.segments) if s in segs]
+        extra = [("circle", i) for i, c in enumerate(sk.circles) if c in circles]
+        extra += [("arc", i) for i, a in enumerate(sk.arcs) if a in arcs]
+        extra += [("vtx", sk.vertices.index(e.major_start)) for e in sk.ellipses
+                  if e in ellipses and e.major_start in sk.vertices]
+        extra += [("vtx", i) for i, v in enumerate(sk.vertices) if v in points]
+        sv["sel_curve"] = None; sv["sel_vtx1"] = None
+        sv["_sel_segs"] = sel_segs; sv["sel_seg"] = sel_segs[0] if sel_segs else None
+        sv["_sel_extra"] = extra
+        n = len(sel_segs) + len(extra)
+        if n == 1 and extra and extra[0][0] == "vtx" and not sel_segs:
+            sv["_sel_extra"] = []; sv["sel_vtx1"] = extra[0][1]     # a single point
+        self._sel_info = (f"{n} element(s) selected — drag one of them to move the selection"
+                          if n else "")
         self.sigSelInfo.emit(self._sel_info)
         self.update()
 
@@ -10077,7 +10477,7 @@ class View3D(QGLWidget):
             sv["ctool"]=CTOOL_NONE; sv["_sel_segs"]=[]; sv["sel_curve"]=None; sv["_sel_extra"]=[]
             sv["dist_first"]=None; sv["equal_first"]=None; sv.pop("_sym_center",None)
             sv.pop("axis_first",None)
-            self._drag_seg=None; self._drag_vtx=None; self._drag_last=None
+            self._drag_seg=None; self._drag_vtx=None; self._drag_last=None; self._drag_group=None; self._drag_multi = None; self._drag_anchor_pt = None
             self._drag_curve=None; self._arc_last_ang=None; self._drag_dim=None
             self._drag_text=None; self._text_resize=None; self._drag_origin=None
             self._rband_start=None; self._rband_active=False
@@ -10225,6 +10625,7 @@ class View3D(QGLWidget):
         self._drag_seg     = None
         self._drag_vtx     = None
         self._drag_curve   = None
+        self._drag_group   = None; self._drag_multi = None; self._drag_anchor_pt = None
         self._drag_origin  = None
         self._drag_dim     = None
         self._drag_text    = None
@@ -10233,6 +10634,10 @@ class View3D(QGLWidget):
             self._rband_start = None
             self._toggle_selection(sv, sk, px)
             return
+        # the selection before this click: pressing one of its elements drags all of it
+        prev_keys = {k: copy.copy(sv.get(k)) for k in
+                     ("sel_seg", "_sel_segs", "sel_vtx1", "sel_curve", "_sel_extra")}
+        prev_parts = self._selection_parts(sv, sk)
         sv["sel_curve"]    = None; sv["_sel_extra"] = []
         handle = self._text_handle_at(sv, sk, px)
         if handle is not None:
@@ -10247,8 +10652,13 @@ class View3D(QGLWidget):
             self._select_constraint_in_list(sk, hit[0])
             self._sel_info = f"{describe_constraint(sk, hit[0])}  — drag to move, double-click to edit"
             self.sigSelInfo.emit(self._sel_info); self.update(); return
-        # other constraint symbols select their constraint (a vertex right under the cursor wins)
-        glyph = self._con_glyph_at(px) if self._near_vtx(sk, px, thr=4.0) is None else None
+        # other constraint symbols select their constraint (geometry right under the cursor
+        # wins, so lines carrying a symbol can still be grabbed and dragged)
+        on_geometry = self._near_vtx(sk, px, thr=4.0) is not None or \
+            self._near_seg(sk, px, thr=4.0) is not None or \
+            self._near_circle(sk, px, thr=4.0) is not None or \
+            self._near_arc(sk, px, thr=4.0) is not None
+        glyph = self._con_glyph_at(px) if not on_geometry else None
         if glyph is not None:
             self._rband_start = None
             sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["_sel_segs"] = []
@@ -10261,12 +10671,51 @@ class View3D(QGLWidget):
             sk, self._near_seg(sk, px, thr=12.0), self._near_circle(sk, px, thr=10.0),
             self._near_arc(sk, px, thr=10.0))
         ei = self._near_ellipse(sk, px, thr=10.0)
+        hit_obj = sk.vertices[vi] if vi is not None else sk.segments[si] if si is not None else \
+                  sk.circles[ci] if ci is not None else sk.arcs[ai] if ai is not None else \
+                  sk.ellipses[ei] if ei is not None else None
+        multi = self._selection_drag_set(sk, prev_parts, hit_obj)
+        if multi:
+            # pressed an element of a multi-selection: keep it and drag all of it
+            sv.update(prev_keys)
+            self._drag_multi = multi
+            n = sum(len(part) for part in prev_parts)
+            self._begin_select_drag(sk, px, f"{n} element(s) — drag to move the selection")
+            return
+        if hit_obj is None:
+            frame_group = self._group_frame_at(sk, px)
+            if frame_group is not None:
+                # inside a group's frame: select and move the whole group
+                self._select_group_members(sv, sk, frame_group)
+                self._drag_group = frame_group
+                self._begin_select_drag(sk, px, f"Group ({len(frame_group.elements())} "
+                                        "elements) — drag to move; Ungroup releases it")
+                return
         element = sk.vertices[vi] if vi is not None else sk.segments[si] if si is not None else None
         group = sk.text_group_for(element) if element is not None else None
+        rigid = None
+        if group is None:
+            rigid = sk.group_for(element) if element is not None else \
+                    sk.group_for(sk.circles[ci]) if ci is not None else \
+                    sk.group_for(sk.arcs[ai]) if ai is not None else \
+                    sk.group_for(sk.ellipses[ei]) if ei is not None else None
+        if group is not None and sk.group_for(group.segments[0]) is not None:
+            rigid, group = sk.group_for(group.segments[0]), None    # text inside a group
         if group is not None:
             self._begin_text_drag(sv, sk, group, px)
             return
-        if vi is not None:
+        if rigid is not None:
+            self._select_group_members(sv, sk, rigid)
+            if vi is not None and not sk.vertices[vi].locked:
+                # dragging one point turns / shifts the whole group rigidly
+                self._drag_vtx = vi
+                self._sel_info = (f"Group ({len(rigid.elements())} elements) — drag a point to "
+                                  "turn it, drag a line or curve to move it")
+            else:
+                self._drag_group = rigid
+                self._sel_info = (f"Group ({len(rigid.elements())} elements) — drag to move; "
+                                  "Ungroup releases it")
+        elif vi is not None:
             sv["sel_vtx1"] = vi; sv["sel_seg"] = None; sv["_sel_segs"] = []
             self._drag_vtx = vi
             v = sk.vertices[vi]
@@ -10299,15 +10748,62 @@ class View3D(QGLWidget):
         else:
             sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["_sel_segs"] = []
             self._sel_info = ""
+        self._begin_select_drag(sk, px, self._sel_info)
+
+    def _begin_select_drag(self, sk, px, info):
+        """Remember the start positions of everything a following drag moves."""
+        self._rband_start = None if (self._drag_multi or self._drag_group) else self._rband_start
         moving = self._drag_vertex_set(sk)
         self._drag_origin = {v: (v.x, v.y) for v in moving}
+        if self._drag_multi:          # text labels in the selection move along directly
+            text_vertices = sk.text_vertices()
+            self._drag_origin.update({v: (v.x, v.y) for v in self._drag_multi
+                                      if v in text_vertices})
         self._drag_start_mm = self.to_mm(px)
-        # the vertex closest to the grab position is the one that snaps while dragging
+        # the vertex closest to the grab position is the one that snaps while dragging;
+        # a group snaps with its centre
         self._drag_anchor = min(moving, key=lambda v: math.hypot(v.x-self._drag_start_mm[0],
                                                                v.y-self._drag_start_mm[1]),
                                 default=None)
-        self.sigSelInfo.emit(self._sel_info)
+        self._drag_anchor_pt = None
+        if self._drag_group is not None:
+            box = self._drag_group.bounds()
+            if box is not None:
+                self._drag_anchor_pt = ((box[0]+box[2])/2, (box[1]+box[3])/2)
+        self._sel_info = info
+        self.sigSelInfo.emit(info)
         self.update()
+
+    def _selection_drag_set(self, sk, parts, hit_obj):
+        """Vertices to drag when hit_obj belongs to a selection of two or more elements
+        (whole groups touched by the selection move along), else None."""
+        if hit_obj is None: return None
+        segs, circles, arcs, ellipses, points = parts
+        elements = segs | circles | arcs | ellipses | points
+        if len(elements) < 2: return None
+        verts = set(points)
+        for s in segs: verts |= {s.v0, s.v1}
+        for c in circles: verts.add(c.center)
+        for a in arcs: verts |= {a.center, a.v_start, a.v_end}
+        for e in ellipses: verts.update(e.vertices())
+        if hit_obj not in elements and hit_obj not in verts: return None
+        for g in getattr(sk, "groups", []):
+            if any(g.contains(e) for e in elements): verts |= g.vertices()
+        reference = sk.reference_vertices()
+        return {v for v in verts if v not in reference}
+
+    def _group_frame_at(self, sk, px):
+        """The (smallest) rigid group whose drawn frame contains the screen point px."""
+        best, best_area = None, None
+        for g in getattr(sk, "groups", []):
+            box = g.bounds()
+            if box is None: continue
+            rect = QRectF(self.to_px((box[0], box[1])),
+                          self.to_px((box[2], box[3]))).normalized().adjusted(-7, -7, 7, 7)
+            if rect.contains(px):
+                area = rect.width()*rect.height()
+                if best is None or area < best_area: best, best_area = g, area
+        return best
 
     def _selected_text_groups(self, sv, sk):
         segs = self._selection_geometry(sv, sk)[0]
@@ -10433,6 +10929,10 @@ class View3D(QGLWidget):
         self.update()
 
     def _drag_vertex_set(self, sk):
+        if self._drag_multi:
+            return {v for v in self._drag_multi if not v.locked}
+        if self._drag_group is not None and self._drag_group in sk.groups:
+            return {v for v in self._drag_group.vertices() if not v.locked}
         if self._drag_vtx is not None and self._drag_vtx < len(sk.vertices):
             return {sk.vertices[self._drag_vtx]}
         if self._drag_seg is not None and self._drag_seg < len(sk.segments):
@@ -10516,9 +11016,11 @@ class View3D(QGLWidget):
                 self.sigSelInfo.emit("Cannot resize text: blocked by constraints")
             self.update(); return
         anchor = self._drag_anchor
-        if self.sel_snap and anchor in self._drag_origin:
-            # the grabbed point lands on the nearest grid point (or a nearby existing point)
-            ax0, ay0 = self._drag_origin[anchor]
+        centre = self._drag_anchor_pt
+        if self.sel_snap and (centre is not None or anchor in self._drag_origin):
+            # the grabbed point (a group: its centre) lands on the nearest grid point
+            # (or a nearby existing point)
+            ax0, ay0 = centre if centre is not None else self._drag_origin[anchor]
             target, _ = self.snap_point(self.to_px((ax0+dx, ay0+dy)),
                                         exclude=set(self._drag_origin))
             dx, dy = target[0]-ax0, target[1]-ay0
@@ -10529,6 +11031,10 @@ class View3D(QGLWidget):
         # targets relative to the drag start; the solver keeps every constraint satisfied,
         # so constrained geometry only moves within its remaining degrees of freedom
         moves = {v: (x0+dx, y0+dy) for v, (x0, y0) in self._drag_origin.items() if not v.locked}
+        if self._drag_multi:
+            text_vertices = sk.text_vertices()      # selected labels are moved directly
+            for v, (x0, y0) in self._drag_origin.items():
+                if v in text_vertices: v.x, v.y = x0+dx, y0+dy
         if moves and not sk.drag(moves):
             self.sigSelInfo.emit("Cannot move: blocked by constraints")
         self.update()
@@ -10613,6 +11119,90 @@ class View3D(QGLWidget):
         self._clear_selection(sv)
         self.sigSelInfo.emit(f"Mirrored {count} element(s); copies follow the original geometry")
 
+    # ── rigid groups / multiple copies ───────────────────────────────────────
+    def _select_group_members(self, sv, sk, group):
+        """Select every element of a rigid group."""
+        segs = [i for i, s in enumerate(sk.segments) if any(s is t for t in group.segments)]
+        extra = [("circle", i) for i, c in enumerate(sk.circles) if c in group.circles]
+        extra += [("arc", i) for i, a in enumerate(sk.arcs) if a in group.arcs]
+        extra += [("vtx", sk.vertices.index(e.major_start)) for e in group.ellipses
+                  if e.major_start in sk.vertices]
+        extra += [("vtx", sk.vertices.index(v)) for v in group.points if v in sk.vertices]
+        sv["_sel_segs"] = segs; sv["sel_seg"] = segs[0] if segs else None
+        sv["_sel_extra"] = extra; sv["sel_vtx1"] = None; sv["sel_curve"] = None
+
+    def _selection_parts(self, sv, sk):
+        """(segments, circles, arcs, ellipses, points) of the Select-mode selection."""
+        segs, circles, arcs, points = self._selection_geometry(sv, sk)
+        vertices = set(points) | self._extra_vertices(sv, sk)
+        ellipses = {e for e in sk.ellipses if set(e.vertices()) & vertices}
+        points = {v for v in vertices if v in sk.points_free}
+        return segs, circles, arcs, ellipses, points
+
+    def _group_selection(self):
+        sk = self.state.get("active_sketch"); sv = self.state.get("sketch_view_state", {})
+        if sk is None or sv.get("mode") != DTOOL_SELECT:
+            self.sigSelInfo.emit("Select geometry in Select mode before using Group"); return False
+        group, merged = sk.make_group(*self._selection_parts(sv, sk))
+        if group is None:
+            self.sigSelInfo.emit("Nothing to group — select lines, circles, arcs, ellipses or "
+                                 "points (reference geometry cannot be grouped)")
+            return False
+        self._select_group_members(sv, sk, group)
+        self.sigSelInfo.emit(f"Group of {len(group.elements())} element(s) created"
+                             + (f" ({merged} group(s) merged)" if merged else "")
+                             + " — rigid in itself, free towards the rest of the sketch")
+        self.update()
+        return True
+
+    def _ungroup_selection(self):
+        sk = self.state.get("active_sketch"); sv = self.state.get("sketch_view_state", {})
+        if sk is None or sv.get("mode") != DTOOL_SELECT:
+            self.sigSelInfo.emit("Select a group in Select mode before using Ungroup"); return False
+        segs, circles, arcs, ellipses, points = self._selection_parts(sv, sk)
+        vertices = self._extra_vertices(sv, sk)
+        vi = sv.get("sel_vtx1")
+        if vi is not None and vi < len(sk.vertices): vertices.add(sk.vertices[vi])
+        n = sk.ungroup(list(segs | circles | arcs | ellipses | points | vertices))
+        if not n:
+            self.sigSelInfo.emit("The selection contains no group"); return False
+        self.sigSelInfo.emit(f"{n} group(s) dissolved — the elements keep their constraints")
+        self.update()
+        return True
+
+    def _start_multiple(self):
+        """Ask for a matrix / circular arrangement of the selected closed contour(s) and
+        start a paste preview of all copies, centred at the cursor."""
+        sk = self.state.get("active_sketch"); sv = self.state.get("sketch_view_state", {})
+        if sk is None or sv.get("mode") != DTOOL_SELECT:
+            self.sigSelInfo.emit("Select closed geometry in Select mode before using Multiple")
+            return False
+        segs, circles, arcs, ellipses, points = self._selection_parts(sv, sk)
+        data = sk.extract(segs, circles, arcs, points, ellipses)
+        if data is None:
+            self.sigSelInfo.emit("Nothing to copy — select closed lines, circles, arcs or "
+                                 "ellipses (reference geometry cannot be copied)")
+            return False
+        if not Sketch.clip_closed(data):
+            self.sigSelInfo.emit("Multiple needs closed contours — the selected lines / arcs "
+                                 "do not form a closed outline")
+            return False
+        params = SketchPatternDialog.ask(data, self.window())
+        if params is None:
+            self.sigSelInfo.emit("Multiple cancelled"); return False
+        placements = SketchPatternDialog.placements(data, params)
+        pattern = Sketch.pattern_clipboard(
+            data, placements, SketchPatternDialog.support_geometry(placements, params))
+        pattern["anchor"] = "center"
+        sv.pop("mirror_pending", None)
+        sv["paste_preview"] = pattern
+        n = len(SketchPatternDialog.placements(data, params))
+        self.sigSelInfo.emit(f"Multiple: {n} copies — click to place (centred at the cursor), "
+                             "X/Y mirrors, Esc or right-click cancels")
+        self.setFocus()
+        self.update()
+        return True
+
     def _extra_vertices(self, sv, sk):
         """Vertices added to the selection with Ctrl+click."""
         if sv.get("mode") != DTOOL_SELECT: return set()
@@ -10624,6 +11214,7 @@ class View3D(QGLWidget):
         sv["sel_curve"] = None; sv["_sel_extra"] = []
         self._drag_seg = None; self._drag_vtx = None; self._drag_curve = None
         self._drag_text = None; self._text_resize = None; self._drag_origin = None
+        self._drag_group = None; self._drag_multi = None; self._drag_anchor_pt = None
 
     def _selection_constraints(self, sv, sk):
         """Constraints that act on the selected geometry (Fix also via the end points)."""
@@ -10784,12 +11375,22 @@ class View3D(QGLWidget):
         self.update()
         return True
 
+    @staticmethod
+    def _paste_origin(data):
+        """Point of the clipboard geometry that lands on the cursor: the lower-left vertex
+        (Paste) or the centre of the bounds (Multiple)."""
+        if data.get("anchor") == "center":
+            if data.get("anchor_xy") is not None: return data["anchor_xy"]
+            x0, y0, x1, y1 = Sketch.clip_bounds(data)
+            return (x0+x1)/2, (y0+y1)/2
+        verts = Sketch.clip_vertices(data)
+        return min(v.x for v in verts), min(v.y for v in verts)
+
     def _place_paste_preview(self, sv, sk, at_mm):
         data = sv.pop("paste_preview", None)
         if data is None:
             return False
-        verts = Sketch.clip_vertices(data)
-        x0 = min(v.x for v in verts); y0 = min(v.y for v in verts)
+        x0, y0 = self._paste_origin(data)
         d = sk.insert(data, at_mm[0]-x0, at_mm[1]-y0)
         self._auto_merge_endpoints(sk)
         self._clear_selection(sv)
@@ -11986,6 +12587,259 @@ class ToolbarGroupScroll(QScrollArea):
         return QSize(self.minimumWidth(), self.minimumHeight())
 
 
+class _PatternPreview(QWidget):
+    """Scaled drawing of all copies of a Multiple arrangement."""
+    def __init__(self, shapes, parent=None):
+        super().__init__(parent)
+        self._shapes = shapes          # source outlines: [[(x, y), ...], ...] in mm
+        self._placements = []
+        self._center = (0.0, 0.0)
+        self._support = []             # support geometry as polylines [[(x, y), ...]] in mm
+        self.setMinimumSize(320, 240)
+
+    def set_placements(self, placements, center, support=()):
+        self._placements = list(placements); self._center = center
+        self._support = list(support); self.update()
+
+    def _copies(self):
+        cx, cy = self._center
+        out = []
+        for dx, dy, angle in self._placements:
+            cs, sn = math.cos(angle), math.sin(angle)
+            out.append([[(cx + cs*(x-cx) - sn*(y-cy) + dx, cy + sn*(x-cx) + cs*(y-cy) + dy)
+                         for x, y in poly] for poly in self._shapes])
+        return out
+
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor(28, 28, 32))
+        copies = self._copies()
+        pts = [q for copy_ in copies for poly in copy_ for q in poly]
+        pts += [q for poly in self._support for q in poly]
+        if not pts:
+            p.end(); return
+        x0 = min(q[0] for q in pts); x1 = max(q[0] for q in pts)
+        y0 = min(q[1] for q in pts); y1 = max(q[1] for q in pts)
+        margin = 16
+        scale = min((self.width()-2*margin)/max(x1-x0, 1e-9),
+                    (self.height()-2*margin)/max(y1-y0, 1e-9))
+        mx, my = (x0+x1)/2, (y0+y1)/2
+        to_px = lambda q: QPointF(self.width()/2 + (q[0]-mx)*scale,
+                                  self.height()/2 - (q[1]-my)*scale)
+        p.setPen(QPen(QColor(90, 140, 255), 1.0, Qt.DashLine))
+        for poly in self._support:
+            p.drawPolyline(QPolygonF([to_px(q) for q in poly]))
+        for k, copy_ in enumerate(copies):
+            color = QColor(80, 225, 240) if k == 0 else QColor(200, 210, 225)
+            p.setPen(QPen(color, 1.4))
+            for poly in copy_:
+                p.drawPolyline(QPolygonF([to_px(q) for q in poly]))
+        c = to_px((mx, my))
+        p.setPen(QPen(QColor(255, 170, 60), 1.0))
+        p.drawLine(QPointF(c.x()-7, c.y()), QPointF(c.x()+7, c.y()))
+        p.drawLine(QPointF(c.x(), c.y()-7), QPointF(c.x(), c.y()+7))
+        p.setPen(QColor(150, 150, 160))
+        p.drawText(QRectF(6, 4, self.width()-12, 16), Qt.AlignLeft,
+                   f"{len(copies)} copies · + = placement point (cursor)")
+        p.end()
+
+
+class SketchPatternDialog(QDialog):
+    """Multiple: arrange copies of the selection as a matrix (rows × columns) or circularly
+    (number, total angle, radius). The dialog shows the arrangement; placement happens in
+    the sketch afterwards."""
+    _last = None          # parameters of the previous use (per session)
+
+    def __init__(self, data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Multiple")
+        x0, y0, x1, y1 = Sketch.clip_bounds(data)
+        self._center = ((x0+x1)/2, (y0+y1)/2)
+        w, h = max(x1-x0, 0.1), max(y1-y0, 0.1)
+        lay = QVBoxLayout(self)
+
+        # number fields: right-aligned text, lengths in mm, sized for "999.99 mm"
+        def dspin(value, lo, hi, suffix):
+            sp = QDoubleSpinBox(); sp.setDecimals(2); sp.setRange(lo, hi)
+            sp.setSuffix(suffix); sp.setValue(value); return sp
+        def ispin(value, lo, hi):
+            sp = QSpinBox(); sp.setRange(lo, hi); sp.setValue(value); return sp
+        def form(box):
+            grid = QGridLayout(box); grid.setContentsMargins(0, 0, 0, 0)
+            grid.setColumnStretch(1, 1); return grid
+        def add_row(grid, label, widget):
+            r = grid.rowCount()
+            grid.addWidget(QLabel(label), r, 0)
+            grid.addWidget(widget, r, 2, Qt.AlignRight)
+
+        head = QWidget(); g0 = form(head)
+        self.cmb = QComboBox(); self.cmb.addItems(["Matrix", "Circular"])
+        add_row(g0, "Arrangement:", self.cmb); lay.addWidget(head)
+
+        self.matrix_box = QWidget(); f1 = form(self.matrix_box)
+        self.sp_rows = ispin(2, 1, 200); self.sp_cols = ispin(3, 1, 200)
+        self.sp_dx = dspin(min(999.99, round(w + max(1.0, 0.25*w), 2)), 0.0, 999.99, " mm")
+        self.sp_dy = dspin(min(999.99, round(h + max(1.0, 0.25*h), 2)), 0.0, 999.99, " mm")
+        add_row(f1, "Rows:", self.sp_rows); add_row(f1, "Columns:", self.sp_cols)
+        add_row(f1, "Spacing X (centre to centre):", self.sp_dx)
+        add_row(f1, "Spacing Y (centre to centre):", self.sp_dy)
+        f1.setRowStretch(f1.rowCount(), 1)      # rows stay at the top of the shared page
+
+        self.circ_box = QWidget(); f2 = form(self.circ_box)
+        self.sp_count = ispin(6, 2, 360)
+        self.sp_angle = dspin(360.0, 0.1, 360.0, " °")
+        diag = math.hypot(w, h)
+        self.sp_radius = dspin(min(999.99, round(diag*1.2/(2*math.sin(math.pi/6)), 2)),
+                               0.0, 999.99, " mm")
+        self.sp_start = dspin(0.0, -360.0, 360.0, " °")
+        self.sp_start.setToolTip("Direction of the first copy, measured clockwise from the "
+                                 "sketch's +Y axis")
+        self.cb_rotate = QCheckBox("Point to Center"); self.cb_rotate.setChecked(True)
+        _style_checkbox_like_explorer(self.cb_rotate)      # as the app's other check boxes
+        add_row(f2, "Number:", self.sp_count); add_row(f2, "Angle (total, clockwise):", self.sp_angle)
+        add_row(f2, "Start angle (0° = sketch +Y):", self.sp_start)
+        add_row(f2, "Radius:", self.sp_radius)
+        f2.addWidget(self.cb_rotate, f2.rowCount(), 0, 1, 3, Qt.AlignRight)
+        #hint = QLabel("Objects point with their center always to the rotation center.")
+        #hint.setWordWrap(True); hint.setStyleSheet("color:#909098;font-size:12px;")
+        #f2.addWidget(hint, f2.rowCount(), 0, 1, 3)
+
+        fields = [self.sp_rows, self.sp_cols, self.sp_dx, self.sp_dy, self.sp_count,
+                  self.sp_angle, self.sp_start, self.sp_radius]
+        width = max(sp.sizeHint().width() for sp in fields)   # spin boxes size to their range
+        for sp in fields:
+            sp.setAlignment(Qt.AlignRight | Qt.AlignVCenter); sp.setFixedWidth(width)
+        self.cmb.setFixedWidth(width)
+        # both parameter sets share one page area, so switching never resizes the dialog
+        self.param_stack = QStackedWidget()
+        self.param_stack.addWidget(self.matrix_box); self.param_stack.addWidget(self.circ_box)
+        lay.addWidget(self.param_stack)
+
+        self.preview = _PatternPreview(self._outlines(data))
+        lay.addWidget(self.preview, 1)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept); btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+        last = SketchPatternDialog._last
+        if last:
+            self.cmb.setCurrentIndex(1 if last["mode"] == "circular" else 0)
+            self.sp_rows.setValue(last["rows"]); self.sp_cols.setValue(last["cols"])
+            self.sp_count.setValue(last["count"]); self.sp_angle.setValue(last["angle"])
+            self.sp_start.setValue(last.get("start", 0.0))
+            self.cb_rotate.setChecked(last["rotate"])
+        for w_ in (self.sp_rows, self.sp_cols, self.sp_dx, self.sp_dy, self.sp_count,
+                   self.sp_angle, self.sp_start, self.sp_radius):
+            w_.valueChanged.connect(self._refresh)
+        self.cb_rotate.toggled.connect(self._refresh)
+        self.cmb.currentIndexChanged.connect(self._refresh)
+        self._refresh()
+        # start larger than the layout minimum (a size below it makes Windows reject the
+        # window geometry); the extra height goes to the preview
+        self.setMinimumWidth(420)
+        hint = self.sizeHint()
+        self.resize(max(440, hint.width()), hint.height() + 160)
+
+    @staticmethod
+    def _outlines(data):
+        polys = [[s.v0.xy(), s.v1.xy()] for s in data["segments"]]
+        for c in data["circles"]:
+            pts = circle_pts(c.center.x, c.center.y, c.radius, 48); polys.append(pts + pts[:1])
+        polys += [a.tess() for a in data["arcs"]]
+        for e in data.get("ellipses", []):
+            pts = e.tess(); polys.append(pts + pts[:1])
+        return polys
+
+    def params(self):
+        return {"mode": "circular" if self.cmb.currentIndex() == 1 else "matrix",
+                "rows": self.sp_rows.value(), "cols": self.sp_cols.value(),
+                "dx": self.sp_dx.value(), "dy": self.sp_dy.value(),
+                "count": self.sp_count.value(), "angle": self.sp_angle.value(),
+                "start": self.sp_start.value(),
+                "radius": self.sp_radius.value(), "rotate": self.cb_rotate.isChecked()}
+
+    def _refresh(self):
+        circular = self.cmb.currentIndex() == 1
+        self.param_stack.setCurrentIndex(1 if circular else 0)
+        params = self.params()
+        placements = self.placements(None, params)
+        support = self.support_polylines(self.support_geometry(placements, params), self._center)
+        self.preview.set_placements(placements, self._center, support)
+
+    @staticmethod
+    def placements(data, params):
+        """[(dx, dy, angle)] of every copy (rotation about the source centre, then shift)."""
+        if params["mode"] == "matrix":
+            return [(c*params["dx"], -r*params["dy"], 0.0)
+                    for r in range(params["rows"]) for c in range(params["cols"])]
+        n, total = params["count"], math.radians(params["angle"])
+        full = params["angle"] >= 360.0 - 1e-9
+        step = total/n if full else (total/(n-1) if n > 1 else 0.0)
+        start = math.radians(params.get("start", 0.0))
+        out = []
+        for k in range(n):
+            # start angle 0 = sketch +Y axis, then clockwise (angles of the sketch are
+            # counter-clockwise, hence the minus signs)
+            phi = math.pi/2 - (start + k*step)
+            out.append((params["radius"]*math.cos(phi), params["radius"]*math.sin(phi),
+                        -(start + k*step) if params["rotate"] else 0.0))
+        return out
+
+    @staticmethod
+    def support_geometry(placements, params):
+        """Support geometry through the copy centres, as offsets from the source centre:
+        {"lines": [(a, b)], "arcs": [(centre, start, end)], "circles": [(centre, r)]}.
+        Matrix: one line through every row and every column of centres.
+        Circular, 360°: a circle through all centres. Circular, partial: an arc through the
+        centres plus a line from the centre to the first and to the last copy."""
+        geo = {"lines": [], "arcs": [], "circles": []}
+        if not placements: return geo
+        if params["mode"] == "matrix":
+            rows, cols = params["rows"], params["cols"]
+            pos = [[placements[r*cols + c][:2] for c in range(cols)] for r in range(rows)]
+            if cols > 1 and params["dx"] > 1e-9:
+                geo["lines"] += [(pos[r][0], pos[r][-1]) for r in range(rows)]
+            if rows > 1 and params["dy"] > 1e-9:
+                geo["lines"] += [(pos[0][c], pos[-1][c]) for c in range(cols)]
+            return geo
+        if params["radius"] <= 1e-9: return geo
+        centre = (0.0, 0.0)
+        if params["angle"] >= 360.0 - 1e-9:
+            geo["circles"].append((centre, params["radius"]))
+            return geo
+        first, last = placements[0][:2], placements[-1][:2]
+        geo["lines"] += [(centre, first), (centre, last)]
+        if len(placements) > 1:
+            # copies run clockwise from first to last, an Arc runs counter-clockwise
+            geo["arcs"].append((centre, last, first))
+        return geo
+
+    @staticmethod
+    def support_polylines(geo, origin):
+        """Support geometry as polylines in absolute mm (for the preview)."""
+        ox, oy = origin
+        at = lambda q: (ox + q[0], oy + q[1])
+        polys = [[at(a), at(b)] for a, b in geo["lines"]]
+        for c, r in geo["circles"]:
+            polys.append([at((c[0] + r*math.cos(2*math.pi*i/96), c[1] + r*math.sin(2*math.pi*i/96)))
+                          for i in range(97)])
+        for c, s, e in geo["arcs"]:
+            r = math.hypot(s[0]-c[0], s[1]-c[1])
+            a0 = math.atan2(s[1]-c[1], s[0]-c[0]); a1 = math.atan2(e[1]-c[1], e[0]-c[0])
+            sweep = (a1 - a0) % (2*math.pi) or 2*math.pi
+            n = max(8, int(sweep/(2*math.pi)*96))
+            polys.append([at((c[0] + r*math.cos(a0 + sweep*i/n), c[1] + r*math.sin(a0 + sweep*i/n)))
+                          for i in range(n+1)])
+        return polys
+
+    @classmethod
+    def ask(cls, data, parent=None):
+        dlg = cls(data, parent)
+        if not dlg.exec_(): return None
+        cls._last = dlg.params()
+        return cls._last
+
+
 class SketchPanel(QFrame):
     sigAccept      = pyqtSignal()
     sigCancel      = pyqtSignal()
@@ -11996,6 +12850,8 @@ class SketchPanel(QFrame):
     sigConstruction= pyqtSignal(bool)
     sigImportGeometry = pyqtSignal()
     sigMirror      = pyqtSignal(str)
+    sigGroup       = pyqtSignal(bool)   # True = group the selection, False = ungroup
+    sigMultiple    = pyqtSignal()
     sigConstraintSelected = pyqtSignal(list)  # selected rows in the constraint list ([] = none)
     sigConstraintRemove   = pyqtSignal(list)  # rows to remove
     sigConstraintEdit     = pyqtSignal(int)
@@ -12053,6 +12909,14 @@ class SketchPanel(QFrame):
         self.btn_mirror_vertical.clicked.connect(lambda: self.sigMirror.emit("vertical"))
         self.btn_mirror_horizontal.setEnabled(False)
         self.btn_mirror_vertical.setEnabled(False)
+        self.btn_group = tbtn("Group", "Group - Make the selected geometry one rigid body: fixed "
+                              "in itself, still free towards the rest of the sketch",
+                              checkable=False, icon="group_select.png")
+        self.btn_ungroup = tbtn("Ungroup", "Ungroup - Dissolve the group(s) of the selected "
+                                "geometry", checkable=False, icon="group_deselect.png")
+        self.btn_group.clicked.connect(lambda: self.sigGroup.emit(True))
+        self.btn_ungroup.clicked.connect(lambda: self.sigGroup.emit(False))
+        self.btn_group.setEnabled(False); self.btn_ungroup.setEnabled(False)
         draw_btns=[]
         for lbl,val,tip,icon in [("Freehand","freehand",
                              "Freehand drawing", "freehand.png"),
@@ -12089,6 +12953,11 @@ class SketchPanel(QFrame):
         self.btn_import_svg=tbtn("Import SVG/DXF","Import SVG or DXF geometry into the active sketch.",
                      checkable=False, icon="import_svg_dxf.png")
         self.btn_import_svg.clicked.connect(self.sigImportGeometry)
+        self.btn_multiple=tbtn("Multiple","Multiple - Copy the selected closed contour(s) as a "
+                               "matrix (rows × columns) or circular arrangement; the copies are "
+                               "placed centred at the cursor", checkable=False, icon="multiple.png")
+        self.btn_multiple.clicked.connect(self.sigMultiple)
+        self.btn_multiple.setEnabled(False)
         con_btns=[]
         for lbl,val,tip,icon in [
             ("Length",CTOOL_LENGTH,"Length - Distance between points, lines or circles","length.png"),
@@ -12113,9 +12982,10 @@ class SketchPanel(QFrame):
         self._mode=DTOOL_SELECT; self._tool="line"; self._last_draw_tool="line"
         self.toolbar_items=[   # widgets, str = label, None = separator
             tool_group("", [self.btn_sel, self.btn_draw, self.btn_con, self.btn_trim, self.btn_del,
-                            self.btn_mirror_horizontal, self.btn_mirror_vertical],
+                            self.btn_mirror_horizontal, self.btn_mirror_vertical,
+                            self.btn_group, self.btn_ungroup],
                        "#292e36", framed=False),
-            tool_group("", draw_btns + [self.btn_constr], framed=False),
+            tool_group("", draw_btns + [self.btn_multiple, self.btn_constr], framed=False),
             tool_group("", con_btns, framed=False)]
         lay.addWidget(QLabel("Constraints:"))
         self.lst_con=ToggleListWidget(); self.lst_con.setMinimumHeight(220)
@@ -12261,6 +13131,8 @@ class SketchPanel(QFrame):
         self.btn_del.setEnabled(has_sel)
         self.btn_mirror_horizontal.setEnabled(has_sel)
         self.btn_mirror_vertical.setEnabled(has_sel)
+        self.btn_group.setEnabled(has_sel); self.btn_ungroup.setEnabled(has_sel)
+        self.btn_multiple.setEnabled(has_sel)
 
     def set_sel_info(self, text):
         self.lbl_sel.setText(text)
@@ -12692,6 +13564,8 @@ def sketch_to_dict(sk):
     sid = {s: i for i, s in enumerate(sk.segments)}
     cid = {c: i for i, c in enumerate(sk.circles)}
     aid = {a: i for i, a in enumerate(sk.arcs)}
+    eid = {e: i for i, e in enumerate(sk.ellipses)}
+    sk.prune_groups()
     def ref(o):
         if isinstance(o, Segment) and getattr(o, "sketch_axis", None) is not None:
             return {"axis": o.sketch_axis}
@@ -12730,6 +13604,14 @@ def sketch_to_dict(sk):
                              "underline": group.underline,
                              "align": group.align}
                             for group in sk.text_groups],
+            "groups": [{"segments": [sid[s] for s in g.segments if s in sid],
+                        "circles": [cid[c] for c in g.circles if c in cid],
+                        "arcs": [aid[a] for a in g.arcs if a in aid],
+                        "ellipses": [eid[e] for e in g.ellipses if e in eid],
+                        "points": [vid[v] for v in g.points if v in vid],
+                        "ref": [[vid[v], x, y] for v, (x, y) in g.ref.items() if v in vid],
+                        "radii": [[cid[c], r] for c, r in g.radii.items() if c in cid]}
+                       for g in getattr(sk, "groups", [])],
             "constraints": cons,
             "reference_boundaries": {
                 key: {str(i): element.reference_boundary for i, element in enumerate(elements)
@@ -12792,6 +13674,18 @@ def sketch_fill(sk, d):
             underline=group.get("underline", False),
             align=group.get("align", "left"),
         ))
+    sk.groups = []
+    for gd in d.get("groups", []):
+        pick = lambda items, key: [items[i] for i in gd.get(key, []) if 0 <= i < len(items)]
+        g = SketchGroup(pick(sk.segments, "segments"), pick(sk.circles, "circles"),
+                        pick(sk.arcs, "arcs"), pick(sk.ellipses, "ellipses"),
+                        pick(V, "points"))
+        for i, x, y in gd.get("ref", []):
+            if 0 <= i < len(V) and V[i] in g.ref: g.ref[V[i]] = (float(x), float(y))
+        for i, r in gd.get("radii", []):
+            if 0 <= i < len(sk.circles) and sk.circles[i] in g.radii:
+                g.radii[sk.circles[i]] = float(r)
+        if g.elements(): sk.groups.append(g)
     def deref(o):
         if isinstance(o, dict):
             if "axis" in o: return sk.axis_segment(o["axis"])
@@ -16029,14 +16923,21 @@ def _prepare_preview_mesh(mesh):
     edges = _sharp_edge_data(vertices, triangles, normals) if len(triangles) else None
     return {"mesh": mesh, "vbo_data": data, "edge_data": edges}
 
-def _ray_nearest(origins, d, V, T, eps=1e-4, chunk=24):
+CUT_BREAKTHROUGH = 0.1   # mm a cut "up to surface" runs past a surface where it leaves the material
+
+def _ray_nearest(origins, d, V, T, eps=1e-4, chunk=24, facing=0):
     """First hit distance t > eps of the rays origin + t*d with the triangle mesh (V, T);
-    inf where a ray misses. origins (k,3), d unit (3,)."""
+    inf where a ray misses. origins (k,3), d unit (3,). facing +1 only counts triangles the
+    ray leaves the (outward-oriented) solid through, -1 only those it enters through."""
     O = np.asarray(origins, float).reshape(-1, 3)
     out = np.full(len(O), np.inf)
     T = np.asarray(T, int).reshape(-1, 3)
     if not len(T): return out
     V = np.asarray(V, float)
+    if facing:
+        n = np.cross(V[T[:, 1]] - V[T[:, 0]], V[T[:, 2]] - V[T[:, 0]])
+        T = T[(n @ np.asarray(d, float))*facing > 0]
+        if not len(T): return out
     v0 = V[T[:, 0]]; e1 = V[T[:, 1]] - v0; e2 = V[T[:, 2]] - v0
     h = np.cross(d, e2); a = np.einsum("ij,ij->i", e1, h)
     ok = np.abs(a) > 1e-12
@@ -21752,12 +22653,9 @@ def assembly_load_file(path):
     return assembly_from_data(data.get("assembly"))
 
 
-_GIZMO_MOVE = (1.0, 0.85, 0.1)
-_GIZMO_MOVE_HOT = (1.0, 1.0, 0.6)
 _GIZMO_EXPLODE = (0.72, 0.32, 0.96)
 _GIZMO_EXPLODE_HOT = (0.9, 0.62, 1.0)
-_GIZMO_TURN = (0.2, 0.85, 0.3)
-_GIZMO_TURN_HOT = (0.65, 1.0, 0.7)
+# move / rotate handles use AXIS_HANDLE_COLORS (red / green / blue), as in the main window
 _GIZMO_ARC = (20.0, 290.0)          # degrees of the ring drawn for a rotation handle
 
 
@@ -22125,17 +23023,36 @@ class AssemblyView3D(View3D):
         glPopAttrib()
 
     def _draw_gizmo(self):
+        """Move arrows and rotation rings in the style of the main window's handles (Surface /
+        Cut Surface): red / green / blue per axis with a dark outline; the touched handle is
+        lighter and wider; rings carry an arrowhead at both ends."""
         centre, length = np.asarray(self.gizmo_center, float), self._gizmo_length()
         drag, hover = self._gizmo_drag, self._gizmo_hover
         font = QFont("Arial", 9, QFont.Bold)
+        outline_color = (0.07, 0.08, 0.09)
         glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_CURRENT_BIT)
         glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        handles = (("move", _GIZMO_MOVE, _GIZMO_MOVE_HOT),
-                   ("rotate", _GIZMO_TURN, _GIZMO_TURN_HOT)) \
-            if self.gizmo_standard_handles else ()
-        for kind, color, hot in handles:
+
+        def strokes(color, active):
+            """(outline?, line width, colour) passes, as _draw_dimension_handle draws them."""
+            if active: color = tuple(0.45 + 0.55*c for c in color)
+            return ((True, 11.0 if active else 8.0, outline_color),
+                    (False, 6.0 if active else 4.0, color))
+
+        def draw_ring(ring, start_tangent, end_tangent, outline):
+            glBegin(GL_LINE_STRIP)
+            for point in ring:
+                glVertex3f(*point)
+            glEnd()
+            for tip, tangent in ((ring[0], start_tangent), (ring[-1], end_tangent)):
+                self._draw_cone(tip, tangent, 0.15*length, (0.07 if outline else 0.05)*length)
+
+        labels = []
+        kinds = ("move", "rotate") if self.gizmo_standard_handles else ()
+        for kind in kinds:
             for axis in range(3):
+                color = AXIS_HANDLE_COLORS["axis_" + "xyz"[axis]][:3]
                 active = (drag["kind"], drag["axis"]) == (kind, axis) if drag is not None \
                     else hover == (kind, axis)
                 if kind == "move":
@@ -22145,42 +23062,41 @@ class AssemblyView3D(View3D):
                 else:
                     ring = self._gizmo_ring(axis, centre, length, *_GIZMO_ARC, 49)
                     u, v = np.eye(3)[(axis + 1) % 3], np.eye(3)[(axis + 2) % 3]
-                    end = math.radians(_GIZMO_ARC[1])
-                    tangent = -math.sin(end)*u + math.cos(end)*v
-                    label_at = ring[-1] + tangent*0.2*length
-                for outline, width in ((True, 8.0), (False, 4.5)):
-                    glColor3f(*((0.07, 0.08, 0.09) if outline else hot if active else color))
-                    glLineWidth(width)
+                    start, end = (math.radians(a) for a in _GIZMO_ARC)
+                    start_tangent = math.sin(start)*u - math.cos(start)*v   # backwards
+                    end_tangent = -math.sin(end)*u + math.cos(end)*v
+                    label_at = ring[-1] + end_tangent*0.2*length
+                for outline, width, stroke in strokes(color, active):
+                    glColor3f(*stroke); glLineWidth(width)
                     if kind == "move":
                         glBegin(GL_LINES); glVertex3f(*centre); glVertex3f(*shaft); glEnd()
                         self._draw_cone(shaft, direction, 0.2*length,
                                         (0.085 if outline else 0.06)*length)
                     else:
-                        glBegin(GL_LINE_STRIP)
-                        for point in ring:
-                            glVertex3f(*point)
-                        glEnd()
-                        self._draw_cone(ring[-1], tangent, 0.15*length,
-                                        (0.07 if outline else 0.05)*length)
-                self.renderText(float(label_at[0]), float(label_at[1]), float(label_at[2]),
-                                "XYZ"[axis], font)
+                        draw_ring(ring, start_tangent, end_tangent, outline)
+                labels.append((label_at, "XYZ"[axis], strokes(color, active)[1][2]))
         twist = self._gizmo_twist_handle_data()
         if twist is not None:
             active = (drag["kind"] == "mate_rotate") if drag is not None \
                 else hover == ("mate_rotate", 0)
-            for outline, width in ((True, 8.0), (False, 4.5)):
-                glColor3f(*((0.07, 0.08, 0.09) if outline else
-                            _GIZMO_TURN_HOT if active else _GIZMO_TURN))
-                glLineWidth(width)
-                glBegin(GL_LINE_STRIP)
-                for point in twist["ring"]:
-                    glVertex3f(*point)
-                glEnd()
-                self._draw_cone(twist["tip"], twist["tangent"], 0.15*length,
-                                (0.07 if outline else 0.05)*length)
-            label_at = twist["tip"] + twist["tangent"] * 0.2 * length
-            self.renderText(float(label_at[0]), float(label_at[1]), float(label_at[2]), "R", font)
+            ring = twist["ring"]
+            start_tangent = ring[0] - ring[1]
+            start_tangent = start_tangent / max(float(np.linalg.norm(start_tangent)), 1e-12)
+            # a mate's free twist is no world axis: the main window's rotation green
+            for outline, width, stroke in strokes((0.25, 1.0, 0.35), active):
+                glColor3f(*stroke); glLineWidth(width)
+                draw_ring(ring, start_tangent, twist["tangent"], outline)
+            labels.append((twist["tip"] + twist["tangent"]*0.2*length, "R",
+                           strokes((0.25, 1.0, 0.35), active)[1][2]))
         glLineWidth(1.0)
+        # letters in the handle colour on a dark shadow, like the main window's value labels
+        for point, text, color in labels:
+            screen, valid = self._project(np.array([point], float))
+            if not valid[0]:
+                continue
+            x, y = (int(round(float(c))) for c in screen[0])
+            glColor3f(*outline_color); self.renderText(x + 1, y + 1, text, font)
+            glColor3f(*color); self.renderText(x, y, text, font)
         glPopAttrib()
 
     def _draw_explosion_arrow(self):
@@ -23849,6 +24765,7 @@ class MainWindow(QMainWindow):
     def _align_extrusion_feature_controls(self):
         feature_fields = (self.cb_feat_mode, self.sp_feat_size, self.sp_feat_len2, self.sp_feat_angle)
         feature_width = max(field.sizeHint().width() for field in feature_fields)
+        self._editor_field_width = feature_width     # every editor panel uses this width
         extrusion_form = self._dock_ext.widget().layout().itemAt(1).layout()
         ring_form = self.w_ring.layout()
         label_width = max(extrusion_form.itemAtPosition(row, 0).widget().sizeHint().width()
@@ -23898,6 +24815,7 @@ class MainWindow(QMainWindow):
                         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         for dock in (self._dock_ext, self._dock_gear, self._dock_thread):
             self._refresh_dock_minimum(dock)
+        self._apply_editor_field_width()
 
     @staticmethod
     def _set_debug_enabled(enabled):
@@ -24271,15 +25189,15 @@ class MainWindow(QMainWindow):
         tb2.addSeparator()
         tb2.addAction(self.act_technical_drawing)
         tb2.addAction(self.act_assembly)
-        # Thermal Study add-on: the button exists only while simplecad_thermal.py is available
+        # Thermal add-on: the button exists only while simplecad_thermal.py is available
         self._thermal_addon = load_addon("simplecad_thermal")
         self._thermal_dialog = None
         self.act_thermal = None
         if self._thermal_addon is not None:
             self.act_thermal = QAction(
-                QIcon(os.path.join(icon_dir, "thermal_sim.png")), "Thermal Study", self,
+                QIcon(os.path.join(icon_dir, "thermal_sim.png")), "Thermal", self,
                 triggered=self._open_thermal_study,
-                toolTip="Thermal Study - Simulate the temperatures of parts and assemblies "
+                toolTip="Thermal - Simulate the temperatures of parts and assemblies "
                         "with heat sources")
             tb2.addAction(self.act_thermal)
         self.sp_grid=QDoubleSpinBox(); self.sp_grid.setRange(1,100); self.sp_grid.setValue(DEFAULT_GRID)
@@ -24352,6 +25270,8 @@ class MainWindow(QMainWindow):
         self.sketch_panel.sigConstruction.connect(self._on_construction_toggled)
         self.sketch_panel.sigImportGeometry.connect(self._import_geometry_to_sketch)
         self.sketch_panel.sigMirror.connect(self.view3d._start_mirror)
+        self.sketch_panel.sigGroup.connect(self._on_sketch_group)
+        self.sketch_panel.sigMultiple.connect(self.view3d._start_multiple)
         self.sketch_panel.sigConstraintSelected.connect(self._on_constraint_selected)
         self.sketch_panel.sigConstraintRemove.connect(self._on_constraint_remove)
         self.sketch_panel.sigConstraintEdit.connect(self._on_constraint_edit)
@@ -24610,6 +25530,8 @@ class MainWindow(QMainWindow):
             self.sp_surface_size.append(spin)
             surface_form.addRow(f"Display {axis.lower()}:", spin)
         surface_lay.addLayout(surface_form)
+        self.chk_surface_show_move, self.chk_surface_show_rotate = \
+            self._handle_visibility_checkboxes(surface_lay)
         surface_note=QLabel("Planar faces align directly. Other curved faces use an automatic tangent "
                             "at their highest point. Detected spheres and cylinders have controls to "
                             "move the tangent point over the surface. Offsets and rotations use the "
@@ -24661,7 +25583,10 @@ class MainWindow(QMainWindow):
         self.chk_cut_flip=QCheckBox("Keep the other side")
         self.chk_cut_flip.setToolTip("Swap the visible and the hidden part of the extrusion")
         self.chk_cut_flip.toggled.connect(self._cut_panel_changed)
+        _style_checkbox_like_explorer(self.chk_cut_flip)
         cut_lay.addWidget(self.chk_cut_flip)
+        self.chk_cut_show_move, self.chk_cut_show_rotate = \
+            self._handle_visibility_checkboxes(cut_lay)
         cut_note=QLabel("The extrusion is cut at the grey surface: the part on the side of the "
                         "arrow is hidden, the rest is shown with a shaded section face. Drag the "
                         "straight arrows (move) and arcs (rotate) in the 3-D view, coloured per "
@@ -25263,11 +26188,25 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
+    def _apply_editor_field_width(self):
+        """Give the number fields of every editor panel the same width as the Extrusion /
+        Gear / Thread fields. The widget style sheet also lifts the theme's 63 px cap, so the
+        value and its unit fit."""
+        width = getattr(self, "_editor_field_width", None)
+        if width is None: return
+        rule = "min-width: %dpx; max-width: %dpx;" % (width, width)
+        for name in ("_dock_ext", "_dock_surface", "_dock_feat", "_dock_angle_draft",
+                     "_dock_cut", "_dock_gear", "_dock_thread"):
+            dock = getattr(self, name, None)
+            if dock is None: continue
+            for spin in dock.findChildren(QDoubleSpinBox) + dock.findChildren(QSpinBox):
+                if spin.styleSheet() != rule: spin.setStyleSheet(rule)
+            self._refresh_dock_minimum(dock)
+
     def _align_editor_inputs(self):
         for dock in (self._dock_ext, self._dock_surface, self._dock_feat,
                  self._dock_angle_draft, self._dock_cut, self._dock_gear, self._dock_thread):
             for spin in dock.findChildren(QDoubleSpinBox) + dock.findChildren(QSpinBox):
-                spin.setFixedWidth(88)
                 layout = spin.parentWidget().layout()
                 if layout is not None:
                     self._align_layout_widget_right(layout, spin)
@@ -25278,6 +26217,7 @@ class MainWindow(QMainWindow):
                 layout = combo.parentWidget().layout()
                 if layout is not None:
                     self._align_layout_widget_right(layout, combo)
+        self._apply_editor_field_width()      # (no-op until the shared width is known)
 
     def _build_props(self):
         """Properties of the selected object: name, type, transform, size, colour."""
@@ -25451,7 +26391,7 @@ class MainWindow(QMainWindow):
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
         if load_addon("simplecad_thermal") is not None:
-            act(m, "&Thermal Study…", self._open_thermal_study,
+            act(m, "&Thermal…", self._open_thermal_study,
                 tip="Simulate the temperatures of parts and assemblies with heat sources",
                 icon=app_icon("thermal_sim.png"))
         m.addSeparator()
@@ -25485,7 +26425,7 @@ class MainWindow(QMainWindow):
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
         if load_addon("simplecad_thermal") is not None:
-            act(m, "&Thermal Study…", self._open_thermal_study,
+            act(m, "&Thermal…", self._open_thermal_study,
                 tip="Simulate the temperatures of parts and assemblies with heat sources",
                 icon=app_icon("thermal_sim.png"))
         m.addSeparator()
@@ -25899,6 +26839,20 @@ class MainWindow(QMainWindow):
         self._set_mode(MODE_SELPLANE)
         self.view3d.setFocus()
         self._st("Click a plane (XY / XZ / YZ), surface or flat face of a solid | Esc / RMB: cancel")
+
+    def _handle_visibility_checkboxes(self, layout):
+        """'Show move arrows' / 'Show rotation rings' check boxes of the Surface and Cut
+        Surface panels (explorer style). Hidden handles are neither drawn nor draggable."""
+        boxes = []
+        for text, tip in (("Show move arrows",
+                           "Show the X / Y / Z move arrows in the 3-D view"),
+                          ("Show rotation rings",
+                           "Show the X / Y / Z rotation rings in the 3-D view")):
+            box = QCheckBox(text); box.setChecked(True); box.setToolTip(tip)
+            _style_checkbox_like_explorer(box)
+            box.toggled.connect(lambda _on: self.view3d.update())
+            layout.addWidget(box); boxes.append(box)
+        return boxes
 
     def _surface_frame(self, parent, face, offset, rotation, tangent_position=None):
         if parent is None:
@@ -28217,7 +29171,7 @@ class MainWindow(QMainWindow):
         level = 0.0 if abs(distance) <= 1e-4 else round(distance, 4)
         temp = copy.copy(sk)
         for key in ("vertices", "segments", "circles", "arcs", "ellipses",
-                    "points_free", "text_groups", "constraints"):
+                    "points_free", "text_groups", "groups", "constraints"):
             setattr(temp, key, [])
 
         def vertex(point):
@@ -28340,6 +29294,40 @@ class MainWindow(QMainWindow):
         return underlays
 
     @staticmethod
+    def _follow_moved_levels(sk, underlays):
+        """Projected references are grouped by their distance (level) to the source sketches.
+        When this sketch's plane moved along its normal (its body, face or surface changed),
+        the sources now lie at another level: relabel the references of a level to the level
+        their source sketches (by name) are found at now, so the refresh moves them instead
+        of adding a second copy next to the stale one."""
+        keys = ("vertices", "segments", "circles", "arcs", "ellipses", "points_free")
+        sources = {}
+        for key in keys:
+            for element in getattr(sk, key):
+                level = getattr(element, "reference_level", None)
+                source = getattr(element, "reference_source", None)
+                if level is not None and source is not None:
+                    sources.setdefault(level, set()).add(source[0])
+        current = set(sources)
+        for item in underlays:
+            if item.get("sibling") or item["level"] in current:
+                continue
+            names = {entry.get("name") for entry in item["entries"]}
+            old = next((level for level, used in sources.items()
+                        if level not in {u["level"] for u in underlays if not u.get("sibling")}
+                        and used & names), None)
+            if old is None:
+                continue
+            new = item["level"]
+            for key in keys:
+                for element in getattr(sk, key):
+                    if getattr(element, "reference_level", None) == old:
+                        element.reference_level = new
+            sk.reference_generated_levels = [new if level == old else level
+                                             for level in sk.reference_generated_levels]
+            sources[new] = sources.pop(old); current = set(sources)
+
+    @staticmethod
     def _reference_underlays(underlays):
         """{level: underlay} of the groups whose geometry can be projected / referenced
         (sibling sketches from the object explorer are display-only)."""
@@ -28370,7 +29358,7 @@ class MainWindow(QMainWindow):
         kept = set()
         projected = copy.copy(active_sketch)
         for key in ("vertices", "segments", "circles", "arcs", "ellipses",
-                    "points_free", "text_groups", "constraints"):
+                    "points_free", "text_groups", "groups", "constraints"):
             setattr(projected, key, [])
         for entry in underlay["entries"]:
             source = entry["sketch"]
@@ -28809,6 +29797,7 @@ class MainWindow(QMainWindow):
         parent = self._sketch_parent[0] if self._sketch_parent else None
         direct_source = parent.get("parent") if parent is not None else None
         self._release_unreferenceable_levels(sk, underlays)
+        self._follow_moved_levels(sk, underlays)
         for item in underlays:
             if item["level"] < 0 and not item.get("sibling"):
                 item["reference"] = any(entry is direct_source for entry in item["entries"]) or \
@@ -28950,6 +29939,13 @@ class MainWindow(QMainWindow):
                  "distances are information only" if on
                  else "Support geometry OFF — drawing profile geometry")
         self.view3d.update()
+
+    def _on_sketch_group(self, on):
+        """Group (on=True) or ungroup the Select-mode selection of the active sketch."""
+        view = self.view3d
+        done = view._group_selection() if on else view._ungroup_selection()
+        if done: self._sketch_commit()
+        view.update()
 
     def _on_delete_selected(self):
         sv=self.state.get("sketch_view_state",{})
@@ -29382,6 +30378,10 @@ class MainWindow(QMainWindow):
         return sel
 
     def _delete_selected_entry(self):
+        if self.state.get("mode") == MODE_SKETCH:
+            # the Del shortcut of this action fires before the sketch view sees the key:
+            # in a sketch it deletes the selected sketch geometry, never a scene object
+            self._on_delete_selected(); return
         sel = self._selected_or_warn()
         if sel is not None: self._delete_entry(sel)
 
@@ -29628,7 +30628,80 @@ class MainWindow(QMainWindow):
             raise ValueError(f"{sk.name}: constraints cannot follow the changed supporting face.")
 
     def _regenerate(self, entry, previous_faces=None):
-        """Rebuild everything that depends on entry (after it was edited)."""
+        """Rebuild everything that depends on entry (after it was edited): its descendants in
+        the explorer and — once the outermost call is done — sketches whose projected
+        references (geometry of parallel sketches) moved because of it."""
+        depth = getattr(self, "_regenerate_depth", 0)
+        self._regenerate_depth = depth + 1
+        try:
+            self._regenerate_tree(entry, previous_faces)
+        finally:
+            self._regenerate_depth = depth
+        if depth == 0:
+            self._refresh_projected_references()
+
+    def _refresh_projected_references(self, passes=3):
+        """Re-project the referenced levels of every other sketch, as opening it does
+        (_begin_sketch), and rebuild the extrusions of the sketches whose references moved,
+        as closing it does — so a sketch referencing e.g. a profile sketch follows when that
+        sketch, its body or the face / surface it lies on changes. Repeats while a refresh
+        moves further references (a sketch can reference one that was just updated)."""
+        if getattr(self, "_refreshing_references", False):
+            return
+        self._refreshing_references = True
+        saved_parent = getattr(self, "_sketch_parent", None)
+        try:
+            for _ in range(passes):
+                moved = []
+                for entry in self.state["objects"]:
+                    sk = entry.get("sketch") if entry.get("type") == "sketch" else None
+                    if sk is None or entry.get("preview") or sk is self.state.get("active_sketch"):
+                        continue
+                    keys = ("vertices", "segments", "circles", "arcs", "ellipses")
+                    if not any(getattr(e, "reference_level", None) is not None
+                               for key in keys for e in getattr(sk, key)):
+                        continue
+                    before = self._sketch_signature(sk)
+                    # underlays are grouped relative to this sketch's own place in the explorer
+                    self._sketch_parent = (entry.get("parent"), entry.get("face"))
+                    try:
+                        underlays = self._collect_sketch_underlays(sk)
+                        self._release_unreferenceable_levels(sk, underlays)
+                        self._follow_moved_levels(sk, underlays)
+                        referenced = {getattr(e, "reference_level", None) for key in keys
+                                      for e in getattr(sk, key)} - {None}
+                        for item in underlays:
+                            if item["level"] < 0 and not item.get("sibling") and \
+                                    item["level"] in referenced:
+                                self._project_sketch_level(sk, item)
+                    except (ValueError, ArithmeticError) as ex:
+                        _dbg(f"_refresh_projected_references: {entry.get('name')}: {ex}")
+                        continue
+                    if self._sketch_signature(sk) != before:
+                        moved.append(entry)
+                if not moved:
+                    break
+                for entry in moved:
+                    try:
+                        self._regenerate_depth = getattr(self, "_regenerate_depth", 0) + 1
+                        self._regenerate_tree(entry)
+                    except (ValueError, ArithmeticError) as ex:
+                        _dbg(f"_refresh_projected_references: rebuilding {entry.get('name')}: {ex}")
+                    finally:
+                        self._regenerate_depth -= 1
+        finally:
+            self._sketch_parent = saved_parent
+            self._refreshing_references = False
+
+    @staticmethod
+    def _sketch_signature(sk):
+        """Positions, sizes and element counts of a sketch (detects a refresh that moved it)."""
+        return (tuple((round(v.x, 9), round(v.y, 9)) for v in sk.vertices),
+                tuple(round(c.radius, 9) for c in sk.circles),
+                len(sk.segments), len(sk.circles), len(sk.arcs), len(sk.points_free))
+
+    def _regenerate_tree(self, entry, previous_faces=None):
+        """_regenerate for entry and its descendants in the explorer."""
         objects = self.state["objects"]
         if entry["type"] == "sketch":
             for ext in entry_children(entry, objects):
@@ -29640,7 +30713,7 @@ class MainWindow(QMainWindow):
                 if res is None:
                     raise ValueError(f"Cannot rebuild extrusion {ext['name']}.")
                 self._set_solid(ext, res)
-                self._regenerate(ext, previous_faces=old_faces)
+                self._regenerate_tree(ext, previous_faces=old_faces)
         elif entry["type"] == "surface":
             entry["frame"] = self._surface_frame(entry.get("parent"), entry.get("reference_face"),
                                                  entry["offset"], entry["rotation"],
@@ -29648,7 +30721,7 @@ class MainWindow(QMainWindow):
             for child in entry_children(entry, objects):
                 if child["type"] == "sketch":
                     child["sketch"].frame = entry["frame"]
-                self._regenerate(child)
+                self._regenerate_tree(child)
         else:
             faces = entry.get("faces", [])
             for child in entry_children(entry, objects):
@@ -29662,7 +30735,7 @@ class MainWindow(QMainWindow):
                         previous_face = previous_faces[fi] if previous_faces is not None and \
                             0 <= fi < len(previous_faces) else None
                         self._refresh_face_references(child["sketch"], faces[fi], previous_face)
-                self._regenerate(child)
+                self._regenerate_tree(child)
 
     # ── properties panel ──────────────────────────────────────────────────────
     def _show_prop_opacity(self, on):
@@ -30473,6 +31546,40 @@ class MainWindow(QMainWindow):
                 and not o.get("preview") and o is not exclude and o.get("solid")
                 and o["solid"][1] and entry_visible(o)]
 
+    def _extent_mesh(self, body, own, objs):
+        """(verts, tris, faces) of a body as "up to surface" sees it: its current solid — but
+        when the cut `own` (the cut being built or edited) is applied to it, the body without
+        that cut (base minus the other cuts). Otherwise a cut would measure against, and be
+        trimmed by, its own hole. The base keeps its face indices in the cut body (cuts only
+        append faces), so chosen target faces still match. Cached per body."""
+        current = (body["solid"][0], body["solid"][1], body.get("faces", []))
+        if own is None or not own.get("cut") or "base" not in own or "base" not in body:
+            return current
+        index = next((i for i, o in enumerate(objs) if o is body), None)
+        if index is None:
+            return current
+        cutters = [c for c in objs[index+1:] if c["type"] == "extrusion" and c.get("cut")
+                   and "base" in c and _cut_overlaps(body, c)]
+        if not any(c is own for c in cutters):
+            return current
+        others = [c for c in cutters if c is not own]
+        key = (id(body["base"]), body.get("_base_ver", 0)) + \
+              tuple((id(c["base"]), c.get("_base_ver", 0)) for c in others)
+        cached = body.get("_extent_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        mesh = csg_subtract(body["base"], [c["base"] for c in others]) if others else body["base"]
+        body["_extent_cache"] = (key, mesh)
+        return mesh
+
+    def _own_cut_entry(self, sel, exclude, objs):
+        """The extrusion entry whose result is currently shown for this build: the one being
+        edited, or the live preview of a new extrusion of sketch sel."""
+        if exclude is not None:
+            return exclude
+        return next((o for o in objs if o["type"] == "extrusion" and o.get("preview")
+                     and o.get("parent") is sel), None)
+
     def _through_extent(self, sk, parent, objs, exclude):
         """(z0, height) along the sketch normal spanning the parent body and every body that
         touches it (directly or through other touching bodies); None without a parent."""
@@ -30491,40 +31598,54 @@ class MainWindow(QMainWindow):
         z0 = float(proj.min()) - eps
         return z0, float(proj.max()) - z0 + eps
 
-    def _resolve_target(self, target, objs):
+    def _resolve_target(self, target, objs, own=None):
         """The surface a chosen face stands for: ("plane", (P0, n)) for a planar face (the plane
-        is continued), ("face", (verts, tris, tool mesh)) for a curved one; None if gone."""
+        is continued), ("face", (verts, tris, tool mesh)) for a curved one; None if gone.
+        own: the cut being built — its target body is used without that cut (_extent_mesh)."""
         te = target.get("entry"); fi = target.get("face")
         faces = te.get("faces", []) if te is not None and any(o is te for o in objs) else []
         if fi is not None and 0 <= fi < len(faces) and te.get("solid"):
             face = faces[fi]
             if face.get("planar") and "frame" in face:
                 fr = face["frame"]; return "plane", (np.asarray(fr[0], float), np.asarray(fr[3], float))
+            V, T = te["solid"]; mesh = (V, T, faces)
+            uncut = self._extent_mesh(te, own, objs)
+            if uncut is not mesh and uncut[0] is not V and fi < len(uncut[2]) and \
+                    uncut[2][fi].get("tris") and uncut[2][fi].get("kind") == face.get("kind"):
+                V, T, faces = uncut; mesh = uncut; face = faces[fi]
             if face.get("tris"):
-                V, T = te["solid"]; Tn = np.asarray(T, int).reshape(-1, 3)
-                return "face", (V, Tn[face["tris"]], (V, T, faces))
+                Tn = np.asarray(T, int).reshape(-1, 3)
+                return "face", (V, Tn[face["tris"]], mesh)
         pl = target.get("plane")
         if pl is not None: return "plane", (np.asarray(pl[0], float), np.asarray(pl[1], float))
         return None
 
-    def _surface_extent(self, sk, loops, sides, objs, exclude, sel, target=None):
+    def _surface_extent(self, sk, loops, sides, objs, exclude, sel, target=None, cut=False,
+                        own=None):
         """Extrusion to the next surface in the extrusion direction (straight lines only), or
         to the chosen target face. sides: +1 / -1 along the sketch normal.
+        Bodies are seen without the cut `own` (the one being built, see _extent_mesh).
+        cut: a cut removes material up to the surface — automatically it runs to where it
+        leaves the material it cuts (the next surface the rays exit a body through), and a body
+        only trims its end where there is material beyond that surface to keep.
         Returns (z0, height, trim tools) or None."""
         O, u, v, w = sk.frame
         S2 = profile_samples(loops)
         origins = O + np.array([p[0] for p in S2])[:, None]*u + np.array([p[1] for p in S2])[:, None]*v
         body_items = []          # (verts, tris hit by the rays, tool mesh used to trim the end)
         planes = []              # (point, normal, bounded region or None)
+        facing = 0               # rays count every body face (+1: only faces they exit through)
         if target is not None:
-            res = self._resolve_target(target, objs)
+            res = self._resolve_target(target, objs, own)
             if res is None: return None
             if res[0] == "plane": planes.append((res[1][0], res[1][1], None))
             else:                 body_items.append(res[1])
             if len(sides) == 1: sides = (sides[0], -sides[0])     # the face may lie behind
         else:
             for b in self._solid_bodies(objs, exclude):
-                body_items.append((b["solid"][0], b["solid"][1], (b["solid"][0], b["solid"][1], b.get("faces", []))))
+                mesh = self._extent_mesh(b, own, objs)
+                body_items.append((mesh[0], mesh[1], mesh))
+            if cut: facing = 1
             planes = [(np.zeros(3), np.array(n, float), None) for n in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
             for o in objs:      # a sketch is a bounded surface: its closed profile regions
                 if o["type"] == "sketch" and o is not sel and entry_visible(o):
@@ -30540,7 +31661,12 @@ class MainWindow(QMainWindow):
             best = np.full(len(origins), np.inf); who = np.full(len(origins), -1)
             targets = []
             for bv, bt, tool in body_items:
-                t = _ray_nearest(origins, d, bv, bt)
+                t = _ray_nearest(origins, d, bv, bt, facing=facing)
+                if cut and target is not None:
+                    # a chosen curved face: a cut ends where it leaves the material through it
+                    # (not where it enters it, e.g. the face the sketch itself lies on)
+                    t_exit = _ray_nearest(origins, d, bv, bt, facing=1)
+                    t = np.where(np.isfinite(t_exit), t_exit, t)
                 targets.append(("body", tool)); better = t < best - 1e-9
                 best = np.where(better, t, best); who = np.where(better, len(targets) - 1, who)
             for P0, n, region in planes:
@@ -30559,19 +31685,46 @@ class MainWindow(QMainWindow):
             fin = np.isfinite(best)
             if not fin.any(): continue
             end = float(best[fin].max()); ext[sgn] = end
+            trimmed = set()
             for ti in set(who[fin & (best < end - 1e-4)].tolist()) | \
                       {i for i in set(who[fin].tolist()) if targets[i][0] == "plane" and
                        abs(float(d @ targets[i][1][1])) < 1 - 1e-9}:
                 kind, obj = targets[ti]
                 if kind == "body":
-                    tools.append(obj)
+                    hits = fin & (who == ti)
+                    if not cut or self._cut_keeps_body(origins[hits], d, best[hits], obj):
+                        tools.append(obj); trimmed.add(ti)
                 else:
                     P0, n = obj; r = n if float(d @ n) > 0 else -n
                     tools.append(halfspace_box(P0, r, O + d*end, 1000.0 + 4*end))
+            last = int(who[fin][int(np.argmax(best[fin]))])
+            if cut and targets[last][0] == "body" and last not in trimmed:
+                # the cut leaves the material into air there: break through a little, since the
+                # rays sample the profile and can miss the deepest point of a curved surface
+                ext[sgn] = end + CUT_BREAKTHROUGH
         if not ext: return None
         z1 = ext.get(1, 0.0); zn = ext.get(-1, 0.0)
         if z1 + zn < 1e-6: return None
         return -zn, z1 + zn, tools
+
+    @staticmethod
+    def _cut_keeps_body(origins, d, t, mesh, step=0.01):
+        """Should a cut that reaches body `mesh` at distances t (per ray) be trimmed by it?
+        Only if there is material beyond the surface it stops at (it must not cut into it) and
+        the cut does not already run through that body on its way there — trimming would then
+        subtract the very material the cut removes, leaving no hole or a patched one. Where the
+        cut leaves the material into air, its flat end beyond the surface does no harm."""
+        if not len(origins):
+            return False
+        lo, hi = _bbox(mesh[0]); cache = {}
+        def inside(q):
+            return bool(np.all(q >= lo - 1e-6) and np.all(q <= hi + 1e-6)) and \
+                _point_in_mesh(q, mesh, cache)
+        picks = np.unique(np.linspace(0, len(origins) - 1, min(len(origins), 9)).astype(int))
+        beyond = any(inside(origins[k] + d*(t[k] + step)) for k in picks)
+        through = any(inside(origins[k] + d*(t[k]*f)) for k in picks for f in (0.25, 0.5, 0.75)
+                      if t[k]*f > step)
+        return beyond and not through
 
     @staticmethod
     def _ring_sweep_hit(res, Q, C, axis, sgn):
@@ -30628,16 +31781,18 @@ class MainWindow(QMainWindow):
     def _ring_surface_candidates(self, sk, Q, C, axis, objs, exclude, sel):
         """Surfaces an automatic "up to surface" ring sweep can stop at, like the straight
         extrusion: solid bodies, the coordinate planes and the closed regions of other
-        visible sketches. Bodies outside the axial span of the sweep are skipped."""
+        visible sketches. Bodies outside the axial span of the sweep are skipped; they are
+        seen without the sweep's own cut (_extent_mesh)."""
         axial = (Q - C) @ axis
         a_lo, a_hi = float(axial.min()) - 1e-6, float(axial.max()) + 1e-6
+        own = self._own_cut_entry(sel, exclude, objs)
         cands = []
         for b in self._solid_bodies(objs, exclude):
-            bv = np.asarray(b["solid"][0], float)
+            mesh = self._extent_mesh(b, own, objs)
+            bv = np.asarray(mesh[0], float)
             ba = (bv - C) @ axis
             if ba.max() < a_lo or ba.min() > a_hi: continue
-            cands.append(("face", (b["solid"][0], b["solid"][1],
-                                   (b["solid"][0], b["solid"][1], b.get("faces", [])))))
+            cands.append(("face", (mesh[0], mesh[1], mesh)))
         cands += [("plane", (np.zeros(3), np.array(n, float)))
                   for n in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
         for o in objs:
@@ -30660,7 +31815,7 @@ class MainWindow(QMainWindow):
         S2 = profile_samples(loops)
         Q = O + np.array([p[0] for p in S2])[:, None]*u + np.array([p[1] for p in S2])[:, None]*v
         if target:
-            res = self._resolve_target(target, objs)
+            res = self._resolve_target(target, objs, self._own_cut_entry(sel, exclude, objs))
             if res is None: return None
             cands = [res]
         else:
@@ -30707,7 +31862,8 @@ class MainWindow(QMainWindow):
         tools = []
         if to_surface:
             sides = (1, -1) if direction == "sym" else (-1,) if direction == "rev" else (1,)
-            r = self._surface_extent(sk, loops, sides, objs, exclude, sel, target)
+            r = self._surface_extent(sk, loops, sides, objs, exclude, sel, target, cut=cut,
+                                     own=self._own_cut_entry(sel, exclude, objs))
             if r is None: return None
             z0, hh, tools = r
         else:
@@ -32725,7 +33881,7 @@ class MainWindow(QMainWindow):
         # an open assembly window asks about its own unsaved changes first (Cancel keeps it)
         if self._assembly_dialog is not None and not self._assembly_dialog.close():
             e.ignore(); return
-        # the Thermal Study window (add-on) also asks about its unsaved study first
+        # the Thermal window (add-on) also asks about its unsaved study first
         if self._thermal_dialog is not None and not self._thermal_dialog.close():
             e.ignore(); return
         if self._maybe_save():
@@ -32845,7 +34001,7 @@ class MainWindow(QMainWindow):
             self._assembly_dialog = None
 
     def _open_thermal_study(self):
-        """Thermal Study window of the simplecad_thermal add-on (kept open like the Assembly)."""
+        """Thermal window of the simplecad_thermal add-on (kept open like the Assembly)."""
         addon = load_addon("simplecad_thermal")
         if addon is not None:
             addon.open_window(self)

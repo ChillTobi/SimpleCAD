@@ -1,7 +1,7 @@
 # SimpleCAD
-An easy to use open source CAD.
-SimpleCAD main idea is to make it's useability as easy as possible. 
-Objects are created always with a sketch which can be extruded to different forms and every extrusion itself (exception are rounded shapes) can hold again a sketch.
+SimpleCAD is an open source construction tool, which it's main idea is to make it's useability as easy as possible. 
+Objects are created always with a sketch which can be extruded to different forms and every extrusion itself can hold again a sketch, this makes it clear how the object relationships are.
+It also contains an Assembly and Technical Drawing Tool.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="doc/scad_construction.png">

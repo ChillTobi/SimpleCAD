@@ -10,6 +10,9 @@ Units: millimetres.
 
 Menu: File (New, Open, Recent Files, Import, Save, Save As, Export STEP/STL or Technical Drawing, Exit) ·
 Edit (incl. Measure and the configurable Settings) · View · Help.
+Add-ons (load_addon): optional modules next to this file. simplecad_thermal.py adds the Thermal
+Study window (toolbar button right of Assembly, File / Edit menus); without the file the button and
+menu entries are not shown.
 Measure tool (toolbar "Measure" / Edit → Measure): click edges and corners of the solids (any
 number); lengths, the relations between edges (connected / same face / parallel / perpendicular
 with 3-D and 2-D XY values) and, for corners, the 3-D distance, ΔX / ΔY / ΔZ and angles are shown
@@ -282,6 +285,7 @@ Python 3.10, Windows. Packages: PyQt5 5.15, numpy 2.2, PyOpenGL 3.1. DXF sketch 
 STEP import/export also uses CadQuery/OCP; STL import has no extra dependency. UI styling uses qt-modern-style 2.0.1.
 """
 import sys, os, json, copy, math, struct, datetime, traceback, tempfile, collections, ctypes
+import importlib, importlib.util
 import html
 import re
 import faulthandler
@@ -302,7 +306,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QByteArray, QBuffer, QMarginsF, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
                           QItemSelectionModel,
-                          QLocale, QEventLoop, QEvent, QtCriticalMsg, QtFatalMsg)
+                          QLocale, QEventLoop, QEvent, QObject, QtCriticalMsg, QtFatalMsg)
 from PyQt5.QtGui import (QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath,
                          QTransform, QCursor, QPolygonF, QKeySequence, QPixmap, QIcon,
                          QPalette, QPdfWriter, QImage, QFontInfo, QPicture, QPageSize)
@@ -511,8 +515,49 @@ def _set_dark_title_bar(window):
         result = set_attribute(
             hwnd, attribute, ctypes.byref(enabled), ctypes.sizeof(enabled))
         if result == 0:
-            return
-    _dbg(f"Windows rejected the dark title bar setting (HRESULT {result:#x})")
+            break
+    else:
+        _dbg(f"Windows rejected the dark title bar setting (HRESULT {result:#x})")
+        return
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        on_screen = bool(user32.IsWindowVisible(hwnd))
+    except (OSError, AttributeError):
+        on_screen = False
+    if on_screen:
+        # Windows 10 keeps drawing an already visible caption in the light colour until it is
+        # repainted (e.g. by maximizing); toggling the caption's active state repaints it.
+        # Calling this before the window appears avoids the light frame entirely.
+        WM_NCACTIVATE = 0x0086
+        try:
+            send_message = user32.SendMessageW
+            send_message.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t,
+                                     ctypes.c_ssize_t]
+            send_message.restype = ctypes.c_ssize_t
+            active = 1 if window.isActiveWindow() else 0
+            send_message(hwnd, WM_NCACTIVATE, 1 - active, 0)
+            send_message(hwnd, WM_NCACTIVATE, active, 0)
+        except (OSError, AttributeError) as exc:
+            _dbg(f"Could not repaint the window frame for the dark title bar: {exc}")
+
+
+class _DarkTitleBarFilter(QObject):
+    """Application-wide: every window and dialog (also message boxes, input and Qt file dialogs)
+    gets the dark Windows title bar. Qt sends the Show event before the native window appears,
+    so the frame is never drawn in the light colour."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Show and isinstance(obj, QWidget) and obj.isWindow() \
+                and obj.windowType() in (Qt.Window, Qt.Dialog):
+            _set_dark_title_bar(obj)
+        return False
+
+
+def install_dark_title_bars(app):
+    if sys_platform.system() == "Windows":
+        app._dark_title_bar_filter = _DarkTitleBarFilter(app)
+        app.installEventFilter(app._dark_title_bar_filter)
 
 
 # simplecad_debug.txt output; overridden by the "debug_enabled" user setting (Edit → Settings → Debug).
@@ -545,6 +590,36 @@ def _json_default(obj):
     if isinstance(obj, np.floating):
         return float(obj)
     return float(obj)
+
+
+# ── add-ons ───────────────────────────────────────────────────────────────────
+# Optional modules next to SimpleCAD.py (or bundled into the executable) that add a feature,
+# e.g. simplecad_thermal.py → the Thermal Study window. A missing add-on hides its toolbar
+# button and menu entries; an add-on that fails to load is logged and hidden the same way.
+# Add-ons import this module as "SimpleCAD" (also when it runs as the main script).
+# Each add-on defines ADDON_TITLE and ADDON_VERSION (listed in Help → About). Keep this list in
+# step with ADDONS in build.py.
+KNOWN_ADDONS = ("simplecad_thermal",)
+_ADDONS = {}
+
+def load_addon(name):
+    """The add-on module `name`, or None when its file is not there or it fails to load."""
+    if name in _ADDONS:
+        return _ADDONS[name]
+    module = None
+    sys.modules.setdefault("SimpleCAD", sys.modules[__name__])
+    try:
+        found = importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        found = False
+    if found:
+        try:
+            module = importlib.import_module(name)
+        except Exception:
+            _trace(f"Add-on {name} could not be loaded:\n{traceback.format_exc()}")
+            module = None
+    _ADDONS[name] = module
+    return module
 
 from OpenGL.GLU import *
 from PyQt5.QtOpenGL import QGLFormat, QGLWidget
@@ -12215,6 +12290,7 @@ CONSTRAINT_CLASSES = {cls.__name__: cls for cls in
 DEFAULT_SOLID_COLOR = (0.5, 0.8, 1.0)
 MATERIAL_DENSITIES_G_CM3 = {
     "Aluminium": 2.70,
+    "Aluminium Black Anodized": 2.70,   # heatsink extrusions (6063), black anodised surface
     "Copper": 8.96,
     "Tin": 7.31,
     "Brass": 8.50,
@@ -12225,6 +12301,7 @@ MATERIAL_DENSITIES_G_CM3 = {
     "PET": 1.38,
     "Micarta": 1.35,
     "G10": 1.85,
+    "FR-4": 1.85,          # glass-epoxy PCB laminate (without copper)
     "GFK": 1.90,
     "CFK": 1.60,
     "Wood (Oak)": 0.75,
@@ -21161,15 +21238,18 @@ def _assembly_faces(faces):
              "tris": [int(index) for index in face.get("tris", ())]} for face in faces or []]
 
 def assembly_body(name, vertices, triangles, faces, color=DEFAULT_SOLID_COLOR, opacity=1.0,
-                  fused=False):
+                  fused=False, material=None):
+    """Snapshot of a solid. `material` is the project object's material (None for files)."""
     return {"name": name, "color": [float(c) for c in list(color)[:3]], "opacity": float(opacity),
             "vertices": np.asarray(vertices, float).reshape(-1, 3).copy(),
             "triangles": [tuple(int(i) for i in tri) for tri in triangles],
-            "faces": _assembly_faces(faces), "fused": bool(fused)}
+            "faces": _assembly_faces(faces), "fused": bool(fused),
+            "material": material if material in MATERIAL_DENSITIES_G_CM3 else None}
 
 def assembly_body_from_entry(entry, fused=False):
     return assembly_body(entry["name"], entry["solid"][0], entry["solid"][1], entry.get("faces", []),
-                         entry.get("color", DEFAULT_SOLID_COLOR), entry.get("opacity", 1.0), fused)
+                         entry.get("color", DEFAULT_SOLID_COLOR), entry.get("opacity", 1.0), fused,
+                         entry.get("material"))
 
 def assembly_bodies_from_parts(parts):
     """Snapshots of the parts; solids already contained in a Bridge are flagged so they are
@@ -21596,7 +21676,7 @@ def assembly_to_data(assembly, keep_empty=False):
             "signature", "file_stamp", "file_root") if key in component}
         data["bodies"] = [{
             "name": body["name"], "color": body["color"], "opacity": body["opacity"],
-            "fused": body.get("fused", False),
+            "fused": body.get("fused", False), "material": body.get("material"),
             "vertices": body["vertices"].tolist(), "triangles": [list(t) for t in body["triangles"]],
             "faces": body["faces"]} for body in component["bodies"]]
         components.append(data)
@@ -21624,7 +21704,8 @@ def assembly_from_data(data):
             "pivot": [float(x) for x in item.get("pivot", (0, 0, 0))],
             "bodies": [assembly_body(body["name"], body["vertices"], body["triangles"],
                                      body.get("faces", []), body.get("color", DEFAULT_SOLID_COLOR),
-                                     body.get("opacity", 1.0), body.get("fused", False))
+                                     body.get("opacity", 1.0), body.get("fused", False),
+                                     body.get("material"))
                        for body in item.get("bodies", [])]}
         for key in ("source_name", "path", "signature", "file_stamp", "file_root"):
             if key in item:
@@ -23959,9 +24040,30 @@ class MainWindow(QMainWindow):
                 self.restoreState(QByteArray.fromHex(toolbar_state.encode("ascii")), 1)
             except (UnicodeEncodeError, ValueError):
                 pass
+        # The saved state also records which tool panels were open; a panel restored without its
+        # command (e.g. Gear) would otherwise stay on screen through sketching and extrusion.
+        for dock in self._command_docks():
+            dock.hide()
         self._dock_measure.setVisible(self.view3d._measure_mode)    # only with the Measure tool
         self._settings["session"]["window_geometry"] = ""
         self._refresh_recent_files_menu()
+
+    def _command_docks(self):
+        """Panels that belong to one running tool and are shown/hidden only by that tool."""
+        return (self._dock_ext, self._dock_surface, self._dock_feat, self._dock_angle_draft,
+                self._dock_cut, self._dock_gear, self._dock_thread)
+
+    def createPopupMenu(self):
+        # Qt's right-click menu on toolbars and dock title bars lists every dock; opening a
+        # tool panel from there would show it without its tool running.
+        menu = super().createPopupMenu()
+        if menu is not None:
+            hidden = {dock.toggleViewAction() for dock in self._command_docks()}
+            hidden.add(self._dock_measure.toggleViewAction())
+            for action in menu.actions():
+                if action in hidden:
+                    menu.removeAction(action)
+        return menu
 
     def _clamp_window_rect(self, rect):
         screens = QApplication.screens()
@@ -24169,6 +24271,17 @@ class MainWindow(QMainWindow):
         tb2.addSeparator()
         tb2.addAction(self.act_technical_drawing)
         tb2.addAction(self.act_assembly)
+        # Thermal Study add-on: the button exists only while simplecad_thermal.py is available
+        self._thermal_addon = load_addon("simplecad_thermal")
+        self._thermal_dialog = None
+        self.act_thermal = None
+        if self._thermal_addon is not None:
+            self.act_thermal = QAction(
+                QIcon(os.path.join(icon_dir, "thermal_sim.png")), "Thermal Study", self,
+                triggered=self._open_thermal_study,
+                toolTip="Thermal Study - Simulate the temperatures of parts and assemblies "
+                        "with heat sources")
+            tb2.addAction(self.act_thermal)
         self.sp_grid=QDoubleSpinBox(); self.sp_grid.setRange(1,100); self.sp_grid.setValue(DEFAULT_GRID)
         self.sp_grid.setSuffix(" mm"); self.sp_grid.setToolTip("Grid spacing (mm)")
         self.sp_grid.setMinimumWidth(100)
@@ -25337,6 +25450,10 @@ class MainWindow(QMainWindow):
         act(m, "&Assembly…", self._open_assembly,
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
+        if load_addon("simplecad_thermal") is not None:
+            act(m, "&Thermal Study…", self._open_thermal_study,
+                tip="Simulate the temperatures of parts and assemblies with heat sources",
+                icon=app_icon("thermal_sim.png"))
         m.addSeparator()
         act(m, "E&xit", self.close, key="exit", icon=app_icon("exit.png"))
         m=mb.addMenu("&Edit")
@@ -25367,6 +25484,10 @@ class MainWindow(QMainWindow):
         act(m, "&Assembly…", self._open_assembly,
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
+        if load_addon("simplecad_thermal") is not None:
+            act(m, "&Thermal Study…", self._open_thermal_study,
+                tip="Simulate the temperatures of parts and assemblies with heat sources",
+                icon=app_icon("thermal_sim.png"))
         m.addSeparator()
         act(m, "&Edit Selected…", self._edit_selected_entry, None,
             "Re-open the selected sketch for drawing / the selected extrusion for its settings",
@@ -25470,6 +25591,8 @@ class MainWindow(QMainWindow):
         chk_debug.setChecked(bool(self._settings["user"]["debug_enabled"]))
         chk_debug.setToolTip("Write diagnostic messages to the debug output file")
         debug_layout.addWidget(chk_debug)
+        for checkbox in (chk_fps, chk_debug):
+            _style_checkbox_like_explorer(checkbox)      # as the object explorer
         lbl_debug = QLabel(f"File: {_DBG_LOG}")
         lbl_debug.setWordWrap(True)
         lbl_debug.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -25734,6 +25857,9 @@ class MainWindow(QMainWindow):
         self.act_technical_drawing.setEnabled(mode == MODE_NORMAL)
         self.act_assembly.setVisible(not in_sk)
         self.act_assembly.setEnabled(mode == MODE_NORMAL)
+        if self.act_thermal is not None:
+            self.act_thermal.setVisible(not in_sk)
+            self.act_thermal.setEnabled(mode == MODE_NORMAL)
         if mode!=MODE_NORMAL: self._set_measure_mode(False)
         if mode!=MODE_NORMAL and self._angle_draft_entry is not None:
             self._cancel_angle_draft()
@@ -32060,6 +32186,20 @@ class MainWindow(QMainWindow):
         v.update()
 
     # ── help menu ─────────────────────────────────────────────────────────────
+    @staticmethod
+    def _addon_versions_html():
+        """One line per installed add-on: title, version and module name."""
+        lines = []
+        for name in KNOWN_ADDONS:
+            module = load_addon(name)
+            if module is None:
+                continue
+            title = str(getattr(module, "ADDON_TITLE", name))
+            version = str(getattr(module, "ADDON_VERSION", "unknown version"))
+            lines.append(f"{html.escape(title)} {html.escape(version)} "
+                         f"<span style='color:#9aa3ad'>({html.escape(name)})</span>")
+        return "<br>".join(lines) if lines else "none installed"
+
     def _show_about(self):
         gl_info = "<br>".join(html.escape(line) for line in _GL_INFO) \
             if _GL_INFO else "OpenGL context not initialized yet"
@@ -32074,8 +32214,9 @@ class MainWindow(QMainWindow):
             f"<p><b>Python core:</b> {html.escape(sys.version.split()[0])}<br>"
             f"<b>Qt:</b> {html.escape(QT_VERSION_STR)} "
             f"(PyQt {html.escape(PYQT_VERSION_STR)})<br>"
-            f"<b>qt-modern-style:</b> {html.escape(qt_modern_style.__version__)}<br><br>"
-            f"<b>OpenGL:</b><br><code>{gl_info}</code></p>"
+            f"<b>qt-modern-style:</b> {html.escape(qt_modern_style.__version__)}</p>"
+            f"<p><b>Add-ons:</b><br>{self._addon_versions_html()}</p>"
+            f"<p><b>OpenGL:</b><br><code>{gl_info}</code></p>"
             "<p><b>GNU license texts:</b><br>"
             '<a href="https://www.gnu.org/licenses/gpl-3.0.html">GNU General Public License (GPL)</a><br>'
             '<a href="https://www.gnu.org/licenses/lgpl-3.0.html">GNU Lesser General Public License (LGPL)</a><br>'
@@ -32584,6 +32725,9 @@ class MainWindow(QMainWindow):
         # an open assembly window asks about its own unsaved changes first (Cancel keeps it)
         if self._assembly_dialog is not None and not self._assembly_dialog.close():
             e.ignore(); return
+        # the Thermal Study window (add-on) also asks about its unsaved study first
+        if self._thermal_dialog is not None and not self._thermal_dialog.close():
+            e.ignore(); return
         if self._maybe_save():
             if self._assembly_dialog is not None:
                 self._assembly_dialog.close()
@@ -32677,8 +32821,7 @@ class MainWindow(QMainWindow):
             dialog.finished.connect(lambda _result=0, closed=dialog: self._assembly_closed(closed))
             self._assembly_dialog = dialog
             dialog.move(self.frameGeometry().topLeft() + QPoint(60, 60))
-            dialog.show()
-            _set_dark_title_bar(dialog)
+            _set_dark_title_bar(dialog)    # before show(), so the frame is never drawn light
         dialog.show(); dialog.raise_(); dialog.activateWindow()
 
     def _read_project_solids(self, path):
@@ -32700,6 +32843,12 @@ class MainWindow(QMainWindow):
     def _assembly_closed(self, dialog):
         if self._assembly_dialog is dialog:
             self._assembly_dialog = None
+
+    def _open_thermal_study(self):
+        """Thermal Study window of the simplecad_thermal add-on (kept open like the Assembly)."""
+        addon = load_addon("simplecad_thermal")
+        if addon is not None:
+            addon.open_window(self)
 
     def _file_export_drawing(self):
         if self._busy():
@@ -32867,4 +33016,5 @@ if __name__=="__main__":
     install_error_hook()
     install_crash_logging()
     app=QApplication(sys.argv); app.setStyle("Fusion"); _apply_dark_theme(app)
-    win=MainWindow(); win.show(); _set_dark_title_bar(win); sys.exit(app.exec_())
+    install_dark_title_bars(app)      # dark Windows title bar on every window and dialog
+    win=MainWindow(); win.show(); sys.exit(app.exec_())

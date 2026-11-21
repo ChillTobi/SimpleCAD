@@ -16,5 +16,8 @@ Tools like:
 - Thread generator (Customize or Standard metric/imperial threads)
 - Measurement
 
-
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="doc/scad_construction.png">
+  <img alt="Logo" src="doc/scad_construction.png">
+</picture>
 

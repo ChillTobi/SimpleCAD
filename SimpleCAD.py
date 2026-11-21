@@ -150,7 +150,8 @@ Workflow:
      also have a Fixed position/orientation checkbox. New Sketch can use a planar STEP face;
      dependent sketches automatically fix the model until the last dependency is deleted (or a
      new sketch is cancelled). A manually fixed model stays fixed until its checkbox is cleared.
-    File → Export writes the selected solid (or all visible solids) as STEP or STL.
+    File → Export writes the chosen extrusion (and the solids built on it) as STEP or STL:
+    select the extrusion first (Objects explorer or 3-D view, Ctrl+click for several).
     Choose Technical Drawing to open its editor: it starts with the selected solid, or with an
     empty sheet when none is selected. The model of a sheet is chosen in the Views panel (Model of
     this sheet): an extrusion or imported part of the project, a STEP / STL file imported into
@@ -219,12 +220,14 @@ Workflow:
     DXF (AutoCAD R12, mm; layers OUTLINE / THIN / HIDDEN / CENTER / FRAME / TEXT; the shaded
     isometric picture is left out, its edges are kept).
     Assembly (toolbar button right of Technical Drawing, also in the File / Edit menus) opens a
-    window of its own with a 3-D view, a component explorer and an Alignments panel. Add parts takes
-    parent solids of the project (everything built on them comes along); Import adds STEP / STL /
-    OBJ files (a SimpleCAD project .obj contributes each of its parent solids; its child extrusions
-    are included in the component but not listed separately in the Assembly explorer). Parts are
-    snapshots that cannot be edited there, only placed: the selected part carries yellow arrows
-    (move along X / Y / Z) and green rings (rotate about X / Y / Z; rotation snaps every 15°,
+    window of its own with a 3-D view, a component explorer and an Alignments panel. Import (a menu
+    of sources, as in the Thermal window) adds STEP / STL / OBJ files (a SimpleCAD project .obj
+    contributes each of its parent solids; its child extrusions are included in the component but
+    not listed separately in the Assembly explorer) or parts of the open project (parent solids;
+    everything built on them comes along). Parts are
+    snapshots that cannot be edited there, only placed: the selected part carries arrows
+    (move along X / Y / Z) and rings (rotate about X / Y / Z), red / green / blue per axis as in
+    the main window (rotation snaps every 15°,
     Ctrl = free; Shift snaps the move to whole mm), or use the XYZ
     fields. Align (click a surface, a corner, an edge midpoint or a hole rim = centre on the part
     to move, then the same on another part; Alt + click on a surface = object centre) creates a
@@ -331,7 +334,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "1.7b"
+APP_VERSION = "1.8b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -12524,6 +12527,30 @@ def _enlarge_tool_button(button, size=None):
     button.setProperty("_enlarged_icon", True)
 
 
+def origin_toggle_action(parent, view_of):
+    """Toolbar action hiding / showing the origin axes of a 3-D view, as in the main window:
+    not checkable — its icon (origin.png / origin_disabled.png) shows the state.
+    view_of: callable returning the View3D (it may be created after the action)."""
+    icon_dir = os.path.join(_LOG_DIR, "icons")
+    icons = (QIcon(os.path.join(icon_dir, "origin.png")),
+             QIcon(os.path.join(icon_dir, "origin_disabled.png")))
+    action = QAction(icons[0], "Origin axes", parent)
+    action.setToolTip("Origin axes - shown (click to hide)")
+
+    def toggle(_checked=False):
+        view = view_of()
+        visible = not getattr(view, "show_origin_axes", True)
+        action.setIcon(icons[0 if visible else 1])
+        action.setToolTip("Origin axes - shown (click to hide)" if visible
+                          else "Origin axes - hidden (click to show)")
+        if view is not None:
+            view.show_origin_axes = visible
+            view._hover3d = None
+            view.update()
+    action.triggered.connect(toggle)
+    return action
+
+
 def enlarge_toolbar_icons(toolbar):
     """Large icons on all buttons of a toolbar, the buttons keeping their normal size.
     A tool button placed directly in a QToolBar always paints with the toolbar's icon size, so
@@ -23237,6 +23264,8 @@ class AssemblyDialog(QDialog):
         toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         toolbar.setStyleSheet("QToolButton:checked{background:#315f94;border:1px solid #548ac2;"
                               "border-radius:3px;}")
+        self.act_new = action("new_file.png", "New assembly", "New — start an empty assembly",
+                              self._new_file)
         self.act_open = action("open.png", "Open assembly", "Open an .asby assembly file",
                                self._open_file)
         self.act_save = action("save.png", "Save assembly", "Save the assembly to its file", self._save)
@@ -23245,22 +23274,23 @@ class AssemblyDialog(QDialog):
         self.act_export = action(
             "export.png", "Export", "Export the complete assembly (all visible parts) as STEP or STL",
             self._export)
-        for act in (self.act_open, self.act_save, self.act_save_as, self.act_export):
-            toolbar.addAction(act)
         self.act_undo = action("undo.png", "Undo", "Undo the last assembly change", self._undo)
         self.act_redo = action("redo.png", "Redo", "Redo the last undone assembly change", self._redo)
         self.act_undo.setEnabled(False)
         self.act_redo.setEnabled(False)
-        toolbar.addAction(self.act_undo)
-        toolbar.addAction(self.act_redo)
-        toolbar.addSeparator()
-        self.act_add = action("extrusion.png", "Add parts",
-                              "Add parts — choose parent objects of the project; everything built on "
-                              "them is included automatically", self._add_parts)
+        # Import opens a menu of sources, as in the Thermal window
+        self.import_menu = QMenu("&Import", self)
+        self.import_menu.setIcon(QIcon(os.path.join(_LOG_DIR, "icons", "import.png")))
+        self.import_menu.addAction("STEP file…", lambda: self._import_files("step"))
+        self.import_menu.addAction("STL file…", lambda: self._import_files("stl"))
+        self.import_menu.addAction("OBJ file / SimpleCAD project…", lambda: self._import_files("obj"))
+        self.import_menu.addSeparator()
+        self.import_menu.addAction("Parts of the open project…", self._add_parts)
         self.act_import = action(
             "import.png", "Import",
-            "Import STEP / STL / OBJ files)",
-            self._import_files)
+            "Import — STEP, STL or OBJ files, a SimpleCAD project, or parts of the open project "
+            "(everything built on a part is included)", lambda: None)
+        self.act_import.setMenu(self.import_menu)
         self.act_remove = action("delete_selected.png", "Remove",
                                  "Remove the selected component from the assembly",
                                  self._remove_selected)
@@ -23280,14 +23310,6 @@ class AssemblyDialog(QDialog):
             "measurement.png", "Measure",
             "Measure edges and corners on assembly parts",
             self._on_measure_toggled, checkable=True)
-        for act in (self.act_add, self.act_import, self.act_remove):
-            toolbar.addAction(act)
-        toolbar.addSeparator()
-        toolbar.addAction(self.act_align)
-        toolbar.addAction(self.act_exploded)
-        toolbar.addAction(self.act_fit_together)
-        toolbar.addAction(self.act_measure)
-        toolbar.addSeparator()
         self._view_actions = []
         for icon, text, rot_x, rot_z in (
                 ("view_isometric.png", "Isometric", -54.735610317245346, -135.0),
@@ -23298,11 +23320,16 @@ class AssemblyDialog(QDialog):
             view_action = action(icon, text, f"{text} view",
                                  lambda rx=rot_x, rz=rot_z: self.view.set_camera(rx, rz))
             self._view_actions.append(view_action)
-            toolbar.addAction(view_action)
+        self.act_origin = origin_toggle_action(self, lambda: getattr(self, "view", None))
         self.act_show_all = action("show_all_objects.png", "Show all",
                                    "Show all components and fit them into the view", self._show_all)
-        toolbar.addAction(self.act_show_all)
-        toolbar.addSeparator()
+        # the same order as the Thermal window: file | import / export | undo / redo | tools
+        for act in (self.act_new, self.act_open, self.act_save, self.act_save_as, None,
+                    self.act_import, self.act_export, None, self.act_undo, self.act_redo, None,
+                    self.act_measure, self.act_remove, None,
+                    self.act_align, self.act_exploded, self.act_fit_together, None,
+                    *self._view_actions, self.act_origin, self.act_show_all, None):
+            toolbar.addSeparator() if act is None else toolbar.addAction(act)
         self.act_update_selected = action(
             "update_selected.png", "Update selected",
             "Update Selected — re-read the source of the selected component.",
@@ -23319,7 +23346,8 @@ class AssemblyDialog(QDialog):
         self.menu_bar = menu_bar
         self.act_close = QAction("Close", self, toolTip="Close the assembly window")
         self.act_close.triggered.connect(lambda _checked=False: self.close())
-        for act, keys in ((self.act_open, QKeySequence.Open), (self.act_save, QKeySequence.Save),
+        for act, keys in ((self.act_new, QKeySequence.New),
+                          (self.act_open, QKeySequence.Open), (self.act_save, QKeySequence.Save),
                           (self.act_save_as, QKeySequence("Ctrl+Shift+S")),
                           (self.act_undo, QKeySequence.Undo), (self.act_redo, QKeySequence("Ctrl+Y")),
                           (self.act_close, QKeySequence("Ctrl+W"))):
@@ -23327,15 +23355,16 @@ class AssemblyDialog(QDialog):
             act.setShortcutContext(Qt.WindowShortcut)
             self.addAction(act)            # shortcuts work while the window has focus
         file_menu = menu_bar.addMenu("&File")
-        for act in (self.act_open, self.act_save, self.act_save_as, None, self.act_export,
-                    None, self.act_close):
-            file_menu.addSeparator() if act is None else file_menu.addAction(act)
+        for act in (self.act_new, self.act_open, self.act_save, self.act_save_as, None,
+                    self.import_menu, self.act_export, None, self.act_close):
+            if act is None: file_menu.addSeparator()
+            elif isinstance(act, QMenu): file_menu.addMenu(act)
+            else: file_menu.addAction(act)
         edit_menu = menu_bar.addMenu("&Edit")
-        for act in (self.act_undo, self.act_redo, None, self.act_add, self.act_import,
-                    self.act_remove):
+        for act in (self.act_undo, self.act_redo, None, self.act_remove):
             edit_menu.addSeparator() if act is None else edit_menu.addAction(act)
         view_menu = menu_bar.addMenu("&View")
-        for act in self._view_actions + [None, self.act_show_all]:
+        for act in self._view_actions + [None, self.act_origin, self.act_show_all]:
             view_menu.addSeparator() if act is None else view_menu.addAction(act)
         tools_menu = menu_bar.addMenu("&Tools")
         for act in (self.act_align, self.act_exploded, self.act_fit_together, self.act_measure,
@@ -23482,6 +23511,9 @@ class AssemblyDialog(QDialog):
         root = QVBoxLayout(self)
         root.setMenuBar(menu_bar)
         enlarge_toolbar_icons(toolbar)                   # icons as large as the buttons allow
+        for button in toolbar.findChildren(QToolButton):     # Import opens its source menu
+            if button.defaultAction() is self.act_import:
+                button.setPopupMode(QToolButton.InstantPopup)
         root.addWidget(toolbar)
         root.addWidget(split, 1)
         root.addLayout(bottom)
@@ -24423,16 +24455,21 @@ class AssemblyDialog(QDialog):
         objects = self._window.state["objects"]
         roots = assembly_root_entries(objects)
         if not roots:
-            QMessageBox.information(self, "Add parts",
+            QMessageBox.information(self, "Parts of the open project",
                                     "The project has no parent solids yet. Create an extrusion first, "
                                     "or import a STEP / STL / OBJ file into the assembly.")
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle("Add parent objects")
+        dialog.setWindowTitle("Parts of the open project")
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel("Choose the parent objects. Everything built on a parent "
                                 "is part of it automatically."))
         listing = QListWidget()
+        listing.setStyleSheet(                      # check boxes as in the object explorer
+            "QListWidget::indicator { width: 15px; height: 15px; border: 2px solid rgb(28, 198, 251);"
+            " border-radius: 3px; background-color: #171a1f; }"
+            "QListWidget::indicator:checked { background-color: rgb(28, 198, 251); }"
+            "QListWidget::indicator:unchecked:hover { background-color: #263744; }")
         for root in roots:
             extra = len(assembly_part_entries(root, objects)) - 1
             item = QListWidgetItem(root["name"] + (f"   (+{extra} referenced)" if extra else ""))
@@ -24455,11 +24492,13 @@ class AssemblyDialog(QDialog):
         self.view.fit_all()
         self._set_status(f"Added {', '.join(c['name'] for c in added)}")
 
-    def _import_files(self):
+    def _import_files(self, kind=None):
+        """Import files of one kind ("step" / "stl" / "obj", chosen in the Import menu)."""
+        patterns = {"step": "STEP files (*.step *.stp)", "stl": "STL files (*.stl)",
+                    "obj": "OBJ files / SimpleCAD projects (*.obj)"}
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Import into assembly", "",
-            "3-D models (*.step *.stp *.stl *.obj);;STEP files (*.step *.stp);;STL files (*.stl);;"
-            "OBJ files / SimpleCAD projects (*.obj)")
+            patterns.get(kind) or "3-D models (*.step *.stp *.stl *.obj);;" + ";;".join(patterns.values()))
         added, failed = [], []
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -24567,6 +24606,30 @@ class AssemblyDialog(QDialog):
         self._update_title()
         self._set_status(f"Assembly saved to {path} (it is also stored in the project file)")
         return True
+
+    def _new_file(self):
+        """Start an empty, untitled assembly (asks to save unsaved changes first, as the
+        Thermal window does)."""
+        if self.has_unsaved_changes():
+            answer = QMessageBox.question(
+                self, "New assembly",
+                f"The assembly '{self.assembly['name']}' has unsaved changes. Save them first?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+            if answer == QMessageBox.Cancel or (answer == QMessageBox.Save and not self._save()):
+                return
+        for act in (self.act_align, self.act_exploded, self.act_measure):
+            if act.isChecked():
+                act.setChecked(False)
+        self.assembly.clear()
+        self.assembly.update(assembly_new())
+        self._selected = None
+        self._selected_alignment = None
+        self._window._assembly_file = None
+        self._after_components_changed()
+        self._reset_history()
+        self._mark_saved()
+        self.view.fit_all()
+        self._set_status("New assembly — import parts with Import")
 
     def _open_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -25075,7 +25138,8 @@ class MainWindow(QMainWindow):
             ("Open", "open.png", self._file_open, "Open a SimpleCAD project"),
             ("Save", "save.png", self._file_save, "Save the project"),
             ("Save As", "save_as.png", self._file_save_as, "Save the project under a new name"),
-            ("Export", "export.png", self._file_export, "Export the selected or visible solids"),
+            ("Export", "export.png", self._file_export,
+             "Export the chosen extrusion as STEP or STL — select the extrusion first"),
             ("Import", "import.png", self._file_import, "Import a STEP or STL model"),
         )
         self._tb_file_actions = []
@@ -25141,7 +25205,7 @@ class MainWindow(QMainWindow):
         self.act_fillet=QAction(QIcon(os.path.join(icon_dir, "fillet.png")), "Fillet", self,
                                 triggered=lambda: self._open_feature_panel("fillet"),
                                 toolTip="Fillet — Round selected sharp edges on a solid")
-        self.act_angle_draft=QAction(QIcon(os.path.join(icon_dir, "cone.png")),
+        self.act_angle_draft=QAction(QIcon(os.path.join(icon_dir, "draft.png")),
                          "Draft", self,
                          triggered=self._open_angle_draft,
                          toolTip="Draft — Draft selected extrusion surfaces about a pivot")
@@ -26382,7 +26446,8 @@ class MainWindow(QMainWindow):
         act(m, "&Import…", self._file_import, None, "Import a STEP or STL model",
             icon=app_icon("import.png"))
         act(m, "&Export (STEP / STL)…", self._file_export,
-            tip="Export the selected solid (or all visible solids) as STEP or STL", key="export",
+            tip="Export the chosen extrusion (and the solids built on it) as STEP or STL — "
+                "select the extrusion first", key="export",
             icon=app_icon("export.png"))
         act(m, "Technical &Drawing…", self._file_export_drawing,
             tip="Create, edit, or export a technical drawing attached to an extrusion",
@@ -33913,29 +33978,45 @@ class MainWindow(QMainWindow):
         else: e.ignore()
 
     # ── export ────────────────────────────────────────────────────────────────
+    def _export_roots(self):
+        """The solids chosen for export: the extrusions / imported models selected in the
+        Objects explorer, or the one selected in the 3-D view (also through one of its faces or
+        a fillet / chamfer on it). Cut tools are never exported themselves."""
+        def solid(entry):
+            if entry is not None and entry.get("type") == "feature":
+                entry = entry.get("parent")
+            ok = entry is not None and entry.get("type") in ("extrusion", "imported") and \
+                not entry.get("preview") and not entry.get("cut") and entry.get("solid")
+            return entry if ok else None
+        roots = [solid(self._entry_of(item)) for item in self.obj_tree.selectedItems()]
+        if not any(roots):
+            face = self.state.get("sel_face")
+            roots = [solid(self.state.get("selected")) or solid(face[0] if face else None)]
+        unique = []
+        for root in roots:
+            if root is not None and not any(root is other for other in unique):
+                unique.append(root)
+        return unique
+
     def _export_mesh(self):
-        """Mesh for selected extrusion subtrees, else the selected or visible solids."""
-        sel=self.state.get("selected")
-        if sel is not None and sel.get("type")=="extrusion" and sel.get("cut"):
-            sel=None        # a "remove material" tool body is not exported itself
-        selected_extrusions = [self._entry_of(item) for item in self.obj_tree.selectedItems()]
-        selected_extrusions = [entry for entry in selected_extrusions
-                               if entry is not None and entry.get("type") == "extrusion"
-                               and not entry.get("preview") and not entry.get("cut")]
-        if selected_extrusions:
-            ents = []
-            seen = set()
-            for root in selected_extrusions:
-                for entry in [root] + entry_descendants(root, self.state["objects"]):
-                    if (entry.get("type") in ("extrusion", "imported")
-                            and not entry.get("preview") and not entry.get("cut")
-                            and id(entry) not in seen):
-                        ents.append(entry)
-                        seen.add(id(entry))
-        else:
-            ents=[sel] if sel is not None and sel.get("type") in ("extrusion", "imported") else \
-                 [o for o in self.state["objects"] if o["type"] in ("extrusion", "imported")
-                  and not o.get("preview") and not o.get("cut") and entry_visible(o)]
+        """Mesh of the chosen extrusions (_export_roots) and the solids built on them."""
+        roots = self._export_roots()
+        if not roots:
+            QMessageBox.information(
+                self, "Export",
+                "Choose an extrusion first — select it in the Objects explorer or in the 3-D "
+                "view (Ctrl+click for several) — and then select Export.")
+            self._st("Export: choose an extrusion first")
+            return None
+        ents = []
+        seen = set()
+        for root in roots:
+            for entry in [root] + entry_descendants(root, self.state["objects"]):
+                if (entry.get("type") in ("extrusion", "imported")
+                        and not entry.get("preview") and not entry.get("cut")
+                        and entry.get("solid") and id(entry) not in seen):
+                    ents.append(entry)
+                    seen.add(id(entry))
         if not ents:
             QMessageBox.warning(self,"No solid","There is no solid mesh to export."); return None
         fused = {id(source["entry"]) for e in ents if e.get("source_format") == "bridge"

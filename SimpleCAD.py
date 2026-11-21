@@ -85,19 +85,35 @@ Workflow:
      merges them. Ungroup dissolves the group(s) of the selection.
      Select mode: a rubber band selects every touched line, circle, arc, ellipse and point
      (groups and text whole); dragging any selected element moves the whole selection.
-     Geometry under the cursor wins over constraint symbols drawn on it. Del deletes the
-     selected sketch geometry.
+     Geometry under the cursor wins over constraint symbols drawn on it; a not fully
+     constrained line, circle, arc or ellipse (drawn or support) wins every pick — over
+     dimensions, symbols and constrained geometry (only its own free end points stay
+     grabbable). Del deletes the selected sketch geometry and the selected constraints
+     (a clicked dimension or symbol, rows of the constraint list).
+     Dimension helper lines (extension / dimension / angle lines) leave out the parts that
+     would lie on a sketch line. Profile parts that keep the sketch open (loose chains, loose
+     ends, branch points) blink red for 5 s (then stay marked in red) while no drawing step
+     is running; every new opening blinks again. Trimming a line of a Symmetric pair keeps the
+     lines symmetric ("Symmetric (lines)"), not the midpoints of the shorter piece.
      Multiple (draw tools): select closed contour(s), choose a Matrix (rows × columns, spacing)
      or Circular (number, total angle, start angle — both clockwise from the sketch +Y axis —
      radius, optional rotation) arrangement in the dialog, then click to place the copies — they follow the
      cursor, centred on it, like a paste. Support geometry is added through the copy centres:
      Matrix — a line through every row and every column; Circular 360° — a circle;
      Circular below 360° — an arc plus lines from the centre to the first and the last copy.
-     On a face, the face outline is shown as fixed (violet) reference geometry; it cannot
-     be deleted, cut or trimmed. In Constrain mode it can serve as a fixed reference;
-     if the extrusion's source sketch is parallel to the face and below it, its geometry is
-     also projected as fixed references on its Sketch Explorer level (a perpendicular or
-     tilted source sketch is not projected).
+     On a face, the face outline is shown as fixed (white) reference geometry; it cannot
+     be deleted, cut or trimmed. The "Face outline" row of the Sketch Explorer shows / hides
+     it and switches its use as reference (constraints already on it stay). The outline is the face as it really is after cuts, unions
+     and fillets / chamfers (rounded corners become arcs, notches show their steps); when it
+     gains or loses edges, constraints move to the new edge on the same line / circle, and a
+     constrained corner that no longer exists stays as a fixed point where it was.
+     In Constrain mode it can serve as a fixed reference.
+     Other parallel sketches are listed in the Sketch Explorer by height. Levels below and
+     the same height (0 mm — also sketches of the same body there) have a Reference box:
+     ticked, their geometry is projected as fixed references. It starts unticked (also the
+     body's source sketch below a new face sketch); a level the sketch already uses stays
+     ticked. Same-body sketches at other heights are only shown (a perpendicular or tilted
+     sketch is never projected).
      Equal supports line length and circle diameter; Parallel and Symmetric use lines.
      overlapping drawn geometry takes priority when picking.
      New face sketches use a consistent surface-normal view: world +Z is up on side faces,
@@ -647,6 +663,56 @@ from PyQt5.QtOpenGL import QGLFormat, QGLWidget
 # Sketches under the same body in the object explorer as the edited sketch (display only):
 SIBLING_SAME_HEIGHT  = (255, 225, 60, 235)    # same physical height: bright yellow
 SIBLING_OTHER_HEIGHT = (175, 145, 30, 220)    # physically lower / higher: darker yellow
+
+def color_button_style(color):
+    """Style of a "Choose color…" button showing the colour (rgb 0..1), with readable
+    (inverted) text — the same in the main window and in Assembly."""
+    rgb = tuple(max(0, min(255, int(round(float(channel) * 255)))) for channel in list(color)[:3])
+    text_rgb = tuple(255 - channel for channel in rgb)
+    return (f"QPushButton {{ background-color: rgb({rgb[0]}, {rgb[1]}, {rgb[2]}); "
+            f"color: rgb({text_rgb[0]}, {text_rgb[1]}, {text_rgb[2]}); }}")
+
+FACE_OUTLINE_COLOR = (255, 255, 255, 235)    # outline of the face a sketch lies on: white
+FACE_OUTLINE_ROW = "face outline"             # Sketch Explorer row id (other rows: level in mm)
+
+def face_outline_vertices(sk):
+    """Vertices of the face outline references of sk (the face's own edges)."""
+    out = set()
+    for e in sk.segments + sk.circles + sk.arcs:
+        if hasattr(e, "reference_boundary"):
+            out.update((e.v0, e.v1) if isinstance(e, Segment) else (e.center,)
+                       if isinstance(e, Circle) else (e.center, e.v_start, e.v_end))
+    return out
+
+def underlay_referenceable(item):
+    """Can the sketches of this Sketch Explorer group be used as references? Every other
+    sketch can; sketches of the same body only on exactly the same height (0 mm)."""
+    return not item.get("sibling") or item["level"] == 0
+
+def underlay_has_reference_box(item):
+    """Groups that offer the Reference checkbox: lower levels and the same height (0 mm)."""
+    return underlay_referenceable(item) and item["level"] <= 0
+
+def reference_levels(underlays):
+    """{level: state} of the referenceable groups. On the same height the "Same level" and
+    "Same body" groups share one reference level and are merged: reference — any of them
+    is referenced; visible — a referenced (else any) group is shown; entries — the sketches
+    of the referenced groups (all of them when none is referenced)."""
+    groups = {}
+    for item in underlays:
+        if underlay_referenceable(item):
+            groups.setdefault(item["level"], []).append(item)
+    out = {}
+    for level, items in groups.items():
+        if len(items) == 1:
+            out[level] = items[0]; continue
+        used = [item for item in items if item["reference"]]
+        source = used or items
+        out[level] = {"level": level, "reference": bool(used), "color": source[0].get("color"),
+                      "visible": any(item["visible"] for item in source),
+                      "entries": [entry for item in source for entry in item["entries"]],
+                      "groups": items}
+    return out
 # 3-D face highlighting (RGBA 0..1): light green under the cursor, darker green when selected
 FACE_HOVER_FILL       = (0.55, 1.0, 0.55, 0.8)
 FACE_HOVER_OUTLINE    = (0.75, 1.0, 0.75, 1.0)
@@ -979,10 +1045,46 @@ class CCollinear:
 
 class CSymmetric:
     """Two segments or two vertices are symmetric about a center line or center point.
-    center: Segment (axis of symmetry) or Vertex (center point)."""
+    center: Segment (axis of symmetry) or Vertex (center point).
+    Two segments are symmetric by their midpoints. lines_only (set when Trim cuts one of the
+    segments): only the lines are mirror images — the mirrored midpoint of seg_a lies on the
+    line of seg_b — so where the (shortened) pieces end along their lines is free."""
     kind = "symmetric"
+    lines_only = False
     def __init__(self, seg_a, seg_b, center):
         self.seg_a = seg_a; self.seg_b = seg_b; self.center = center
+
+def symmetric_lines_only(c):
+    """True when the symmetric constraint c acts on the lines only (see CSymmetric)."""
+    return bool(getattr(c, "lines_only", False)) and isinstance(c.seg_a, Segment) and \
+        isinstance(c.seg_b, Segment)
+
+def _symmetric_mirror(c, point, pos):
+    """point mirrored about the centre line / centre point of CSymmetric c."""
+    if isinstance(c.center, Segment):
+        (ax, ay), (bx, by) = pos(c.center.v0), pos(c.center.v1)
+        dx, dy = bx-ax, by-ay; length2 = dx*dx + dy*dy or 1e-12
+        t = ((point[0]-ax)*dx + (point[1]-ay)*dy)/length2
+        return 2*(ax+t*dx) - point[0], 2*(ay+t*dy) - point[1]
+    cx, cy = pos(c.center)
+    return 2*cx - point[0], 2*cy - point[1]
+
+def _segment_mid(seg, pos):
+    (x0, y0), (x1, y1) = pos(seg.v0), pos(seg.v1)
+    return (x0+x1)/2, (y0+y1)/2
+
+def symmetric_line_residual(c, pos):
+    """Distance (mm) of seg_a's mirrored midpoint from the line through seg_b."""
+    mx, my = _symmetric_mirror(c, _segment_mid(c.seg_a, pos), pos)
+    (x0, y0), (x1, y1) = pos(c.seg_b.v0), pos(c.seg_b.v1)
+    dx, dy = x1-x0, y1-y0; length = math.hypot(dx, dy) or 1e-12
+    return (dx*(my-y0) - dy*(mx-x0))/length
+
+def symmetric_mid_error(c, pos):
+    """How far (mm) seg_b's midpoint is from seg_a's mirrored midpoint."""
+    mx, my = _symmetric_mirror(c, _segment_mid(c.seg_a, pos), pos)
+    bx, by = _segment_mid(c.seg_b, pos)
+    return math.hypot(bx-mx, by-my)
 
 class CMirrorPoint:
     """A point and its mirror about a sketch axis or a segment."""
@@ -1185,7 +1287,8 @@ def describe_constraint(sk, c):
         ctr = L(c.center) if isinstance(c.center, Segment) else P(c.center)
         first = P(c.seg_a) if isinstance(c.seg_a, Vertex) else L(c.seg_a)
         second = P(c.seg_b) if isinstance(c.seg_b, Vertex) else L(c.seg_b)
-        return f"⇔ Symmetric  {first}, {second} about {ctr}"
+        lines = " (lines)" if getattr(c, "lines_only", False) else ""
+        return f"⇔ Symmetric{lines}  {first}, {second} about {ctr}"
     if isinstance(c, CMirrorPoint):
         axis = L(c.axis) if isinstance(c.axis, Segment) else c.axis + " axis"
         return f"⇔ Mirror  {P(c.vertex_move)}, {P(c.vertex_target)} about {axis}"
@@ -1525,6 +1628,13 @@ class SketchSystem:
         if isinstance(c, CSymmetric):
             a0, a1 = (c.seg_a, c.seg_a) if isinstance(c.seg_a, Vertex) else (c.seg_a.v0, c.seg_a.v1)
             b0, b1 = (c.seg_b, c.seg_b) if isinstance(c.seg_b, Vertex) else (c.seg_b.v0, c.seg_b.v1)
+            if symmetric_lines_only(c):
+                center = c.center
+                def f(X):
+                    return [symmetric_line_residual(c, lambda v: P(v, X))]
+                verts = [a0, a1, b0, b1] + ([center.v0, center.v1] if isinstance(center, Segment)
+                                            else [center])
+                return verts, [], f
             if isinstance(c.center, Segment):
                 cv0, cv1 = c.center.v0, c.center.v1
                 def f(X):
@@ -1717,6 +1827,9 @@ def rotated_face_frame(frame, rotation):
     origin, u, v, normal = (np.asarray(a, float) for a in frame)
     cosine, sine = rotation
     return origin, cosine*u+sine*v, -sine*u+cosine*v, normal
+
+class FaceOutlineChanged(ValueError):
+    """A face outline gained or lost edges: sketch references are rebuilt, not moved."""
 
 def face_reference_sketch(face, frame):
     """Create fixed face outlines with stable links to their boundary primitives."""
@@ -2449,6 +2562,31 @@ class Sketch:
             deg[e["a"]] = deg.get(e["a"], 0) + 1; deg[e["b"]] = deg.get(e["b"], 0) + 1
         return all(d == 2 for d in deg.values())
 
+    def open_profile_parts(self):
+        """Where the profile is not closed → (edges, vertices): the profile lines and arcs
+        that lie on no closed loop (dangling chains) and the vertices that make it open —
+        loose ends, branch points (more than two edges) and edges that end where they start."""
+        edges, bad = [], set()
+        for element, a, b in [(s, s.v0, s.v1) for s in self.segments if not s.construction] + \
+                [(arc, arc.v_start, arc.v_end) for arc in self.arcs if not arc.construction]:
+            if a is b: bad.add(a)
+            else: edges.append((element, a, b))
+        degree = collections.Counter()
+        for _element, a, b in edges: degree[a] += 1; degree[b] += 1
+        bad |= {v for v, d in degree.items() if d == 1}
+        dangling, changed = [], True
+        while changed:                       # peel loose chains off, end by end
+            changed, keep = False, []
+            for edge in edges:
+                _element, a, b = edge
+                if degree[a] == 1 or degree[b] == 1:
+                    dangling.append(edge[0]); degree[a] -= 1; degree[b] -= 1; changed = True
+                else:
+                    keep.append(edge)
+            edges = keep
+        bad |= {v for v, d in degree.items() if d > 2}
+        return dangling, bad
+
     @property
     def closed(self): return self.profile_closed()
 
@@ -2517,7 +2655,8 @@ class Sketch:
                 g.ref.setdefault(new, pos)
             g.points = [new if v is old else v for v in g.points]
         for c in self.constraints:
-            for attr in ("vertex", "vertex_move", "vertex_target", "a", "b"):
+            for attr in ("vertex", "vertex_move", "vertex_target", "a", "b",
+                         "seg_a", "seg_b", "center"):
                 if getattr(c, attr, None) is old: setattr(c, attr, new)
             if isinstance(c, CDimension) and isinstance(c.target, tuple):
                 c.target = tuple(new if v is old else v for v in c.target)
@@ -2525,6 +2664,79 @@ class Sketch:
         self.constraints = [c for c in self.constraints if not (
             isinstance(c, CCoincident) and c.vertex_move is c.vertex_target)]
         if old in self.vertices: self.vertices.remove(old)
+
+    def merge_duplicate_geometry(self, tol_digits=5):
+        """Remove lines, arcs and circles lying exactly on top of an equal element of the same
+        kind (e.g. a symmetric shape mirrored onto itself by an older version — the doubled
+        loops cancel each other in the profile). The duplicate's vertices are merged into
+        the kept element's, constraints follow. Returns the number of removed elements."""
+        def key(v): return (round(v.x, tol_digits) + 0.0, round(v.y, tol_digits) + 0.0)
+        merge = {}
+        def find(v):
+            while v in merge: v = merge[v]
+            return v
+        def unify(dup, keep):
+            dup, keep = find(dup), find(keep)
+            if dup is not keep and not dup.locked: merge[dup] = keep
+        text = self.text_vertices()
+        dups, seen = {}, {}
+        for s in self.segments:
+            if s.reference or s.v0 in text or key(s.v0) == key(s.v1): continue
+            k = ("s", s.construction, frozenset((key(s.v0), key(s.v1))))
+            other = seen.setdefault(k, s)
+            if other is s: continue
+            same = key(s.v0) == key(other.v0)
+            unify(s.v0, other.v0 if same else other.v1); unify(s.v1, other.v1 if same else other.v0)
+            dups[s] = other
+        for a in self.arcs:
+            if a.reference: continue
+            k = ("a", a.construction, key(a.center), key(a.v_start), key(a.v_end))
+            other = seen.setdefault(k, a)
+            if other is a: continue
+            unify(a.center, other.center); unify(a.v_start, other.v_start); unify(a.v_end, other.v_end)
+            dups[a] = other
+        for c in self.circles:
+            if c.reference: continue
+            k = ("c", c.construction, key(c.center), round(c.radius, tol_digits))
+            other = seen.setdefault(k, c)
+            if other is c: continue
+            unify(c.center, other.center); dups[c] = other
+        if not dups: return 0
+        for old in list(merge):
+            self.replace_vertex(old, find(old))
+        self.segments = [s for s in self.segments if s not in dups]
+        self.arcs = [a for a in self.arcs if a not in dups]
+        self.circles = [c for c in self.circles if c not in dups]
+        for group in getattr(self, "groups", []):
+            group.segments = [s for s in group.segments if s not in dups]
+            group.arcs = [a for a in group.arcs if a not in dups]
+            group.circles = [c for c in group.circles if c not in dups]
+        # constraints on a removed duplicate act on the kept element; drop the ones that
+        # became meaningless (a point mirrored onto itself, an element equal to itself)
+        # or are now the same as another one
+        kept, signatures = [], set()
+        for c in self.constraints:
+            for name, value in list(vars(c).items()):
+                if isinstance(value, (Segment, Arc, Circle)) and value in dups:
+                    setattr(c, name, dups[value])
+            if isinstance(c, CMirrorPoint) and c.vertex_move is c.vertex_target: continue
+            if isinstance(c, CEqual) and c.seg_a is c.seg_b: continue
+            if isinstance(c, (CMirrorPoint, CEqual)):
+                pair = (c.vertex_move, c.vertex_target) if isinstance(c, CMirrorPoint) \
+                       else (c.seg_a, c.seg_b)
+                extra = id(c.axis) if isinstance(c, CMirrorPoint) and isinstance(c.axis, Segment) \
+                        else getattr(c, "axis", None)
+                signature = (type(c).__name__, frozenset(map(id, pair)), extra)
+            else:
+                signature = (type(c).__name__, tuple(sorted(
+                    (name, id(value) if isinstance(value, (Vertex, Segment, Arc, Circle)) else repr(value))
+                    for name, value in vars(c).items() if not name.startswith("_"))))
+            if signature in signatures: continue
+            signatures.add(signature); kept.append(c)
+        self.constraints = kept
+        self.prune_groups()
+        self._an_key = None
+        return len(dups)
 
     def remove_geometry(self, segs=(), circles=(), arcs=(), points=(), ellipses=()):
         """Remove editable geometry and its constraints; projected reference geometry survives."""
@@ -2707,6 +2919,10 @@ class Sketch:
                     c.target = first; keep.append(c)
                 continue        # a line's length does not apply to its pieces
             if first is None: continue
+            if isinstance(c, CSymmetric) and isinstance(target, Segment) and \
+                    target in (c.seg_a, c.seg_b):
+                # a piece has another midpoint: keep the lines symmetric, not the midpoints
+                c.lines_only = True
             for attr in ("seg", "seg_a", "seg_b", "curve", "a", "b"):
                 if getattr(c, attr, None) is target: setattr(c, attr, first)
             keep.append(c)
@@ -2767,29 +2983,74 @@ class Sketch:
         for ellipse in ellipses: vertices.update(ellipse.vertices())
         if vertices & self.text_vertices():
             raise ValueError("Text cannot be mirrored")
-        mapping = {vertex: Vertex(*reflect(vertex.x, vertex.y))
-                   for vertex in self.vertices if vertex in vertices}
+        # a mirrored point that lands on an existing point uses it (a shape that is already
+        # symmetric about the axis maps onto itself), so nothing is drawn twice on top of
+        # itself — doubled loops would cancel each other in the profile
+        def position_key(x, y): return (round(x, 5) + 0.0, round(y, 5) + 0.0)
+        existing = {}
+        for vertex in self.vertices:
+            existing.setdefault(position_key(vertex.x, vertex.y), vertex)
+        mapping, created = {}, []
+        for vertex in self.vertices:
+            if vertex not in vertices: continue
+            x, y = reflect(vertex.x, vertex.y)
+            target = existing.get(position_key(x, y))
+            if target is None:
+                target = Vertex(x, y); created.append(target)
+            mapping[vertex] = target
         if len(mapping) != len(vertices):
             raise ValueError("Selected geometry contains a missing vertex")
-        new_segments = [Segment(mapping[s.v0], mapping[s.v1], s.construction)
-                        for s in self.segments if s in segments]
-        pairs = [(circle, Circle(mapping[circle.center], circle.radius, circle.construction))
-                 for circle in self.circles if circle in circles]
-        new_arcs = [Arc(mapping[a.center], mapping[a.v_end], mapping[a.v_start], a.construction)
-                    for a in self.arcs if a in arcs]
-        new_ellipses = [Ellipse(*(mapping[vertex] for vertex in ellipse.vertices()),
-                                construction=ellipse.construction)
-                        for ellipse in self.ellipses if ellipse in ellipses]
-        new_points = [mapping[point] for point in self.points_free if point in points]
-        constraints = [CMirrorPoint(source, mirror, axis) for source, mirror in mapping.items()]
-        constraints.extend(CEqual(source, mirror) for source, mirror in pairs)
-        self.vertices.extend(mapping.values())
+        segment_keys = {frozenset((s.v0, s.v1)) for s in self.segments}
+        new_segments = []
+        for s in self.segments:
+            if s not in segments: continue
+            k = frozenset((mapping[s.v0], mapping[s.v1]))
+            if len(k) < 2 or k in segment_keys: continue
+            segment_keys.add(k); new_segments.append(Segment(mapping[s.v0], mapping[s.v1], s.construction))
+        pairs = []
+        for circle in self.circles:
+            if circle not in circles: continue
+            center = mapping[circle.center]
+            if any(c.center is center and abs(c.radius - circle.radius) < 1e-6
+                   for c in self.circles + [m for _, m in pairs]):
+                continue
+            pairs.append((circle, Circle(center, circle.radius, circle.construction)))
+        arc_keys = {(a.center, a.v_start, a.v_end) for a in self.arcs}
+        new_arcs = []
+        for a in self.arcs:
+            if a not in arcs: continue
+            k = (mapping[a.center], mapping[a.v_end], mapping[a.v_start])
+            if k in arc_keys or k[1] is k[2]: continue
+            arc_keys.add(k); new_arcs.append(Arc(*k, a.construction))
+        ellipse_keys = {frozenset(e.vertices()) for e in self.ellipses}
+        new_ellipses = []
+        for ellipse in self.ellipses:
+            if ellipse not in ellipses: continue
+            mirrored = [mapping[vertex] for vertex in ellipse.vertices()]
+            if frozenset(mirrored) in ellipse_keys: continue
+            ellipse_keys.add(frozenset(mirrored))
+            new_ellipses.append(Ellipse(*mirrored, construction=ellipse.construction))
+        new_points = [mapping[point] for point in self.points_free
+                      if point in points and mapping[point] in created]
+        created_set = set(created)
+        self.vertices.extend(created)
         self.segments.extend(new_segments)
         self.circles.extend(mirror for _, mirror in pairs)
         self.arcs.extend(new_arcs)
         self.ellipses.extend(new_ellipses)
         self.points_free.extend(new_points)
-        self.constraints.extend(constraints)
+        # new points follow their originals; two existing points that are mirror images get
+        # the mirror constraint only when it adds something (not redundant / conflicting)
+        self.constraints.extend(CMirrorPoint(source, mirror, axis)
+                                for source, mirror in mapping.items() if mirror in created_set)
+        self.constraints.extend(CEqual(source, mirror) for source, mirror in pairs)
+        done = set()
+        for source, mirror in mapping.items():
+            pair = frozenset((source, mirror))
+            if mirror in created_set or mirror is source or pair in done: continue
+            done.add(pair)
+            if not (source.locked and mirror.locked):
+                self.try_add_constraint(CMirrorPoint(source, mirror, axis))
         self._an_key = None
         return len(new_segments) + len(pairs) + len(new_arcs) + len(new_ellipses) + len(new_points)
 
@@ -3844,59 +4105,308 @@ def _unit(a):
     a = np.asarray(a, float); n = np.linalg.norm(a)
     return a/n if n > 1e-12 else a
 
-def standard_gear_outline(module, teeth, pressure_angle=20.0, samples_per_tooth=24):
-    """Sample a standard full-depth external spur-gear outline in polar coordinates."""
-    module = float(module); pressure_angle = float(pressure_angle)
+GEAR_FILLET_RADIUS = 0.38   # basic-rack tip radius as a module fraction (ISO 53 profile A)
+
+
+def _involute(angle):
+    return math.tan(angle) - angle
+
+
+def _inverse_involute(value):
+    angle = max(1e-6, (3.0 * value) ** (1.0 / 3.0))
+    for _ in range(40):
+        step = (_involute(angle) - value) / (math.tan(angle) ** 2)
+        angle -= step
+        if abs(step) < 1e-14:
+            break
+    return angle
+
+
+def undercut_free_shift(teeth, pressure_angle=20.0):
+    """Smallest profile shift that keeps a rack-generated gear free of undercut."""
+    return 1.0 - float(teeth) * math.sin(math.radians(pressure_angle)) ** 2 / 2.0
+
+
+def involute_pair_geometry(module, teeth_1, teeth_2, pressure_angle, shift_1=0.0, shift_2=0.0):
+    """(centre distance, working pressure angle in degrees, tip shortening factor) of an
+    external profile-shifted pair. The tips of both gears are shortened by the factor times
+    the module so the standard 0.25·m tip clearance is kept."""
+    alpha = math.radians(pressure_angle)
+    teeth_sum = float(teeth_1 + teeth_2)
+    shift_sum = float(shift_1 + shift_2)
+    reference = module * teeth_sum / 2.0
+    if abs(shift_sum) < 1e-12:
+        return reference, float(pressure_angle), 0.0
+    working = _inverse_involute(2.0 * math.tan(alpha) * shift_sum / teeth_sum + _involute(alpha))
+    distance = reference * math.cos(alpha) / math.cos(working)
+    return distance, math.degrees(working), max(0.0, shift_sum - (distance - reference) / module)
+
+
+def bevel_pitch_angles(teeth_1, teeth_2, shaft_angle=90.0):
+    """Pitch-cone angles (degrees) of two straight bevel gears meshing at the shaft angle."""
+    shaft = math.radians(shaft_angle)
+    first = math.atan2(math.sin(shaft), teeth_2 / teeth_1 + math.cos(shaft))
+    return math.degrees(first), math.degrees(shaft - first)
+
+
+def gear_outside_from_module(kind, module, teeth, profile_shift=0.0, bevel_angle=45.0):
+    """Nominal tip diameter; a bevel gear's is measured at the heel (back-cone crown)."""
+    if kind == "bevel":
+        return module * (teeth + 2.0 * (1.0 + profile_shift) * math.cos(math.radians(bevel_angle)))
+    if kind == "internal":
+        return module * (teeth + 7.5)
+    return module * (teeth + 2.0 + 2.0 * profile_shift)
+
+
+def gear_module_from_outside(kind, outside_diameter, teeth, profile_shift=0.0, bevel_angle=45.0):
+    return outside_diameter / gear_outside_from_module(kind, 1.0, teeth, profile_shift, bevel_angle)
+
+
+def _generated_flank(module, teeth, pressure_angle, profile_shift, backlash, tip_radius,
+                     fillet_samples=80, flank_samples=120):
+    """One flank of an external gear generated by a basic-rack cutter.
+
+    Returns (points, undercut): Cartesian points in a frame whose tooth centre line is +X,
+    running from the middle of the tooth space (polar angle pi/teeth) over the root fillet
+    and the involute to the tip circle. `teeth` may be fractional (virtual bevel gear)."""
+    m, z = float(module), float(teeth)
+    alpha = math.radians(pressure_angle)
+    r = m * z / 2.0
+    shift = float(profile_shift) * m
+    half_space = math.pi * m / 4.0 + float(backlash) * m / 2.0       # cutter tooth half width
+    dedendum = 1.25 * m
+    tip_half = half_space - dedendum * math.tan(alpha)
+    if tip_half < 0.02 * m:
+        raise ValueError("Pressure angle or backlash too large for full-depth teeth.")
+    corner = (math.pi / 2.0 + alpha) / 2.0
+    rho = min(GEAR_FILLET_RADIUS * m, 0.95 * tip_half * math.tan(corner))
+    u_c, v_c = tip_half - rho / math.tan(corner), -dedendum + rho  # fillet centre (rack coords)
+    rack_line = r + shift                                          # rack reference line (world Y)
+    rotate_to_tooth = -(math.pi / 2.0 - math.pi / z)               # space centre +Y -> pi/z
+    cr, sr = math.cos(rotate_to_tooth), math.sin(rotate_to_tooth)
+    raw = []
+
+    def add(qx, qy, phi):
+        c, s = math.cos(phi), math.sin(phi)
+        gx, gy = c * qx - s * qy, s * qx + c * qy
+        raw.append((cr * gx - sr * gy, sr * gx + cr * gy))
+
+    add(0.0, rack_line - dedendum, 0.0)
+    if u_c > 1e-12:
+        add(0.0, rack_line - dedendum, -u_c / r)
+    for index in range(1, fillet_samples + 1):                      # trochoid of the tip fillet
+        beta = (math.pi / 2.0 - alpha) * math.sin(math.pi / 2.0 * index / fillet_samples)
+        phi = (-(shift + v_c) * math.tan(beta) - u_c) / r
+        add(u_c + r * phi + rho * math.sin(beta), rack_line + v_c - rho * math.cos(beta), phi)
+    v_start, v_end = v_c - rho * math.sin(alpha), 1.05 * m
+    for index in range(1, flank_samples + 1):                       # involute from the rack flank
+        v = v_start + (v_end - v_start) * (index / flank_samples) ** 1.5
+        lam = -(shift + v) / math.sin(alpha)
+        phi = (lam * math.cos(alpha) - half_space - v * math.tan(alpha)) / r
+        add(lam * math.cos(alpha), r - lam * math.sin(alpha), phi)
+
+    points, undercut = _remove_loop(raw)
+    clipped = [points[0]]
+    for a, b in zip(points, points[1:]):
+        ra, rb = math.hypot(*a), math.hypot(*b)
+        if rb >= tip_radius:
+            t = (tip_radius - ra) / (rb - ra) if rb > ra else 1.0
+            clipped.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+            break
+        clipped.append(b)
+    else:
+        raise ValueError("The tooth flank does not reach the tip circle.")
+    if any(y <= 0.0 for _, y in clipped[1:]):
+        raise ValueError("The teeth become pointed; reduce the profile shift or the tooth height.")
+    return _simplify_polyline(clipped, 0.004 * m), undercut
+
+
+def _simplify_polyline(points, tolerance):
+    """Douglas-Peucker reduction that keeps both end points."""
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(points) - 1)]
+    while stack:
+        first, last = stack.pop()
+        ax, ay = points[first]
+        bx, by = points[last]
+        length = math.hypot(bx - ax, by - ay) or 1e-30
+        worst, index = 0.0, None
+        for k in range(first + 1, last):
+            px, py = points[k]
+            distance = abs((bx - ax) * (ay - py) - (ax - px) * (by - ay)) / length
+            if distance > worst:
+                worst, index = distance, k
+        if index is not None and worst > tolerance:
+            keep[index] = True
+            stack.extend(((first, index), (index, last)))
+    return [point for point, kept in zip(points, keep) if kept]
+
+
+def _segments_cross(p1, p2, q1, q2):
+    d = (p2[0] - p1[0]) * (q2[1] - q1[1]) - (p2[1] - p1[1]) * (q2[0] - q1[0])
+    if abs(d) < 1e-18:
+        return None
+    t = ((q1[0] - p1[0]) * (q2[1] - q1[1]) - (q1[1] - p1[1]) * (q2[0] - q1[0])) / d
+    s = ((q1[0] - p1[0]) * (p2[1] - p1[1]) - (q1[1] - p1[1]) * (p2[0] - p1[0])) / d
+    if 0.0 <= t <= 1.0 and 0.0 <= s <= 1.0:
+        return p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])
+    return None
+
+
+def _remove_loop(points):
+    """Cut the undercut loop where the fillet trochoid crosses the involute."""
+    for i in range(len(points) - 1):
+        for j in range(len(points) - 2, i + 1, -1):
+            hit = _segments_cross(points[i], points[i + 1], points[j], points[j + 1])
+            if hit is not None:
+                return points[:i + 1] + [hit] + points[j + 1:], True
+    return points, False
+
+
+def _assemble_outline(flank, teeth, tip_samples=3):
+    """Full closed outline (counter-clockwise) from one flank of the tooth centred on +X."""
+    mirrored = [(x, -y) for x, y in flank]
+    tip_radius = math.hypot(*flank[-1])
+    tip_angle = math.atan2(flank[-1][1], flank[-1][0])
+    arc = [(tip_radius * math.cos(a), tip_radius * math.sin(a))
+           for a in (tip_angle * (2.0 * k / tip_samples - 1.0) for k in range(1, tip_samples))]
+    tooth = mirrored + arc + flank[::-1]
+    tooth = tooth[:-1]
+    outline = []
+    for k in range(teeth):
+        angle = 2.0 * math.pi * k / teeth
+        c, s = math.cos(angle), math.sin(angle)
+        outline.extend((c * x - s * y, s * x + c * y) for x, y in tooth)
+    return outline
+
+
+def external_gear_outline(module, teeth, pressure_angle=20.0, profile_shift=0.0, backlash=0.0,
+                          tip_reduction=0.0, bevel_angle=None):
+    """(outline points, info) of a rack-generated external gear; with `bevel_angle` the
+    heel section of a straight bevel gear (Tredgold back-cone tooth form, flanks projected
+    from the cone apex onto the plane through the crown)."""
+    module = float(module)
     if not math.isfinite(module) or module <= 0:
         raise ValueError("Gear module must be a finite positive number.")
     if not isinstance(teeth, int) or teeth < 6:
-        raise ValueError("An external spur gear requires at least 6 teeth.")
-    if not math.isfinite(pressure_angle) or not 10.0 <= pressure_angle <= 45.0:
-        raise ValueError("Pressure angle must be between 10° and 45°.")
-
+        raise ValueError("An external gear requires at least 6 teeth.")
+    if not math.isfinite(pressure_angle) or not 10.0 <= pressure_angle <= 35.0:
+        raise ValueError("Pressure angle must be between 10° and 35°.")
+    if not -1.0 <= profile_shift <= 1.5:
+        raise ValueError("Profile shift must be between -1.0 and 1.5.")
+    if not 0.0 <= backlash <= 0.5:
+        raise ValueError("Backlash must be between 0 and 0.5 module.")
+    addendum = (1.0 + profile_shift - tip_reduction) * module
+    if bevel_angle is None:
+        virtual = teeth
+    else:
+        delta = math.radians(bevel_angle)
+        if not 1.0 <= bevel_angle <= 75.0:
+            raise ValueError("Bevel cone angle must be between 1° and 75°.")
+        virtual = teeth / math.cos(delta)
+    virtual_radius = module * virtual / 2.0
+    flank, undercut = _generated_flank(module, virtual, pressure_angle, profile_shift, backlash,
+                                       virtual_radius + addendum)
     pitch_radius = module * teeth / 2.0
-    base_radius = pitch_radius * math.cos(math.radians(pressure_angle))
-    root_radius = pitch_radius - 1.25 * module
-    outer_radius = pitch_radius + module
-    if root_radius <= 0:
-        raise ValueError("The gear root diameter must be positive.")
-    pitch_angle = 2.0 * math.pi / teeth
-    inv_pitch = math.tan(math.radians(pressure_angle)) - math.radians(pressure_angle)
-    start_radius = max(root_radius, base_radius)
+    apex_height = None
+    if bevel_angle is not None:
+        cone_height = pitch_radius / math.tan(delta)
+        crown = addendum * math.sin(delta)
+        apex_height = cone_height - crown
+        mapped = []
+        for x, y in flank:
+            slant = math.hypot(x, y) - virtual_radius
+            angle = math.atan2(y, x) * virtual / teeth
+            radius = (pitch_radius + slant * math.cos(delta)) * apex_height / \
+                     (cone_height - slant * math.sin(delta))
+            mapped.append((radius * math.cos(angle), radius * math.sin(angle)))
+        flank = mapped
+    tip_angle = math.atan2(flank[-1][1], flank[-1][0])
+    tip_radius = math.hypot(*flank[-1])
+    info = {"undercut": undercut, "root_radius": min(math.hypot(*p) for p in flank),
+            "tip_radius": tip_radius, "tip_land": 2.0 * tip_radius * tip_angle,
+            "pitch_radius": pitch_radius, "apex_height": apex_height}
+    return _assemble_outline(flank, teeth), info
 
-    def half_tooth_angle(radius):
-        alpha = math.acos(min(1.0, base_radius / radius))
-        return math.pi / (2.0 * teeth) + inv_pitch - (math.tan(alpha) - alpha)
 
-    outer_half_angle = half_tooth_angle(outer_radius)
-    start_half_angle = half_tooth_angle(start_radius)
-    points = []
-    for index in range(teeth * samples_per_tooth):
-        angle = (index / samples_per_tooth - 0.5) * pitch_angle
-        relative = (angle + 0.5 * pitch_angle) % pitch_angle - 0.5 * pitch_angle
-        side_angle = abs(relative)
-        if side_angle <= outer_half_angle:
-            radius = outer_radius
-        elif side_angle < start_half_angle:
-            low, high = start_radius, outer_radius
-            for _ in range(24):
-                middle = (low + high) / 2.0
-                if half_tooth_angle(middle) > side_angle:
-                    low = middle
-                else:
-                    high = middle
-            radius = (low + high) / 2.0
-        else:
-            radius = root_radius
-        points.append((radius * math.cos(angle), radius * math.sin(angle)))
-    return points, root_radius
+def internal_gear_outline(module, teeth, pressure_angle=20.0, backlash=0.0, flank_samples=10):
+    """Inner outline of a ring gear: the tooth spaces are external-gear teeth (true internal
+    involute). A ring tooth is centred on +X."""
+    m, z = float(module), int(teeth)
+    alpha = math.radians(pressure_angle)
+    r = m * z / 2.0
+    base = r * math.cos(alpha)
+    tip, root = r - m, r + 1.25 * m
+    if tip <= 0:
+        raise ValueError("The ring gear tooth count is too small for this module.")
+
+    def half_space(radius):
+        radius = max(radius, base)
+        return math.pi / (2.0 * z) + backlash / z + _involute(alpha) - \
+               _involute(math.acos(min(1.0, base / radius)))
+
+    start = max(tip, base)
+    if half_space(root) <= 0:
+        raise ValueError("The ring gear tooth spaces become pointed.")
+    flank = []                                        # space centred on angle 0, upper side
+    if tip < base:
+        flank.append((tip, half_space(base)))
+    flank.extend((start + (root - start) * k / flank_samples,
+                  half_space(start + (root - start) * k / flank_samples))
+                 for k in range(flank_samples + 1))
+    pitch = 2.0 * math.pi / z
+    if flank[0][1] >= pitch / 2.0:
+        raise ValueError("The ring gear teeth become pointed.")
+    space = [(radius, -angle) for radius, angle in flank] + \
+            [(root, flank[-1][1] * f) for f in (-0.5, 0.0, 0.5)] + flank[::-1]
+    tooth_tip = [(tip, flank[0][1] + (pitch - 2.0 * flank[0][1]) * f) for f in (0.25, 0.5, 0.75)]
+    period = [(radius, angle + pitch / 2.0) for radius, angle in space + tooth_tip]
+    outline = []
+    for k in range(z):
+        offset = k * pitch
+        outline.extend((radius * math.cos(angle + offset), radius * math.sin(angle + offset))
+                       for radius, angle in period)
+    return outline
+
+
+def gear_module(parameters):
+    """Module of a generated gear from its stored outside diameter (rack: stored module)."""
+    kind = parameters.get("kind", "spur")
+    if kind == "rack":
+        return float(parameters["module"])
+    teeth = int(parameters["teeth"])
+    outside = float(parameters["outside_diameter"])
+    if kind == "internal":
+        return float(parameters.get("module", outside / (teeth + 7.5)))
+    tredgold = kind == "bevel" and parameters.get("bevel_profile") == "tredgold"
+    return gear_module_from_outside("bevel" if tredgold else "spur", outside, teeth,
+                                    float(parameters.get("profile_shift", 0.0)),
+                                    float(parameters.get("bevel_angle", 45.0)))
+
+
+def bevel_apex_height(parameters):
+    """Distance from the heel (sketch plane) to the cone apex of a Tredgold bevel gear,
+    or None for bevel gears made before the true cone geometry existed."""
+    if parameters.get("bevel_profile") != "tredgold":
+        return None
+    module = gear_module(parameters)
+    delta = math.radians(float(parameters.get("bevel_angle", 45.0)))
+    addendum = (1.0 + float(parameters.get("profile_shift", 0.0))) * module
+    return module * int(parameters["teeth"]) / 2.0 / math.tan(delta) - addendum * math.sin(delta)
+
 
 def make_gear_sketch(name, parameters, frame=None):
-    """Build the editable XY profile for a standard external gear."""
+    """Build the editable XY profile of a rack-generated external gear (profile shift,
+    backlash, undercut); a Tredgold bevel gear gets its heel section."""
     teeth = int(parameters["teeth"])
-    module = float(parameters["outside_diameter"]) / (teeth + 2)
-    outline, root_radius = standard_gear_outline(
-        module, teeth, float(parameters.get("pressure_angle", 20.0)))
+    tredgold = parameters.get("kind") == "bevel" and parameters.get("bevel_profile") == "tredgold"
+    outline, info = external_gear_outline(
+        gear_module(parameters), teeth, float(parameters.get("pressure_angle", 20.0)),
+        float(parameters.get("profile_shift", 0.0)), float(parameters.get("backlash", 0.0)),
+        float(parameters.get("tip_reduction", 0.0)),
+        float(parameters.get("bevel_angle", 45.0)) if tredgold else None)
+    root_radius = info["root_radius"]
     bore = float(parameters.get("bore_diameter", 0.0))
     if not math.isfinite(bore) or bore < 0 or bore >= 2.0 * root_radius:
         raise ValueError("Bore diameter must be zero or smaller than the gear root diameter.")
@@ -3923,17 +4433,8 @@ def make_internal_gear_sketch(name, parameters, frame=None):
         raise ValueError("Ring outside diameter must be finite and positive.")
     if not math.isfinite(module) or module <= 0:
         raise ValueError("Ring gear module must be finite and positive.")
-    external_outline, _ = standard_gear_outline(module, teeth, pressure_angle)
-    pitch_radius = module * teeth / 2.0
-    inner_outline = []
-    for x, y in external_outline:
-        radius = math.hypot(x, y)
-        angle = math.atan2(y, x)
-        internal_radius = 2.0 * pitch_radius - radius
-        if internal_radius <= 0:
-            raise ValueError("The ring gear tooth count is too small for this module.")
-        inner_outline.append((internal_radius * math.cos(angle),
-                              internal_radius * math.sin(angle)))
+    inner_outline = internal_gear_outline(module, teeth, pressure_angle,
+                                          float(parameters.get("backlash", 0.0)))
     outer_radius = outside_diameter / 2.0
     if outer_radius <= max(math.hypot(x, y) for x, y in inner_outline):
         raise ValueError("Ring outside diameter leaves no material behind its teeth.")
@@ -3974,9 +4475,14 @@ def make_rack_sketch(name, parameters, frame=None):
     root_half_width = half_pitch_tooth + 1.25 * module * math.tan(math.radians(pressure_angle))
     if tip_half_width <= 0 or root_half_width >= pitch / 2.0:
         raise ValueError("The rack tooth proportions are invalid for this pressure angle.")
-    length = teeth * pitch
+    # body length: at least the toothed length; a longer rack gets flat lands at the root
+    # line on both ends, with the teeth centred on the origin
+    rack_length = float(parameters.get("rack_length", 0.0) or 0.0)
+    if not math.isfinite(rack_length) or rack_length < 0:
+        raise ValueError("Rack length must be a finite positive number.")
+    length = max(rack_length, teeth * pitch)
     base_y = -2.5 * module
-    points = [(length / 2.0, base_y)]
+    points = [(length / 2.0, base_y), (length / 2.0, -1.25 * module)]
     tip_corners = []
     for index in reversed(range(teeth)):
         center = (index + 0.5 - teeth / 2.0) * pitch
@@ -3986,7 +4492,7 @@ def make_rack_sketch(name, parameters, frame=None):
                        (center - tip_half_width, module),
                        (center - root_half_width, -1.25 * module)))
         tip_corners.extend((first + 1, first + 2))
-    points.append((-length / 2.0, base_y))
+    points.extend(((-length / 2.0, -1.25 * module), (-length / 2.0, base_y)))
 
     sketch = Sketch("XY", name=name, frame=frame)
     rounded = {}
@@ -4035,24 +4541,83 @@ def make_rack_sketch(name, parameters, frame=None):
     sketch.points_free.append(centerpoint)
     return sketch
 
-def matching_gear_parameters(parameters, ratio, bore_diameter=0.0):
-    """Return the spur-gear parameters for a mate at mate/primary tooth ratio."""
+def matching_gear_parameters(parameters, ratio, bore_diameter=0.0, profile_shift=0.0,
+                             shaft_angle=90.0):
+    """Parameters of the mate at mate/primary tooth ratio: a spur gear (pinion of a rack or
+    ring gear, mate of a spur gear), a helical gear of opposite hand, or a Tredgold bevel
+    gear whose cones share the primary's apex at the shaft angle. Spur and helical pairs
+    get the tip shortening of their profile-shifted centre distance."""
     ratio = float(ratio)
     if not math.isfinite(ratio) or ratio <= 0:
         raise ValueError("The matching gear ratio must be a finite positive number.")
     module = float(parameters["module"])
-    teeth = int(round(int(parameters["teeth"]) * ratio))
+    primary_teeth = int(parameters["teeth"])
+    teeth = int(round(primary_teeth * ratio))
     if not 6 <= teeth <= 200:
-        raise ValueError("The ratio must produce a matching spur gear with 6 to 200 teeth.")
-    return {
-        "kind": "spur",
-        "outside_diameter": module * (teeth + 2),
-        "module": module,
-        "teeth": teeth,
-        "pressure_angle": float(parameters.get("pressure_angle", 20.0)),
-        "thickness": float(parameters["thickness"]),
-        "bore_diameter": float(bore_diameter),
+        raise ValueError("The ratio must produce a matching gear with 6 to 200 teeth.")
+    kind = parameters.get("kind", "spur")
+    pressure = float(parameters.get("pressure_angle", 20.0))
+    mate = {
+        "kind": "spur", "module": module, "teeth": teeth, "pressure_angle": pressure,
+        "thickness": float(parameters["thickness"]), "bore_diameter": float(bore_diameter),
+        "backlash": float(parameters.get("backlash", 0.0)),
+        "profile_shift": 0.0 if kind == "internal" else float(profile_shift),
+        "tip_reduction": 0.0,
     }
+    if kind in ("spur", "helical", "herringbone"):
+        mate["tip_reduction"] = involute_pair_geometry(
+            module, primary_teeth, teeth, pressure,
+            float(parameters.get("profile_shift", 0.0)), mate["profile_shift"])[2]
+    trace = parameters.get("tooth_trace", "straight")
+    if kind in ("helical", "herringbone"):
+        # external pair: opposite hands
+        mate["kind"] = kind
+        mate["helix_angle"] = -float(parameters.get("helix_angle", 0.0))
+    elif kind in ("rack", "internal") and trace in ("helical", "herringbone"):
+        # a pinion in a helical rack or ring gear has the same hand (same signed angle)
+        mate["kind"] = trace
+        mate["helix_angle"] = float(parameters.get("helix_angle", 0.0))
+    elif kind == "bevel":
+        primary_angle, mate_angle = bevel_pitch_angles(primary_teeth, teeth, shaft_angle)
+        if not (1.0 <= primary_angle <= 75.0 and 1.0 <= mate_angle <= 75.0):
+            raise ValueError(f"Shaft angle {shaft_angle:g}° with this ratio gives cone angles "
+                             f"{primary_angle:.1f}° / {mate_angle:.1f}°; both must lie in 1–75°.")
+        mate.update(kind="bevel", bevel_angle=mate_angle, bevel_profile="tredgold",
+                    shaft_angle=float(shaft_angle),
+                    profile_shift=-float(parameters.get("profile_shift", 0.0)))
+    mate["outside_diameter"] = gear_outside_from_module(
+        mate["kind"], module, teeth, mate["profile_shift"], mate.get("bevel_angle", 45.0))
+    return mate
+
+
+def gear_pair_center_distance(primary, mate):
+    """Axis distance of a spur / helical / ring pair, or rack pitch line to pinion axis."""
+    module = float(primary["module"])
+    kind = primary.get("kind", "spur")
+    if kind == "rack":
+        return module * mate["teeth"] / 2.0 + float(mate.get("profile_shift", 0.0)) * module
+    if kind == "internal":
+        return module * (primary["teeth"] - mate["teeth"]) / 2.0
+    return involute_pair_geometry(module, primary["teeth"], mate["teeth"],
+                                  float(primary.get("pressure_angle", 20.0)),
+                                  float(primary.get("profile_shift", 0.0)),
+                                  float(mate.get("profile_shift", 0.0)))[0]
+
+
+def bevel_mate_frame(primary, mate, offset=(0.0, 0.0, 0.0)):
+    """Local frame (origin, u, v, w) of a bevel mate in its primary's frame: both pitch cones
+    share the apex, the axes meet at the shaft angle, and a mate tooth space (even primary
+    tooth count) or tooth (odd) faces the primary at the common pitch-cone line (-X)."""
+    shaft = math.radians(float(mate.get("shaft_angle", primary.get("shaft_angle", 90.0))))
+    apex = np.array([0.0, 0.0, bevel_apex_height(primary)])
+    w = np.array([math.sin(shaft), 0.0, math.cos(shaft)])
+    e = np.array([-math.cos(shaft), 0.0, math.sin(shaft)])
+    y = np.array([0.0, 1.0, 0.0])
+    angle = -math.pi / 2.0 - (math.pi / mate["teeth"] if primary["teeth"] % 2 == 0 else 0.0)
+    u = math.cos(angle) * y + math.sin(angle) * e
+    v = -math.sin(angle) * y + math.cos(angle) * e
+    origin = apex - bevel_apex_height(mate) * w + np.asarray(offset, float)
+    return origin, u, v, w
 
 
 THREAD_METRIC_COARSE = {2: 0.4, 2.5: 0.45, 3: 0.5, 4: 0.7, 5: 0.8, 6: 1.0,
@@ -4584,16 +5149,20 @@ def draft_extrusion_mesh(mesh, pivot, axis, angle, selected_faces=None, circular
         updated_faces.append(record)
     return moved.tolist(), triangles, updated_faces
 
-def bevel_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
-    """Taper an involute prism toward its top face to form a straight bevel gear."""
+def bevel_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0, apex_height=None):
+    """Scale an involute prism toward the cone apex on its axis to form a straight bevel
+    gear: every flank line runs through the apex. `apex_height` is the apex distance from
+    the profile plane (Tredgold gears, see bevel_apex_height); None keeps the older
+    convention of an apex at pitch radius / tan(cone angle)."""
     module, angle = float(module), float(angle)
     if not math.isfinite(module) or module <= 0 or not math.isfinite(angle) or \
             not 1.0 <= angle <= 75.0 or not math.isfinite(h) or h <= 0:
         raise ValueError("Bevel gear module, thickness, or cone angle is invalid.")
-    pitch_radius = module * int(teeth) / 2.0
-    top_scale = 1.0 - h * math.tan(math.radians(angle)) / pitch_radius
+    if apex_height is None:
+        apex_height = module * int(teeth) / 2.0 / math.tan(math.radians(angle))
+    top_scale = 1.0 - h / float(apex_height)
     if top_scale <= 0.1:
-        raise ValueError("Bevel angle is too steep for this gear thickness.")
+        raise ValueError("The face width is too large for this bevel cone; reduce the thickness.")
 
     vertices, triangles, faces = extrude_profile(loops, h, frame, z0)
     origin, axis_u, axis_v, axis_w = (np.asarray(axis, float) for axis in frame)
@@ -4641,8 +5210,10 @@ def bevel_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
         raise ValueError("The bevel gear taper produced an open mesh.")
     return vertices, triangles, transformed_faces
 
-def helical_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
-    """Sweep an involute gear profile through an axial twist set by its helix angle."""
+def helical_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0, herringbone=False):
+    """Sweep an involute gear profile (external or ring gear) through an axial twist set by
+    its helix angle at the pitch circle. A herringbone (double helical) gear twists up to
+    mid-height and back, so its two halves have opposite hands."""
     module, angle = float(module), float(angle)
     if not math.isfinite(module) or module <= 0 or not math.isfinite(angle) or \
             abs(angle) > 45.0 or not math.isfinite(h) or h <= 0:
@@ -4654,10 +5225,62 @@ def helical_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
     if not math.isfinite(pitch_radius) or pitch_radius <= 0:
         raise ValueError("Helical gear pitch radius must be positive.")
     total_twist = h * math.tan(math.radians(angle)) / pitch_radius
-    layer_count = max(1, int(math.ceil(abs(total_twist) / math.radians(3.0))))
+    if herringbone:
+        half_layers = max(1, int(math.ceil(abs(total_twist / 2.0) / math.radians(3.0))))
+        layer_count = 2 * half_layers
+        placement = lambda t: (total_twist / 2.0 * (1.0 - abs(2.0 * t - 1.0)), 0.0)
+    else:
+        layer_count = max(1, int(math.ceil(abs(total_twist) / math.radians(3.0))))
+        placement = lambda t: (total_twist * t, 0.0)
     if layer_count > 128:
         raise ValueError("Helix is too long or steep; reduce the thickness or helix angle.")
+    return _swept_profile(loops, h, frame, z0, layer_count, placement,
+                          "herringbone gear" if herringbone else "helical gear")
 
+
+def helical_rack_extrusion(loops, h, frame, angle, z0=0.0, herringbone=False):
+    """Shear a rack profile along its length (sketch X) with height: helical teeth that
+    mesh with a helical pinion of the same signed helix angle; herringbone shears up to
+    mid-height and back."""
+    angle = float(angle)
+    if not math.isfinite(angle) or abs(angle) > 45.0 or not math.isfinite(h) or h <= 0:
+        raise ValueError("Rack thickness or helix angle is invalid.")
+    if abs(angle) < 1e-8:
+        return extrude_profile(loops, h, frame, z0)
+    total_shift = h * math.tan(math.radians(angle))
+    if herringbone:
+        return _swept_profile(loops, h, frame, z0, 2,
+                              lambda t: (0.0, total_shift / 2.0 * (1.0 - abs(2.0 * t - 1.0))),
+                              "herringbone rack")
+    return _swept_profile(loops, h, frame, z0, 1, lambda t: (0.0, total_shift * t), "helical rack")
+
+
+def gear_extrusion(loops, h, frame, parameters, z0=0.0):
+    """Solid of a generated gear from its profile loops and stored parameters: tapered to
+    the cone apex (bevel), twisted (helical, herringbone, helical ring gear), sheared
+    (helical rack), or a plain prism."""
+    kind = parameters.get("kind", "spur")
+    if kind == "bevel":
+        return bevel_gear_extrusion(loops, h, frame, parameters["module"], parameters["teeth"],
+                                    parameters.get("bevel_angle", 45.0), z0,
+                                    bevel_apex_height(parameters))
+    trace = {"helical": "helical", "herringbone": "herringbone"}.get(
+        kind, parameters.get("tooth_trace", "straight") if kind in ("rack", "internal")
+        else "straight")
+    if trace == "straight":
+        return extrude_profile(loops, h, frame, z0)
+    angle = float(parameters.get("helix_angle", 20.0))
+    if kind == "rack":
+        return helical_rack_extrusion(loops, h, frame, angle, z0, trace == "herringbone")
+    module = parameters.get("module") or gear_module(parameters)
+    return helical_gear_extrusion(loops, h, frame, module, parameters["teeth"],
+                                  angle, z0, trace == "herringbone")
+
+
+def _swept_profile(loops, h, frame, z0, layer_count, placement, label):
+    """Loft the profile through layer_count + 1 equally spaced sections; placement(t) gives
+    the in-plane rotation (rad, about the sketch origin) and the shift along sketch X of
+    the section at height fraction t."""
     origin, u, v, w = (np.asarray(axis, float) for axis in frame)
     hand = 1 if np.dot(np.cross(u, v), w) > 0 else -1
     axis2 = _unit(np.cross(u, v))
@@ -4665,9 +5288,9 @@ def helical_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
     vertices, triangles, faces = [], [], []
 
     def transform(point, z):
-        theta = total_twist * (z - z0) / h
+        theta, shift = placement((z - z0) / h)
         cosine, sine = math.cos(theta), math.sin(theta)
-        x = cosine * point[0] - sine * point[1]
+        x = cosine * point[0] - sine * point[1] + shift
         y = sine * point[0] + cosine * point[1]
         return origin + x * u + y * v + z * w
 
@@ -4726,12 +5349,13 @@ def helical_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
         top_ids = add(cap_local, layer_maps[-1])
 
         def cap_face(kind, ids, z, normal):
-            theta = total_twist * (z - z0) / h
+            theta, shift = placement((z - z0) / h)
             cosine, sine = math.cos(theta), math.sin(theta)
             tangent_u = _unit(cosine * u + sine * v)
             normal = _unit(normal)
             return {"kind": kind, "tris": ids, "planar": True,
-                    "frame": (origin + z * w, tangent_u, np.cross(normal, tangent_u), normal),
+                    "frame": (origin + shift * u + z * w, tangent_u, np.cross(normal, tangent_u),
+                              normal),
                     "boundary": [primitive for loop in all_loops
                                  for primitive in cap_boundary(loop, z)]}
 
@@ -4758,7 +5382,7 @@ def helical_gear_extrusion(loops, h, frame, module, teeth, angle, z0=0.0):
             flat_offset += point_count
 
     if not _mesh_is_closed(triangles):
-        raise ValueError("The helical gear sweep produced an open mesh.")
+        raise ValueError(f"The {label} sweep produced an open mesh.")
     return vertices, triangles, faces
 
 # ── ring extrusion: profile swept around an axis in the sketch plane (donut, ring, …) ──
@@ -5344,6 +5968,183 @@ def _manifold_csg(V, T, tri_face, cutters, cutter_ids, union):
     return ([tuple(v) for v in verts.tolist()], [tuple(t) for t in tris.tolist()],
             list(zip(srcs, fis)))
 
+def _face_outline_loops(V, T, tri_ids):
+    """Closed outline loops (vertex index lists, in the faces' winding) of a set of
+    consistently oriented triangles: the directed edges whose reverse is not in the set."""
+    directed = set()
+    for k in tri_ids:
+        a, b, c = T[k]
+        directed.update(((a, b), (b, c), (c, a)))
+    outgoing = {}
+    for a, b in directed:
+        if (b, a) not in directed:
+            outgoing.setdefault(a, []).append(b)
+    loops = []
+    while outgoing:
+        start = next(iter(outgoing)); loop = [start]; current = start
+        while True:
+            targets = outgoing.get(current)
+            if not targets: break
+            nxt = targets.pop()
+            if not targets: del outgoing[current]
+            if nxt == start: break
+            loop.append(nxt); current = nxt
+        if len(loop) >= 3: loops.append(loop)
+    return loops
+
+def _outline_primitives(points3d, frame):
+    """Boundary primitives of one closed outline (3D points in order) on a planar face:
+    straight runs become lines, runs of short co-circular edges arcs, a loop that is one
+    circle a circle — the same kinds the extrusion faces use."""
+    origin, u, v, normal = (np.asarray(a, float) for a in frame)
+    P3 = [np.asarray(p, float) for p in points3d]
+    P = [((p - origin) @ u, (p - origin) @ v) for p in P3]
+    # drop the points in the middle of straight runs
+    keep = list(range(len(P)))
+    changed = True
+    while changed and len(keep) > 3:
+        changed = False
+        for idx in range(len(keep)):
+            i0, i1, i2 = keep[idx-1], keep[idx], keep[(idx+1) % len(keep)]
+            ax, ay = P[i1][0]-P[i0][0], P[i1][1]-P[i0][1]
+            bx, by = P[i2][0]-P[i1][0], P[i2][1]-P[i1][1]
+            la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+            if la < 1e-12 or lb < 1e-12 or \
+                    (abs(ax*by - ay*bx) <= 1e-9*la*lb and ax*bx + ay*by > 0):
+                del keep[idx]; changed = True; break
+    m = len(keep)
+    pts = [P[i] for i in keep]; p3 = [P3[i] for i in keep]
+
+    def circle_through(a, b, c):
+        d = 2*(a[0]*(b[1]-c[1]) + b[0]*(c[1]-a[1]) + c[0]*(a[1]-b[1]))
+        if abs(d) < 1e-12: return None
+        sa, sb, sc = a[0]**2+a[1]**2, b[0]**2+b[1]**2, c[0]**2+c[1]**2
+        cx = (sa*(b[1]-c[1]) + sb*(c[1]-a[1]) + sc*(a[1]-b[1]))/d
+        cy = (sa*(c[0]-b[0]) + sb*(a[0]-c[0]) + sc*(b[0]-a[0]))/d
+        return cx, cy, math.hypot(a[0]-cx, a[1]-cy)
+
+    def turn(i):          # signed turning angle at outline point i
+        a, b, c = pts[i-1], pts[i], pts[(i+1) % m]
+        t1 = math.atan2(b[1]-a[1], b[0]-a[0]); t2 = math.atan2(c[1]-b[1], c[0]-b[0])
+        return (t2 - t1 + math.pi) % (2*math.pi) - math.pi
+
+    def length(i): return math.dist(pts[i], pts[(i+1) % m])
+    turns = [turn(i) for i in range(m)]
+    # a point is "inside a curve" when the outline bends a little there between two edges of
+    # nearly the same length (a tessellated arc), not at a real corner
+    smooth = [1e-6 < abs(turns[i]) < 0.6 and
+              max(length(i-1), length(i)) < 1.5*min(length(i-1), length(i))
+              for i in range(m)]
+
+    def to3d(x, y): return origin + x*u + y*v
+    if m >= 6 and all(smooth) and len({t > 0 for t in turns}) == 1:
+        c = circle_through(pts[0], pts[m//3], pts[2*m//3])
+        if c is not None and all(abs(math.dist(q, c[:2]) - c[2]) < 1e-5 for q in pts):
+            return [("circle", to3d(c[0], c[1]), c[2])]
+    # rotate the loop so it starts at a corner (not inside a curve)
+    start = next((i for i in range(m) if not smooth[i]), None)
+    if start is None: start = 0
+    order = [(start + k) % m for k in range(m)]
+    prims, k = [], 0
+    while k < m:
+        i = order[k]
+        # a curve: the following points are smooth points with turns of one sign
+        run = [i]; j = k + 1
+        while j < m and smooth[order[j]] and (turns[order[j]] > 0) == (turns[order[min(k+1, m-1)]] > 0):
+            run.append(order[j]); j += 1
+        end = order[j % m] if j < m else order[0]
+        if len(run) >= 3:
+            run_pts = [pts[r] for r in run] + [pts[end]]
+            c = circle_through(run_pts[0], run_pts[len(run_pts)//2], run_pts[-1])
+            if c is not None and all(abs(math.dist(q, c[:2]) - c[2]) < 1e-5 for q in run_pts):
+                ccw = turns[run[1]] > 0
+                prims.append(("arc", to3d(c[0], c[1]), p3[run[0]], p3[end],
+                              normal if ccw else -normal))
+                k = j; continue
+        prims.append(("line", p3[i], p3[order[(k+1) % m]] if k + 1 < m else p3[order[0]]))
+        k += 1
+    return prims
+
+def _boundary_matches(old, new, tol=1e-5):
+    """True when two boundary primitive lists describe the same outline."""
+    if len(old) != len(new): return False
+    def key(prim):
+        if prim[0] == "line":
+            return ("line", tuple(sorted((tuple(np.round(np.asarray(prim[1], float), 4)),
+                                          tuple(np.round(np.asarray(prim[2], float), 4))))))
+        if prim[0] == "circle":
+            return ("circle", tuple(np.round(np.asarray(prim[1], float), 4)), round(float(prim[2]), 4))
+        return ("arc", tuple(np.round(np.asarray(prim[1], float), 4)),
+                tuple(sorted((tuple(np.round(np.asarray(prim[2], float), 4)),
+                              tuple(np.round(np.asarray(prim[3], float), 4))))))
+    return sorted(map(key, old)) == sorted(map(key, new))
+
+def refresh_face_boundaries(verts, tris, faces):
+    """Planar faces whose stored outline (boundary) no longer matches their triangles — after
+    a cut, a union or a fillet / chamfer — get the outline of the actual face, so sketches on
+    the face show and snap to the real edges. Unchanged outlines are kept as they are.
+    Returns the face list (changed faces are new dicts)."""
+    if not faces or not len(tris): return faces
+    V = np.asarray(verts, float).reshape(-1, 3); T = np.asarray(tris, int).reshape(-1, 3)
+    out = []
+    for face in faces:
+        if not face.get("planar") or "frame" not in face or not face.get("tris"):
+            out.append(face); continue
+        ids = [k for k in face["tris"] if 0 <= k < len(T)]
+        try:
+            loops = _face_outline_loops(V, T, ids)
+            new = [prim for loop in loops for prim in _outline_primitives(V[loop], face["frame"])]
+        except Exception as ex:                       # keep the stored outline
+            _dbg(f"refresh_face_boundaries: {ex}")
+            out.append(face); continue
+        if not new or _boundary_matches(face.get("boundary", []), new):
+            out.append(face)
+        else:
+            out.append(dict(face, boundary=new))
+    return out
+
+CSG_SNAP = 1e-7    # mm: coordinates of body and tools this close are made identical
+
+def _snap_csg_coordinates(verts, cutters, tol=CSG_SNAP):
+    """Make nearly equal x / y / z values of the body and the tools exactly equal (the body's
+    value wins). Faces meant to be flush often differ by rounding noise (e.g. -60.00000000000001
+    vs -60.0 from a face-sketch transform); an exact boolean then leaves a skin 1e-14 mm thick
+    (two opposite faces on top of each other: flickering stripes, a notch that stays closed)."""
+    base = np.asarray(verts, float).reshape(-1, 3)
+    tools = [np.asarray(cv, float).reshape(-1, 3) for cv, _, _ in cutters]
+    if not len(base) or not any(len(t) for t in tools):
+        return verts, cutters
+    changed = False
+    snapped = [base.copy()] + [t.copy() for t in tools]
+    for axis in range(3):
+        values = np.concatenate([base[:, axis]] + [t[:, axis] for t in tools if len(t)])
+        is_base = np.zeros(len(values), bool); is_base[:len(base)] = True
+        order = np.argsort(values, kind="stable")
+        sorted_values = values[order]
+        cluster = np.concatenate([[0], np.cumsum(np.diff(sorted_values) > tol)])
+        # representative per cluster: its first body value when there is one, else its first value
+        rep = np.empty(int(cluster[-1]) + 1)
+        first = np.concatenate([[True], cluster[1:] != cluster[:-1]])
+        rep[cluster[first]] = sorted_values[first]
+        from_base = is_base[order]
+        base_clusters, base_values = cluster[from_base], sorted_values[from_base]
+        if len(base_clusters):
+            first_base = np.concatenate([[True], base_clusters[1:] != base_clusters[:-1]])
+            rep[base_clusters[first_base]] = base_values[first_base]
+        new_sorted = rep[cluster]
+        new_values = np.empty_like(values); new_values[order] = new_sorted
+        if np.any(new_values != values):
+            changed = True
+            start = 0
+            for array in snapped:
+                n = len(array); array[:, axis] = new_values[start:start + n]; start += n
+    if not changed:
+        return verts, cutters
+    new_verts = [tuple(p) for p in snapped[0].tolist()]
+    new_cutters = [([tuple(p) for p in s.tolist()], ct, cf)
+                   for s, (cv, ct, cf) in zip(snapped[1:], cutters)]
+    return new_verts, new_cutters
+
 def csg_subtract(base, cutters, label="cut ", union=False):
     """base / cutters: (verts, tris, faces) meshes. Returns base minus every cutter as
     (verts, tris, faces). Faces of base keep their indices (they may become empty); surfaces
@@ -5354,6 +6155,8 @@ def csg_subtract(base, cutters, label="cut ", union=False):
     body is processed. union=True adds the bodies instead of subtracting them."""
     verts, tris, faces = base
     if not tris: return base
+    verts, cutters = _snap_csg_coordinates(verts, cutters)
+    base = (verts, tris, faces)
     V = np.asarray(verts, float); T = np.asarray(tris, int).reshape(-1, 3)
     lo, hi = V.min(0), V.max(0)
     live = []
@@ -5423,7 +6226,7 @@ def csg_subtract(base, cutters, label="cut ", union=False):
                 nf["frame"] = (O, u, np.cross(n2, u), n2); nf["boundary"] = cf["boundary"]
             extra[(src, fi)] = len(out); out.append(nf)
         out[extra[(src, fi)]]["tris"].append(k)
-    return V2, T2, out
+    return V2, T2, refresh_face_boundaries(V2, T2, out)
 
 def _csg_run(base, cutters, cutter_ids, tri_ids, tri_face, far, local=True, union=False):
     """Subtract (or add) the cutters from the given triangles of base. Returns (verts, tris, tags).
@@ -7041,9 +7844,26 @@ class View3D(QGLWidget):
         self._dimension_hovered = False
         self._dimension_hover_key = None     # name of the handle under the cursor (highlighted)
         self._grid_cache = None     # (key, pixmap) of the rendered sketch grid
+        # open profile parts in a sketch blink red for BLINK_MS (then stay marked steadily);
+        # the timer flips the phase and repaints. A new set of open parts blinks again.
+        self._blink_on = True
+        self._blink_key = None
+        self._blink_clock = QElapsedTimer()
+        self._blink_timer = QTimer(self); self._blink_timer.setInterval(450)
+        self._blink_timer.timeout.connect(self._blink_tick)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(600, 500)
+
+    BLINK_MS = 5000
+
+    def _blink_tick(self):
+        if self._mode != MODE_SKETCH or not self._blink_clock.isValid() or \
+                self._blink_clock.elapsed() >= self.BLINK_MS:
+            self._blink_timer.stop(); self._blink_on = True
+            self.update(); return
+        self._blink_on = not self._blink_on
+        self.update()
 
     def _default_cursor(self):
         return QCursor(Qt.CrossCursor if self._mode in (MODE_SELPLANE, MODE_THREADPICK)
@@ -7559,6 +8379,17 @@ class View3D(QGLWidget):
                 axis = frame[3 if flipped else 4]
                 handle_specs.append((anchor, axis, mw.sp_feat_angle,
                                      "Chamfer angle", "°", factor))
+        elif getattr(mw, "_gear_preview", None) is not None and not mw._dock_gear.isHidden() \
+                and mw.cb_gear_type.currentData() == "rack":
+            # rack length: an arrow at the +X end; the rack grows on both ends (factor 2)
+            frame = [np.asarray(axis, float) for axis in mw._gear_preview["sketch"]["sketch"].frame]
+            module = mw.sp_gear_module.value()
+            length = max(mw.sp_gear_rack_length.value(),
+                         mw.sp_gear_teeth.value() * math.pi * module)
+            anchor = (frame[0] + length / 2.0 * frame[1] - 0.75 * module * frame[2] +
+                      mw.sp_gear_thickness.value() / 2.0 * frame[3])
+            handle_specs = [(anchor, _unit(frame[1]), mw.sp_gear_rack_length,
+                             "Rack length", " mm", 2.0)]
         elif mw._ext_pending is not None and not mw._dock_ext.isHidden():
             sketch = mw._ext_pending["sketch"]
             loops = sketch.profile_loop_edges()
@@ -9055,12 +9886,20 @@ class View3D(QGLWidget):
 
     def _paint_sketch(self, p, sk):
         sv = self.state.get("sketch_view_state", {})
-        levels = {item["level"]: item for item in sv.get("underlays", []) if not item.get("sibling")}
+        levels = reference_levels(sv.get("underlays", []))
         # clickable constraint symbols of this paint: [(constraint, kind, data)] with kind
         # "rect" (data: QRectF) or "ring" (data: (centre QPointF, inner px, outer px))
         self._con_glyphs = []
 
+        outline_vertices = face_outline_vertices(sk)
+        outline_state = sv.get("face_outline") or {"visible": True, "reference": True}
+
+        def is_outline(geometry):
+            return hasattr(geometry, "reference_boundary") or geometry in outline_vertices
+
         def visible(geometry):
+            if is_outline(geometry):          # the face's own edges: "Face outline" row
+                return outline_state["visible"]
             level = getattr(geometry, "reference_level", None)
             if level is None:
                 return True
@@ -9068,8 +9907,10 @@ class View3D(QGLWidget):
             return item is not None and item["visible"] and item["reference"]
 
         def reference_color(geometry):
+            if is_outline(geometry):
+                return QColor(*FACE_OUTLINE_COLOR)
             item = levels.get(getattr(geometry, "reference_level", None))
-            return QColor(*item["color"]) if item is not None else REF
+            return QColor(*item["color"]) if item is not None and item.get("color") else REF
 
         sel_seg  = sv.get("sel_seg")
         sel_vtx1 = sv.get("sel_vtx1")
@@ -9090,6 +9931,35 @@ class View3D(QGLWidget):
         self._paint_hover(p, sk, self._hover2d)
         for hl_c in sv.get("hl_constraint") or ():
             self._paint_constraint_highlight(p, sk, hl_c)
+
+        # the parts that keep the profile open blink red (not while a drawing step runs)
+        open_edges, open_vertices = ([], set()) if self._drawing_step_pending(sv) \
+            else sk.open_profile_parts()
+        blinking = False
+        if open_edges or open_vertices:
+            key = (frozenset(map(id, open_edges)), frozenset(map(id, open_vertices)))
+            if key != self._blink_key:          # newly opened: blink again
+                self._blink_key = key; self._blink_on = True
+                self._blink_clock.start(); self._blink_timer.start()
+            blinking = self._blink_clock.elapsed() < self.BLINK_MS
+            if not blinking and self._blink_timer.isActive():
+                self._blink_timer.stop(); self._blink_on = True
+        else:
+            self._blink_key = None
+            if self._blink_timer.isActive(): self._blink_timer.stop()
+            self._blink_on = True
+        open_vertices = {v for v in open_vertices if visible(v)}
+        if self._blink_on:
+            p.setPen(QPen(QColor(255, 40, 40, 170 if blinking else 110), 8 if blinking else 6,
+                          Qt.SolidLine, Qt.RoundCap))
+            p.setBrush(Qt.NoBrush)
+            for element in open_edges:
+                if not visible(element): continue
+                if isinstance(element, Segment):
+                    p.drawLine(self.to_px(element.v0.xy()), self.to_px(element.v1.xy()))
+                else:
+                    a0, sw = element.angles()
+                    p.drawArc(*self._arc_px(element.center.xy(), element.radius(), a0, sw))
 
         def style(geom, defined, selected=False, first_pick=False):
             if selected and mode == DTOOL_SELECT: col = QColor(255, 80, 0)
@@ -9228,6 +10098,10 @@ class View3D(QGLWidget):
                 p.setPen(QPen(QColor(255,200,0),1.5))
                 p.drawLine(QPointF(pp.x()-6,pp.y()-6), QPointF(pp.x()+6,pp.y()+6))
                 p.drawLine(QPointF(pp.x()-6,pp.y()+6), QPointF(pp.x()+6,pp.y()-6))
+        if self._blink_on and open_vertices:      # loose ends / branch points of the profile
+            p.setPen(QPen(QColor(255, 40, 40), 2)); p.setBrush(Qt.NoBrush)
+            for v in open_vertices:
+                p.drawEllipse(self.to_px(v.xy()), 8, 8)
 
         selected_text = set(self._selected_text_groups(sv, sk)) if mode == DTOOL_SELECT else set()
         first_vtx = sk.vertices[sel_vtx1] if sel_vtx1 is not None and sel_vtx1 < len(sk.vertices) else None
@@ -9456,11 +10330,15 @@ class View3D(QGLWidget):
         if c is None or c not in sk.constraints: return
         glow = QPen(QColor(255, 60, 255, 110), 10, Qt.SolidLine, Qt.RoundCap)
         p.setBrush(Qt.NoBrush)
+        sv = self.state.get("sketch_view_state", {})
         for g in constraint_refs(c):
-            level = getattr(g, "reference_level", None)
-            if level is not None and not any(
-                    item["level"] == level and item["visible"] and not item.get("sibling")
-                    for item in self.state.get("sketch_view_state", {}).get("underlays", [])):
+            if hasattr(g, "reference_boundary") and \
+                    not (sv.get("face_outline") or {"visible": True})["visible"]:
+                continue
+            level = None if hasattr(g, "reference_boundary") else getattr(g, "reference_level", None)
+            state = reference_levels(
+                self.state.get("sketch_view_state", {}).get("underlays", [])).get(level)
+            if level is not None and not (state is not None and state["visible"]):
                 continue
             p.setPen(glow)
             axis = getattr(g, "sketch_axis", None)
@@ -9512,6 +10390,29 @@ class View3D(QGLWidget):
         p.restore()
         return poly
 
+    def _support_line(self, p, P, Q, tol=1.5):
+        """Draw the dimension helper line P→Q (px, current pen) only where it is needed:
+        the parts that run along a drawn sketch line are left out, so extension and
+        dimension lines never lie on top of the geometry."""
+        dx, dy = Q.x()-P.x(), Q.y()-P.y()
+        L = math.hypot(dx, dy)
+        if L < 0.5: return
+        ux, uy = dx/L, dy/L
+        covered = []
+        for a, b in getattr(self, "_dim_cover", ()):
+            ax, ay, bx, by = a[0]-P.x(), a[1]-P.y(), b[0]-P.x(), b[1]-P.y()
+            if abs(ux*ay - uy*ax) > tol or abs(ux*by - uy*bx) > tol: continue
+            lo, hi = sorted((ux*ax + uy*ay, ux*bx + uy*by))
+            lo, hi = max(lo, 0.0), min(hi, L)
+            if hi > lo: covered.append((lo, hi))
+        if not covered:
+            p.drawLine(P, Q); return
+        t = 0.0
+        for lo, hi in sorted(covered) + [(L, L)]:
+            if lo - t > 1.0:
+                p.drawLine(QPointF(P.x()+ux*t, P.y()+uy*t), QPointF(P.x()+ux*lo, P.y()+uy*lo))
+            t = max(t, hi)
+
     def _paint_dim_linear(self, p, c, A, B, n0, text, col):
         """A,B: measured points (px). n0: unit base normal (px) of the measuring direction.
         The dimension line sits c.off_mm beyond the outermost point on side c.side of n0;
@@ -9530,9 +10431,9 @@ class View3D(QGLWidget):
         # extension lines: small gap at the geometry, small overshoot past the dimension line
         for P, P2, sP in ((A, A2, sA), (B, B2, sB)):
             if s - sP > 5:
-                p.drawLine(QPointF(P.x()+n[0]*3, P.y()+n[1]*3),
-                           QPointF(P2.x()+n[0]*4, P2.y()+n[1]*4))
-        p.drawLine(A2, B2)
+                self._support_line(p, QPointF(P.x()+n[0]*3, P.y()+n[1]*3),
+                                   QPointF(P2.x()+n[0]*4, P2.y()+n[1]*4))
+        self._support_line(p, A2, B2)
         if L > 26:
             self._arrow(p, A2, (-u[0], -u[1]), col); self._arrow(p, B2, u, col)
         else:   # too short — arrows outside, pointing inwards
@@ -9543,7 +10444,7 @@ class View3D(QGLWidget):
         t = c.t_frac
         T = QPointF(A2.x()+(B2.x()-A2.x())*t, A2.y()+(B2.y()-A2.y())*t)
         if t < 0 or t > 1:          # text moved outside: extend the dimension line to it
-            p.setPen(pen); p.drawLine(A2 if t < 0 else B2, T)
+            p.setPen(pen); self._support_line(p, A2 if t < 0 else B2, T)
         poly = self._dim_text(p, T, math.degrees(math.atan2(u[1], u[0])), text, col)
         self._dim_hits.append((c, "linear", (A, B, n0), poly, (A2, B2)))
 
@@ -9574,6 +10475,20 @@ class View3D(QGLWidget):
     def _paint_dimensions(self, p, sk):
         self._dim_hits = []
         sv = self.state.get("sketch_view_state", {})
+        shown_levels = {level for level, item in reference_levels(sv.get("underlays", [])).items()
+                        if item["visible"] and item["reference"]}
+        cover = []                     # drawn sketch lines (px): helper lines skip along them
+        outline_shown = (sv.get("face_outline") or {"visible": True})["visible"]
+        for seg in sk.segments:
+            if hasattr(seg, "reference_boundary"):
+                if not outline_shown: continue
+                a, b = self.to_px(seg.v0.xy()), self.to_px(seg.v1.xy())
+                cover.append(((a.x(), a.y()), (b.x(), b.y()))); continue
+            level = getattr(seg, "reference_level", None)
+            if level is not None and level not in shown_levels: continue
+            a, b = self.to_px(seg.v0.xy()), self.to_px(seg.v1.xy())
+            cover.append(((a.x(), a.y()), (b.x(), b.y())))
+        self._dim_cover = cover
         hv = self._hover2d
         active = {hv[1]} if hv is not None and hv[0] == "dim" else set()
         if self._drag_dim is not None: active.add(self._drag_dim[0])
@@ -9655,7 +10570,7 @@ class View3D(QGLWidget):
             return QPointF(a.x()+t*dx, a.y()+t*dy), t
         def extend(a, b, F, t):      # thin dashed extension of a line out to F
             if t < 0 or t > 1:
-                p.setPen(QPen(col, 1, Qt.DotLine)); p.drawLine(a if t < 0 else b, F)
+                p.setPen(QPen(col, 1, Qt.DotLine)); self._support_line(p, a if t < 0 else b, F)
         if c.pair == "ss" and c.mode == "angle":
             self._paint_angle(p, c, col); return
         if c.pair == "cc":
@@ -9727,7 +10642,7 @@ class View3D(QGLWidget):
             n0 = (0.0, 1.0) if orient == "H" else (1.0, 0.0)
             along = abs(B.x()-A.x()) if orient == "H" else abs(B.y()-A.y())
             if along < 0.5:          # 0 distance = points aligned: dashed alignment line + value
-                p.setPen(QPen(col, 1, Qt.DashLine)); p.drawLine(A, B)
+                p.setPen(QPen(col, 1, Qt.DashLine)); self._support_line(p, A, B)
                 M = QPointF((A.x()+B.x())/2 + (8 if orient == "H" else 0),
                             (A.y()+B.y())/2 - (0 if orient == "H" else 4))
                 poly = self._dim_text(p, M, 0.0 if orient == "V" else -90.0, c.label(), col)
@@ -9775,8 +10690,8 @@ class View3D(QGLWidget):
         pen = QPen(col, 1); p.setPen(pen); p.setBrush(Qt.NoBrush)
         # thin extensions from the intersection to each line when needed
         p.setPen(QPen(col, 1, Qt.DotLine))
-        p.drawLine(I, QPointF(I.x()+dA[0]*(R+8), I.y()+dA[1]*(R+8)))
-        p.drawLine(I, QPointF(I.x()+dB[0]*(R+8), I.y()+dB[1]*(R+8)))
+        self._support_line(p, I, QPointF(I.x()+dA[0]*(R+8), I.y()+dA[1]*(R+8)))
+        self._support_line(p, I, QPointF(I.x()+dB[0]*(R+8), I.y()+dB[1]*(R+8)))
         p.setPen(pen)
         p.drawArc(QRectF(I.x()-R, I.y()-R, 2*R, 2*R), int(angA*16), int(span*16))
         def at(deg): r = math.radians(deg); return QPointF(I.x()+R*math.cos(r), I.y()-R*math.sin(r))
@@ -10288,6 +11203,15 @@ class View3D(QGLWidget):
         sk = self.state.get("active_sketch"); hv = None
         sv = self.state.get("sketch_view_state", {})
         if sk and sv.get("mode") == DTOOL_SELECT:
+            free = self._free_pick(sk, px)
+            if free is not None:      # same priority as a click (see _select_press)
+                self.setCursor(self._default_cursor())
+                vi = self._near_vtx(sk, px, thr=8.0)
+                if vi is not None and sk.vertices[vi] not in sk.analysis()["det_v"]:
+                    self._hover2d = ("vtx", vi)
+                else:
+                    self._hover2d = free if free[0] != "ellipse" else None
+                return
             handle = self._text_handle_at(sv, sk, px)
             if handle is not None:
                 idx = handle[1]
@@ -10465,7 +11389,10 @@ class View3D(QGLWidget):
             self.update(); return
         if e.key() == Qt.Key_Backspace or (
                 main_window is not None and main_window._matches_shortcut("delete_selected", e)):
-            self._delete_selected(sv, self.state.get("active_sketch"))
+            if main_window is not None:      # also removes selected constraints
+                main_window._on_delete_selected()
+            else:
+                self._delete_selected(sv, self.state.get("active_sketch"))
             self.update(); return
         if e.key() == Qt.Key_Escape:
             if not self._has_pending(sv):
@@ -10600,6 +11527,7 @@ class View3D(QGLWidget):
             sk, self._near_seg(sk, px, thr=12.0), self._near_circle(sk, px, thr=10.0),
             self._near_arc(sk, px, thr=10.0))
         ei = self._near_ellipse(sk, px, thr=10.0)
+        vi, si, ci, ai, ei = self._apply_free_pick(sk, self._free_pick(sk, px), vi, si, ci, ai, ei)
         hit = ("vtx", vi) if vi is not None else ("seg", si) if si is not None else \
               ("circle", ci) if ci is not None else ("arc", ai) if ai is not None else \
               ("vtx", sk.vertices.index(sk.ellipses[ei].major_start)) if ei is not None else None
@@ -10642,13 +11570,15 @@ class View3D(QGLWidget):
                      ("sel_seg", "_sel_segs", "sel_vtx1", "sel_curve", "_sel_extra")}
         prev_parts = self._selection_parts(sv, sk)
         sv["sel_curve"]    = None; sv["_sel_extra"] = []
-        handle = self._text_handle_at(sv, sk, px)
+        # a not fully constrained line / curve under the cursor always has the highest priority
+        free = self._free_pick(sk, px)
+        handle = self._text_handle_at(sv, sk, px) if free is None else None
         if handle is not None:
             group, corner = handle
             self._begin_text_drag(sv, sk, group, px, corner)
             return
         # dimension annotations can be grabbed and moved
-        hit = self._dim_pick(sk, px)
+        hit = self._dim_pick(sk, px) if free is None else None
         if hit is not None:
             self._drag_dim = hit; self._rband_start = None
             sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["_sel_segs"] = []
@@ -10661,7 +11591,7 @@ class View3D(QGLWidget):
             self._near_seg(sk, px, thr=4.0) is not None or \
             self._near_circle(sk, px, thr=4.0) is not None or \
             self._near_arc(sk, px, thr=4.0) is not None
-        glyph = self._con_glyph_at(px) if not on_geometry else None
+        glyph = self._con_glyph_at(px) if not on_geometry and free is None else None
         if glyph is not None:
             self._rband_start = None
             sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["_sel_segs"] = []
@@ -10674,6 +11604,7 @@ class View3D(QGLWidget):
             sk, self._near_seg(sk, px, thr=12.0), self._near_circle(sk, px, thr=10.0),
             self._near_arc(sk, px, thr=10.0))
         ei = self._near_ellipse(sk, px, thr=10.0)
+        vi, si, ci, ai, ei = self._apply_free_pick(sk, free, vi, si, ci, ai, ei)
         hit_obj = sk.vertices[vi] if vi is not None else sk.segments[si] if si is not None else \
                   sk.circles[ci] if ci is not None else sk.arcs[ai] if ai is not None else \
                   sk.ellipses[ei] if ei is not None else None
@@ -11120,7 +12051,9 @@ class View3D(QGLWidget):
             return
         sv.pop("mirror_pending")
         self._clear_selection(sv)
-        self.sigSelInfo.emit(f"Mirrored {count} element(s); copies follow the original geometry")
+        self.sigSelInfo.emit(f"Mirrored {count} element(s); copies follow the original geometry"
+                             if count else "The selection is already symmetric about this "
+                             "axis — nothing new to add")
 
     # ── rigid groups / multiple copies ───────────────────────────────────────
     def _select_group_members(self, sv, sk, group):
@@ -11279,6 +12212,8 @@ class View3D(QGLWidget):
         arc, or (failing those) a vertex. → (kind, index) or None."""
         vi = self._near_vtx(sk, px, thr=6.0)
         if vi is not None and sk.vertices[vi] in sk.points_free: return ("vtx", vi)
+        free = self._free_pick(sk, px)        # not fully constrained geometry comes first
+        if free is not None and free[0] != "ellipse": return free
         ent = self._curve_entity_at(sk, px, thr=8.0)
         if ent is not None: return ent
         return ("vtx", vi) if vi is not None else None
@@ -12261,6 +13196,53 @@ class View3D(QGLWidget):
                 chosen = (item, distance)
         return chosen[0] if chosen is not None else None
 
+    def _free_pick(self, sk, px):
+        """The not fully constrained line, circle, arc or ellipse under the cursor (drawn or
+        support geometry alike) → (kind, index) with kind "seg" / "circle" / "arc" /
+        "ellipse", or None. In the select tool it beats every other pick (dimensions,
+        constraint symbols, constrained geometry); only its free points stay grabbable."""
+        an = sk.analysis(); det_v, det_c = an["det_v"], an["det_c"]
+        text_vertices = sk.text_vertices()
+        point = (px.x(), px.y())
+        hits = []
+        def usable(element):
+            return not element.reference and self._level_reference_available(element)
+        for i, seg in enumerate(sk.segments):
+            if not usable(seg) or seg.v0 in text_vertices or (seg.v0 in det_v and seg.v1 in det_v):
+                continue
+            a, b = self.to_px(seg.v0.xy()), self.to_px(seg.v1.xy())
+            d, _nearest = _projected_segment_hit(point, (a.x(), a.y()), (b.x(), b.y()))
+            if d < 12.0: hits.append((d, 0, i, "seg"))
+        for i, circ in enumerate(sk.circles):
+            if not usable(circ) or circ in det_c: continue
+            cp = self.to_px(circ.center.xy())
+            d, _nearest = _projected_circle_hit(point, (cp.x(), cp.y()), circ.radius*self.scale)
+            if d < 10.0: hits.append((d, 1, i, "circle"))
+        for i, arc in enumerate(sk.arcs):
+            if not usable(arc) or {arc.center, arc.v_start, arc.v_end} <= det_v: continue
+            pts = [self.to_px(xy) for xy in arc.tess()]
+            d, _nearest, _segment = _projected_polyline_hit(point, [(q.x(), q.y()) for q in pts])
+            if d < 10.0: hits.append((d, 2, i, "arc"))
+        for i, ellipse in enumerate(sk.ellipses):
+            if ellipse.reference or set(ellipse.vertices()) <= det_v: continue
+            pts = [self.to_px(xy) for xy in ellipse.tess()]
+            if not pts: continue
+            pts.append(pts[0])
+            d, _nearest, _segment = _projected_polyline_hit(point, [(q.x(), q.y()) for q in pts])
+            if d < 10.0: hits.append((d, 3, i, "ellipse"))
+        if not hits: return None
+        best = min(hits)
+        return best[3], best[2]
+
+    def _apply_free_pick(self, sk, free, vi, si, ci, ai, ei):
+        """Let a free element (see _free_pick) win over the other hits: returns the new
+        (vi, si, ci, ai, ei); a vertex stays only when it is free itself (a loose end)."""
+        if free is None: return vi, si, ci, ai, ei
+        kind, index = free
+        if vi is not None and sk.vertices[vi] in sk.analysis()["det_v"]: vi = None
+        return (vi, index if kind == "seg" else None, index if kind == "circle" else None,
+                index if kind == "arc" else None, index if kind == "ellipse" else None)
+
     def _rank_line_curve(self, sk, si, ci, ai):
         """One winner among a line, circle and arc hit (each an index or None): the highest
         pick priority wins (drawn geometry before support before reference); on equal
@@ -12303,16 +13285,32 @@ class View3D(QGLWidget):
                        dist_to_curve(curve_of(element), point)*self.scale < threshold
                        for element in sk.segments+sk.circles+sk.arcs)
 
+    def _outline_vertex_set(self, sk):
+        """face_outline_vertices(sk), cached while the sketch's element lists stay the same."""
+        key = (id(sk), id(sk.segments), len(sk.segments), id(sk.circles), len(sk.circles),
+               id(sk.arcs), len(sk.arcs))
+        cache = getattr(self, "_outline_vertex_cache", None)
+        if cache is None or cache[0] != key:
+            cache = (key, face_outline_vertices(sk))
+            self._outline_vertex_cache = cache
+        return cache[1]
+
     def _level_reference_available(self, element):
+        sv = self.state.get("sketch_view_state", {})
+        sk = self.state.get("active_sketch")
+        if hasattr(element, "reference_boundary") or \
+                (isinstance(element, Vertex) and element.locked and sk is not None and
+                 element in self._outline_vertex_set(sk)):
+            # the face's own edges follow the "Face outline" row of the Sketch Explorer
+            state = sv.get("face_outline") or {"visible": True, "reference": True}
+            return state["visible"] and state["reference"]
         level = getattr(element, "reference_level", None)
         if level is None:
             return True
-        sv = self.state.get("sketch_view_state", {})
         if sv.get("mode") not in (DTOOL_SELECT, "draw", "constrain") and sv.get("mirror_pending") is None:
             return False
-        levels = sv.get("underlays", [])
-        return any(item["level"] == level and item["visible"] and item["reference"]
-                   and not item.get("sibling") for item in levels)
+        state = reference_levels(sv.get("underlays", [])).get(level)
+        return state is not None and state["visible"] and state["reference"]
 
     def _near_arc(self, sk, px, thr=12.0):
         """Return index of the arc whose curve is within thr px of px."""
@@ -13729,6 +14727,18 @@ def sketch_fill(sk, d):
         for k, v in cd.items():
             if k != "__type__": setattr(c, k, deref(v))
         sk.constraints.append(c)
+    # older versions kept the midpoint symmetry on a line shortened by Trim; that constraint
+    # no longer holds and the next solve would pull the piece back: keep the lines symmetric
+    removed = sk.merge_duplicate_geometry()        # shapes mirrored onto themselves before
+    if removed:
+        _dbg(f"sketch_fill: {sk.name}: removed {removed} duplicate element(s) lying on top of others")
+    position = lambda v: (v.x, v.y)
+    for c in sk.constraints:
+        if isinstance(c, CSymmetric) and isinstance(c.seg_a, Segment) and \
+                isinstance(c.seg_b, Segment) and not symmetric_lines_only(c) and \
+                symmetric_mid_error(c, position) > 1e-4 and \
+                abs(symmetric_line_residual(c, position)) < 1e-4:
+            c.lines_only = True
     sk._an_key = None; sk._an = None
     return sk
 
@@ -23195,6 +24205,10 @@ class AssemblyDialog(QDialog):
                             Qt.WindowCloseButtonHint | Qt.WindowSystemMenuHint)
         self.resize(1400, 860)
         self._build_ui()
+        # Enter in a number field must only confirm the value: no button of this window is the
+        # dialog's default button (otherwise Enter "clicks" e.g. the colour button)
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False); button.setDefault(False)
         self._update_title()
         self._refresh_status()
         self._rebuild_scene()
@@ -23424,6 +24438,13 @@ class AssemblyDialog(QDialog):
         grid.addWidget(QLabel("Color:"), 14, 0)
         grid.addWidget(self.btn_body_color, 14, 1, 1, 2)
         grid.setRowStretch(15, 1)
+        # labels and values keep their place when the panel gets wider: the free space goes
+        # to an empty column on the right
+        for column in range(3):
+            grid.setColumnStretch(column, 0)
+        grid.setColumnStretch(3, 1)
+        for label in (self.lbl_source, self.lbl_state, self.lbl_body_name):
+            label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
         self.txt_measure = QPlainTextEdit()
         self.txt_measure.setReadOnly(True)
@@ -23804,16 +24825,12 @@ class AssemblyDialog(QDialog):
                 item.setData(0, Qt.UserRole + 1, "component")
                 if status != "ok":
                     item.setForeground(0, QColor("#ffb454" if status == "outdated" else "#ff6b6b"))
-                if not (component["kind"] == "file" and component.get("file_root") is not None):
-                    for number, body in enumerate(component["bodies"]):
-                        role = "" if component["kind"] == "file" and not component.get("file_root") \
-                            or len(component["bodies"]) == 1 else \
-                            "   (parent)" if number == 0 else "   (child)"
-                        child = QTreeWidgetItem([body["name"] + role])
-                        child.setData(0, Qt.UserRole, index)
-                        child.setData(0, Qt.UserRole + 1, "body")
-                        child.setData(0, Qt.UserRole + 2, number)
-                        item.addChild(child)
+                # a part is one entry: the solids it is built from (its child objects) are not
+                # listed — a single body is still picked in the 3-D view for colour / transparency
+                if len(component["bodies"]) > 1:
+                    item.setToolTip(0, f"{len(component['bodies'])} bodies: " +
+                                    ", ".join(body["name"] for body in component["bodies"]) +
+                                    "\nClick a body in the view to change its colour / transparency")
                 if show_axes_checkbox:
                     axes_item = QTreeWidgetItem(["Move/Rotate"])
                     axes_item.setFlags(axes_item.flags() | Qt.ItemIsUserCheckable)
@@ -24037,11 +25054,7 @@ class AssemblyDialog(QDialog):
             self._loading = False
 
     def _set_body_color_button(self, color):
-        rgb = tuple(max(0, min(255, int(round(float(channel) * 255)))) for channel in color[:3])
-        text_rgb = tuple(255 - channel for channel in rgb)
-        self.btn_body_color.setStyleSheet(
-            f"QPushButton {{ background-color: rgb({rgb[0]}, {rgb[1]}, {rgb[2]}); "
-            f"color: rgb({text_rgb[0]}, {text_rgb[1]}, {text_rgb[2]}); }}")
+        self.btn_body_color.setStyleSheet(color_button_style(color))
 
     def _on_body_transparency(self, value):
         component = self._selected
@@ -24843,15 +25856,15 @@ class MainWindow(QMainWindow):
             (self._dock_feat.widget().layout().itemAt(1).layout(),
              feature_fields, feature_width),
             (self._gear_form,
-             (self.cb_gear_type, self.sp_gear_outside, self.sp_gear_teeth,
+             (self.cb_gear_type, self.sp_gear_outside, self.sp_gear_teeth, self.sp_gear_rack_length,
               self.sp_planet_teeth, self.sp_planet_count, self.sp_planetary_rim,
               self.sp_planetary_sun_diameter, self.sp_planetary_planet_diameter,
               self.sp_planetary_ring_diameter, self.sp_planetary_sun_bore,
               self.sp_planetary_planet_bore, self.sp_gear_module, self.sp_bevel_angle,
-              self.sp_gear_helix_angle,
+              self.cb_gear_trace, self.sp_gear_helix_angle, self.sp_gear_shift,
               self.sp_gear_backlash, self.sp_gear_tooth_radius, self.sp_gear_pressure,
               self.sp_gear_thickness, self.sp_gear_bore, self.sp_gear_ratio,
-              self.sp_gear_mate_outside, self.sp_gear_mate_bore, self.sp_bevel_mate_x,
+              self.sp_bevel_shaft, self.sp_gear_mate_shift, self.sp_gear_mate_outside, self.sp_gear_mate_bore, self.sp_bevel_mate_x,
               self.sp_bevel_mate_z, self.sp_gear_pair_distance), feature_width),
             (self._thread_form,
              (self.cb_thread_size, self.cb_thread_kind, self.cb_thread_fit,
@@ -24894,6 +25907,7 @@ class MainWindow(QMainWindow):
                 "sel_snap": True,
                 "debug_enabled": DEBUG_ENABLED,
                 "show_fps": False,
+                "gear_preview_transparent": False,   # gear generator: see-through preview bodies
             },
             "session": {"recent_files": [], "last_file": None, "window_geometry": "",
                         "window_rect": None, "toolbar_state": "", "drawing_layout": ""},
@@ -24935,7 +25949,7 @@ class MainWindow(QMainWindow):
                 if isinstance(value, (int, float)) and not isinstance(value, bool) \
                         and low <= value <= high:
                     settings["user"][key] = float(value)
-            for key in ("sel_snap", "debug_enabled", "show_fps"):
+            for key in ("sel_snap", "debug_enabled", "show_fps", "gear_preview_transparent"):
                 if isinstance(user.get(key), bool):
                     settings["user"][key] = user[key]
 
@@ -25783,11 +26797,12 @@ class MainWindow(QMainWindow):
         self.cb_gear_type.addItem("Planetary", "planetary")
         self.cb_gear_type.addItem("Bevel gear", "bevel")
         self.cb_gear_type.addItem("Helical gear", "helical")
+        self.cb_gear_type.addItem("Herringbone gear", "herringbone")
         self.cb_gear_type.addItem("Rack", "rack")
         self.cb_gear_type.setToolTip(
-            "Spur, internal ring, planetary, straight bevel, helical gear, or rack.")
+            "Spur, internal ring, planetary, straight bevel, helical or herringbone gear, or rack.")
         self.sp_gear_outside=QDoubleSpinBox(); self.sp_gear_outside.setRange(0.1,100000.0)
-        self.sp_gear_outside.setDecimals(2); self.sp_gear_outside.setValue(44.0)
+        self.sp_gear_outside.setDecimals(3); self.sp_gear_outside.setValue(44.0)
         self.sp_gear_outside.setSuffix(" mm")
         self.sp_gear_outside.setToolTip("Diameter measured across the tips of opposite teeth")
         self.sp_gear_teeth=QSpinBox(); self.sp_gear_teeth.setRange(18,200)
@@ -25833,20 +26848,40 @@ class MainWindow(QMainWindow):
         self.sp_planetary_ring_diameter.setKeyboardTracking(False)
         self.lbl_planetary_sun_bore=QLabel("Sun bore:")
         self.sp_planetary_sun_bore=QDoubleSpinBox(); self.sp_planetary_sun_bore.setRange(0.0,100000.0)
-        self.sp_planetary_sun_bore.setDecimals(2); self.sp_planetary_sun_bore.setValue(0.0)
+        self.sp_planetary_sun_bore.setDecimals(2); self.sp_planetary_sun_bore.setValue(5.0)
         self.sp_planetary_sun_bore.setSuffix(" mm")
         self.lbl_planetary_planet_bore=QLabel("Planet bore:")
         self.sp_planetary_planet_bore=QDoubleSpinBox(); self.sp_planetary_planet_bore.setRange(0.0,100000.0)
-        self.sp_planetary_planet_bore.setDecimals(2); self.sp_planetary_planet_bore.setValue(0.0)
+        self.sp_planetary_planet_bore.setDecimals(2); self.sp_planetary_planet_bore.setValue(5.0)
         self.sp_planetary_planet_bore.setSuffix(" mm")
         self.sp_gear_module=QDoubleSpinBox(); self.sp_gear_module.setRange(0.01,1000.0)
         self.sp_gear_module.setDecimals(3); self.sp_gear_module.setValue(2.0)
         self.sp_gear_module.setSuffix(" mm")
+        self.lbl_gear_rack_length=QLabel("Rack length:")
+        self.sp_gear_rack_length=QDoubleSpinBox(); self.sp_gear_rack_length.setRange(0.1,100000.0)
+        self.sp_gear_rack_length.setDecimals(3); self.sp_gear_rack_length.setSingleStep(1.0)
+        self.sp_gear_rack_length.setLocale(QLocale.c())
+        self.sp_gear_rack_length.setKeyboardTracking(False)
+        self.sp_gear_rack_length.setValue(20 * math.pi * 2.0)
+        self.sp_gear_rack_length.setSuffix(" mm")
+        self.sp_gear_rack_length.setToolTip(
+            "Overall rack length; the teeth that fit are centred and the rest is a flat land at "
+            "both ends. Changing the tooth count sets the length to whole teeth. You can also "
+            "drag the arrow at the rack's end in the 3-D view")
         self.lbl_gear_module=QLabel("Rack module:")
         self.lbl_bevel_angle=QLabel("Bevel cone angle:")
         self.sp_bevel_angle=QDoubleSpinBox(); self.sp_bevel_angle.setRange(1.0,75.0)
         self.sp_bevel_angle.setDecimals(3); self.sp_bevel_angle.setValue(45.0)
         self.sp_bevel_angle.setSuffix("°")
+        self.lbl_gear_trace=QLabel("Tooth trace:")
+        self.cb_gear_trace=QComboBox()
+        self.cb_gear_trace.addItem("Straight", "straight")
+        self.cb_gear_trace.addItem("Helical", "helical")
+        self.cb_gear_trace.addItem("Herringbone", "herringbone")
+        self.cb_gear_trace.setToolTip(
+            "Straight, helical or herringbone teeth for a rack, ring gear or planetary set. A "
+            "pinion in a rack or ring gets the same signed helix angle; in a planetary set the "
+            "helix angle is the sun's, and planets and ring get the opposite sign")
         self.lbl_gear_helix_angle=QLabel("Helix angle:")
         self.sp_gear_helix_angle=QDoubleSpinBox()
         self.sp_gear_helix_angle.setRange(-45.0,45.0)
@@ -25855,15 +26890,46 @@ class MainWindow(QMainWindow):
         self.sp_gear_helix_angle.setLocale(QLocale.c())
         self.sp_gear_helix_angle.setKeyboardTracking(False)
         self.sp_gear_helix_angle.setToolTip(
-            "Signed helix angle; matching helical gears use opposite signs.")
-        self.lbl_gear_backlash=QLabel("Rack backlash (module fraction):")
+            "Signed helix angle at the pitch circle. A matching external gear gets the opposite "
+            "sign; a pinion in a helical rack or ring gear the same sign. Herringbone gears "
+            "reverse the helix at mid-thickness.")
+        self.lbl_gear_backlash=QLabel("Backlash (module fraction):")
         self.sp_gear_backlash=QDoubleSpinBox(); self.sp_gear_backlash.setRange(0.0,0.5)
         self.sp_gear_backlash.setLocale(QLocale.c())
         self.sp_gear_backlash.setKeyboardTracking(False)
-        self.sp_gear_backlash.setDecimals(3); self.sp_gear_backlash.setValue(0.1)
+        self.sp_gear_backlash.setDecimals(3); self.sp_gear_backlash.setValue(0.05)
         self.sp_gear_backlash.setSingleStep(0.01)
         self.sp_gear_backlash.setToolTip(
-            "Total rack tooth clearance as a fraction of module; 0.10 gives 0.20 mm at module 2")
+            "Tooth thinning of every generated part (gear, mate, rack, ring) at the pitch "
+            "circle, as a fraction of module; a meshing pair gets twice this as backlash. "
+            "0.05 thins each tooth by 0.10 mm at module 2")
+        self.lbl_gear_shift=QLabel("Profile shift (x):")
+        self.sp_gear_shift=QDoubleSpinBox(); self.sp_gear_shift.setRange(-1.0,1.5)
+        self.sp_gear_shift.setLocale(QLocale.c())
+        self.sp_gear_shift.setKeyboardTracking(False)
+        self.sp_gear_shift.setDecimals(3); self.sp_gear_shift.setSingleStep(0.05)
+        self.sp_gear_shift.setValue(0.0)
+        self.sp_gear_shift.setToolTip(
+            "Rack-cutter offset as a fraction of module. Positive values thicken the tooth roots "
+            "and avoid undercut on small tooth counts; the module is kept, so the outside "
+            "diameter follows")
+        self.lbl_gear_mate_shift=QLabel("Mate profile shift (x):")
+        self.sp_gear_mate_shift=QDoubleSpinBox(); self.sp_gear_mate_shift.setRange(-1.0,1.5)
+        self.sp_gear_mate_shift.setLocale(QLocale.c())
+        self.sp_gear_mate_shift.setKeyboardTracking(False)
+        self.sp_gear_mate_shift.setDecimals(3); self.sp_gear_mate_shift.setSingleStep(0.05)
+        self.sp_gear_mate_shift.setValue(0.0)
+        self.sp_gear_mate_shift.setToolTip(
+            "Profile shift of the mate. The centre distance follows the shift sum (working "
+            "pressure angle), and both tips are shortened to keep 0.25·m clearance")
+        self.lbl_bevel_shaft=QLabel("Shaft angle:")
+        self.sp_bevel_shaft=QDoubleSpinBox(); self.sp_bevel_shaft.setRange(30.0,150.0)
+        self.sp_bevel_shaft.setLocale(QLocale.c())
+        self.sp_bevel_shaft.setKeyboardTracking(False)
+        self.sp_bevel_shaft.setDecimals(2); self.sp_bevel_shaft.setValue(90.0)
+        self.sp_bevel_shaft.setSuffix("°")
+        self.sp_bevel_shaft.setToolTip(
+            "Angle between the two bevel gear axes; both pitch cones share one apex")
         self.chk_gear_round_tips=QCheckBox("Round rack tooth tips")
         self.lbl_gear_tooth_radius=QLabel("Tip radius:")
         self.sp_gear_tooth_radius=QDoubleSpinBox(); self.sp_gear_tooth_radius.setRange(0.0,100.0)
@@ -25872,7 +26938,7 @@ class MainWindow(QMainWindow):
         self.sp_gear_tooth_radius.setSuffix(" mm")
         self.lbl_gear_outside=QLabel("Outside diameter (tip-to-tip):")
         self.lbl_gear_teeth=QLabel("Tooth count:")
-        self.sp_gear_pressure=QDoubleSpinBox(); self.sp_gear_pressure.setRange(10.0,45.0)
+        self.sp_gear_pressure=QDoubleSpinBox(); self.sp_gear_pressure.setRange(10.0,35.0)
         self.sp_gear_pressure.setDecimals(1); self.sp_gear_pressure.setValue(20.0)
         self.sp_gear_pressure.setSuffix("°")
         self.sp_gear_thickness=QDoubleSpinBox(); self.sp_gear_thickness.setRange(0.1,1000.0)
@@ -25883,9 +26949,15 @@ class MainWindow(QMainWindow):
         self.sp_gear_bore.setSuffix(" mm")
         self.lbl_gear_bore=QLabel("Bore diameter:")
         self.chk_gear_mate=QCheckBox("Create matching mate")
+        self.chk_gear_transparent=QCheckBox("Transparent preview")
+        self.chk_gear_transparent.setChecked(
+            bool(self._settings["user"].get("gear_preview_transparent", False)))
+        self.chk_gear_transparent.setToolTip(
+            "Show the gears being created or edited see-through. Only the preview is affected: "
+            "the finished bodies keep their own opacity setting")
         for checkbox in (self.chk_planetary_fix_sun, self.chk_planetary_fix_ring,
                          self.chk_planetary_fix_carrier, self.chk_gear_round_tips,
-                         self.chk_gear_mate):
+                         self.chk_gear_mate, self.chk_gear_transparent):
             _style_checkbox_like_explorer(checkbox)
         self.lbl_gear_ratio=QLabel("Mate ratio (mate / primary):")
         self.sp_gear_ratio=PlanetaryRatioSpinBox(); self.sp_gear_ratio.setRange(0.1,10.0)
@@ -25922,6 +26994,7 @@ class MainWindow(QMainWindow):
         gear_form.addRow("Type:", self.cb_gear_type)
         gear_form.addRow(self.lbl_gear_outside, self.sp_gear_outside)
         gear_form.addRow(self.lbl_gear_teeth, self.sp_gear_teeth)
+        gear_form.addRow(self.lbl_gear_rack_length, self.sp_gear_rack_length)
         gear_form.addRow(self.lbl_planet_teeth, self.sp_planet_teeth)
         gear_form.addRow(self.lbl_planet_count, self.sp_planet_count)
         self.w_planetary_fixed=QWidget()
@@ -25939,15 +27012,20 @@ class MainWindow(QMainWindow):
         gear_form.addRow(self.lbl_planetary_planet_bore, self.sp_planetary_planet_bore)
         gear_form.addRow(self.lbl_gear_module, self.sp_gear_module)
         gear_form.addRow(self.lbl_bevel_angle, self.sp_bevel_angle)
+        gear_form.addRow(self.lbl_gear_trace, self.cb_gear_trace)
         gear_form.addRow(self.lbl_gear_helix_angle, self.sp_gear_helix_angle)
+        gear_form.addRow(self.lbl_gear_shift, self.sp_gear_shift)
         gear_form.addRow(self.lbl_gear_backlash, self.sp_gear_backlash)
         gear_form.addRow(self.chk_gear_round_tips)
         gear_form.addRow(self.lbl_gear_tooth_radius, self.sp_gear_tooth_radius)
         gear_form.addRow("Pressure angle:", self.sp_gear_pressure)
         gear_form.addRow("Thickness:", self.sp_gear_thickness)
         gear_form.addRow(self.lbl_gear_bore, self.sp_gear_bore)
+        gear_form.addRow(self.chk_gear_transparent)
         gear_form.addRow(self.chk_gear_mate)
         gear_form.addRow(self.lbl_gear_ratio, self.sp_gear_ratio)
+        gear_form.addRow(self.lbl_bevel_shaft, self.sp_bevel_shaft)
+        gear_form.addRow(self.lbl_gear_mate_shift, self.sp_gear_mate_shift)
         gear_form.addRow(self.lbl_gear_mate_outside, self.sp_gear_mate_outside)
         gear_form.addRow(self.lbl_gear_mate_bore, self.sp_gear_mate_bore)
         gear_form.addRow(self.lbl_bevel_mate_x, self.sp_bevel_mate_x)
@@ -26099,8 +27177,18 @@ class MainWindow(QMainWindow):
                        self.sp_gear_mate_bore):
             widget.valueChanged.connect(self._queue_gear_preview)
         self.sp_gear_backlash.editingFinished.connect(self._queue_gear_preview)
-        for widget in (self.sp_gear_outside, self.sp_gear_teeth, self.sp_gear_module):
+        for widget in (self.sp_gear_outside, self.sp_gear_teeth, self.sp_gear_module,
+                       self.sp_gear_pressure):
             widget.valueChanged.connect(self._gear_primary_changed)
+        self._gear_last_shift = self.sp_gear_shift.value()
+        self.sp_gear_shift.valueChanged.connect(self._gear_shift_changed)
+        self.cb_gear_trace.currentIndexChanged.connect(self._gear_trace_changed)
+        self.sp_gear_rack_length.valueChanged.connect(self._rack_length_changed)
+        self.sp_gear_teeth.valueChanged.connect(self._rack_teeth_changed)
+        self.sp_gear_module.valueChanged.connect(self._rack_module_changed)
+        self.chk_gear_transparent.toggled.connect(self._gear_transparency_changed)
+        self.sp_gear_mate_shift.valueChanged.connect(self._gear_ratio_changed)
+        self.sp_bevel_shaft.valueChanged.connect(self._gear_ratio_changed)
         self.sp_gear_ratio.valueChanged.connect(self._gear_ratio_changed)
         self.sp_gear_ratio.editingFinished.connect(self._gear_ratio_changed)
         self.sp_gear_mate_outside.valueChanged.connect(self._gear_mate_outside_changed)
@@ -26337,7 +27425,7 @@ class MainWindow(QMainWindow):
         for lbl in (self.p_type, self.p_parent, self.p_pos, self.p_center, self.p_size,
                     self.p_extra, self.p_children):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse); lbl.setWordWrap(True)
-        self.p_color=QPushButton(); self.p_color.setFixedSize(24, 18)
+        self.p_color=QPushButton("Choose color…"); self.p_color.setFixedWidth(140)   # as in Assembly
         self.p_color.setToolTip("Change the colour (extrusions only)")
         self.p_color.clicked.connect(self._choose_color)
         form.addRow("Name:", self.p_name)
@@ -26736,9 +27824,9 @@ class MainWindow(QMainWindow):
               "ellipse_ctr", "ellipse_axis"):
             sv[k] = tuple(pend[k]) if pend[k] is not None else None
         sv["bezier_pts"] = [tuple(q) for q in pend.get("bezier_pts") or []] or None
-        for item in sv.get("underlays", []):
-            if item["reference"]:
-                self._project_sketch_level(sk, item)
+        for state in reference_levels(sv.get("underlays", [])).values():
+            if state["reference"]:
+                self._project_sketch_level(sk, state)
         sv["arc_sweep"] = 0.0
         # selections / picks refer to the replaced objects → reset them
         sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["sel_vtx2"] = None; sv["_sel_segs"] = []
@@ -27634,32 +28722,43 @@ class MainWindow(QMainWindow):
                 widget.blockSignals(True)
                 widget.setValue(value)
                 widget.blockSignals(False)
+        if kind == "rack" and previous_kind != "rack":
+            self._set_quietly(self.sp_gear_rack_length,
+                              self.sp_gear_teeth.value() * math.pi * self.sp_gear_module.value())
+            self._rack_last_teeth = self.sp_gear_teeth.value()
         self._previous_gear_type = kind
         is_rack = kind == "rack"
         is_internal = kind == "internal"
         is_planetary = kind == "planetary"
         is_bevel = kind == "bevel"
-        is_helical = kind == "helical"
         self.lbl_gear_outside.setVisible(not is_rack and not is_planetary)
         self.sp_gear_outside.setVisible(not is_rack and not is_planetary)
         self.lbl_gear_module.setVisible(is_rack or is_planetary)
         self.sp_gear_module.setVisible(is_rack or is_planetary)
+        self.lbl_gear_rack_length.setVisible(is_rack)
+        self.sp_gear_rack_length.setVisible(is_rack)
         self.lbl_bevel_angle.setVisible(is_bevel)
         self.sp_bevel_angle.setVisible(is_bevel)
-        self.lbl_gear_helix_angle.setVisible(is_helical)
-        self.sp_gear_helix_angle.setVisible(is_helical)
+        self.lbl_gear_trace.setVisible(is_rack or is_internal or is_planetary)
+        self.cb_gear_trace.setVisible(is_rack or is_internal or is_planetary)
+        self.lbl_gear_helix_angle.setVisible(self._gear_has_helix())
+        self.sp_gear_helix_angle.setVisible(self._gear_has_helix())
         self.lbl_gear_module.setText("Module:") if is_planetary else self.lbl_gear_module.setText("Rack module:")
-        self.lbl_gear_backlash.setVisible(is_rack)
-        self.sp_gear_backlash.setVisible(is_rack)
+        self.lbl_gear_backlash.setVisible(True)
+        self.sp_gear_backlash.setVisible(True)
+        has_shift = kind in ("spur", "helical", "herringbone", "bevel")
+        self.lbl_gear_shift.setVisible(has_shift)
+        self.sp_gear_shift.setVisible(has_shift)
         self.chk_gear_round_tips.setVisible(is_rack)
         self._gear_round_tips_changed(self.chk_gear_round_tips.isChecked())
         self.lbl_gear_pair_distance.setText(
             "Pinion offset from rack pitch line:" if is_rack else "Center distance:")
         self.lbl_gear_outside.setText("Ring outside diameter:" if is_internal else
+                                      "Outside diameter (at heel):" if is_bevel else
                                       "Outside diameter (tip-to-tip):")
         self.lbl_gear_bore.setVisible(not is_rack and not is_internal and not is_planetary)
         self.sp_gear_bore.setVisible(not is_rack and not is_internal and not is_planetary)
-        self.sp_gear_teeth.setRange(1 if is_rack else 6 if is_planetary else 18,
+        self.sp_gear_teeth.setRange(1 if is_rack else 18 if is_internal else 6,
                                     188 if is_planetary else 200)
         self.lbl_gear_teeth.setText(
             "Rack tooth count:" if is_rack else "Sun tooth count:" if is_planetary else "Tooth count:")
@@ -27730,14 +28829,17 @@ class MainWindow(QMainWindow):
                                   self.cb_gear_type.currentData() != "bevel")
             else:
                 widget.setVisible(checked)
+        kind = self.cb_gear_type.currentData()
+        self.lbl_bevel_shaft.setVisible(checked and kind == "bevel")
+        self.sp_bevel_shaft.setVisible(checked and kind == "bevel")
+        self.lbl_gear_mate_shift.setVisible(checked and kind in ("spur", "helical", "herringbone", "rack"))
+        self.sp_gear_mate_shift.setVisible(checked and kind in ("spur", "helical", "herringbone", "rack"))
         self.sp_gear_ratio.setEnabled(
             is_planetary or (checked and self._gear_preview is not None
                              and (self._gear_preview["source"] is None or
                                   self._gear_preview.get("matched_edit") is not None)))
-        pair_edit = self._gear_preview is not None and \
-                    self._gear_preview.get("matched_edit") is not None
-        self.sp_bevel_angle.setEnabled(
-            not checked or self.cb_gear_type.currentData() != "bevel" or pair_edit)
+        # a bevel pair's cone angles follow from its ratio and shaft angle
+        self.sp_bevel_angle.setEnabled(not checked or kind != "bevel")
         if checked:
             self._update_gear_ratio_limits()
             self._gear_ratio_changed()
@@ -27761,6 +28863,101 @@ class MainWindow(QMainWindow):
             self._gear_ratio_changed()
         elif self._gear_preview is not None:
             self._queue_gear_preview()
+
+    def _gear_outside_kind(self):
+        kind = self.cb_gear_type.currentData()
+        return kind if kind in ("bevel", "internal") else "spur"
+
+    def _gear_has_helix(self):
+        """Whether the current gear type / tooth trace uses the helix angle."""
+        kind = self.cb_gear_type.currentData()
+        return kind in ("helical", "herringbone") or (
+            kind in ("rack", "internal", "planetary") and
+            self.cb_gear_trace.currentData() != "straight")
+
+    @staticmethod
+    def _set_quietly(widget, value):
+        widget.blockSignals(True)
+        widget.setValue(value)
+        widget.blockSignals(False)
+
+    def _rack_keep_pinion(self, old_teeth, new_teeth):
+        """A rack's tooth count follows its length; the matching pinion keeps its teeth."""
+        if not self.chk_gear_mate.isChecked() or not old_teeth or old_teeth == new_teeth:
+            return
+        pinion = int(round(old_teeth * self.sp_gear_ratio.value()))
+        self._update_gear_ratio_limits()
+        self._set_quietly(self.sp_gear_ratio, pinion / new_teeth)
+
+    def _rack_teeth_changed(self, teeth):
+        """Rack: a new tooth count sets the length to whole teeth."""
+        if self.cb_gear_type.currentData() != "rack":
+            return
+        old_teeth = getattr(self, "_rack_last_teeth", teeth)
+        self._rack_last_teeth = teeth
+        self._set_quietly(self.sp_gear_rack_length, teeth * math.pi * self.sp_gear_module.value())
+        if old_teeth != teeth and self.chk_gear_mate.isChecked():
+            self._rack_keep_pinion(old_teeth, teeth)
+            self._gear_ratio_changed()
+
+    def _rack_length_changed(self, length):
+        """Rack: the teeth that fit into the length; the rest becomes flat end lands."""
+        if self.cb_gear_type.currentData() != "rack":
+            return
+        pitch = math.pi * self.sp_gear_module.value()
+        if length < pitch:
+            length = pitch
+            self._set_quietly(self.sp_gear_rack_length, length)
+        # the field shows 3 decimals: a length of whole teeth must not lose one by rounding
+        teeth = max(1, min(self.sp_gear_teeth.maximum(), int(math.floor((length + 1e-3) / pitch))))
+        old_teeth = self.sp_gear_teeth.value()
+        if teeth != old_teeth:
+            self._set_quietly(self.sp_gear_teeth, teeth)
+            self._rack_keep_pinion(old_teeth, teeth)
+        self._rack_last_teeth = teeth
+        self._gear_primary_changed()
+
+    def _rack_module_changed(self, *_):
+        if self.cb_gear_type.currentData() == "rack":
+            self._rack_length_changed(self.sp_gear_rack_length.value())
+
+    def _gear_preview_opacity(self):
+        return 0.82 if self.chk_gear_transparent.isChecked() else 1.0
+
+    def _gear_preview_entries(self):
+        """Temporary preview bodies of the gear generator (never the edited originals)."""
+        preview = self._gear_preview
+        if preview is None:
+            return []
+        entries = [preview.get("gear"), preview.get("mate")]
+        entries += [component["entry"] for component in preview.get("planetary_components", [])]
+        return [entry for entry in entries if entry is not None and entry.get("preview")]
+
+    def _gear_transparency_changed(self, checked):
+        self._settings["user"]["gear_preview_transparent"] = bool(checked)
+        for entry in self._gear_preview_entries():
+            entry["opacity"] = self._gear_preview_opacity()
+        self.view3d.update()
+
+    def _gear_trace_changed(self, *_):
+        self.lbl_gear_helix_angle.setVisible(self._gear_has_helix())
+        self.sp_gear_helix_angle.setVisible(self._gear_has_helix())
+        self._gear_primary_changed()
+        if self._dock_gear.isVisible():
+            self._fit_dock_to_content(self._dock_gear)
+
+    def _gear_shift_changed(self, shift):
+        """A new profile shift keeps the module: the outside diameter follows."""
+        previous, self._gear_last_shift = self._gear_last_shift, shift
+        if self.cb_gear_type.currentData() in ("spur", "helical", "herringbone", "bevel"):
+            kind = self._gear_outside_kind()
+            teeth, angle = self.sp_gear_teeth.value(), self.sp_bevel_angle.value()
+            module = gear_module_from_outside(kind, self.sp_gear_outside.value(), teeth,
+                                              previous, angle)
+            self.sp_gear_outside.blockSignals(True)
+            self.sp_gear_outside.setValue(gear_outside_from_module(kind, module, teeth, shift, angle))
+            self.sp_gear_outside.blockSignals(False)
+        self._gear_primary_changed()
 
     def _planetary_fixed_mode(self):
         if self.chk_planetary_fix_sun.isChecked():
@@ -27909,8 +29106,11 @@ class MainWindow(QMainWindow):
             self.sp_gear_ratio.set_planetary_steps(None)
         maximum_teeth = primary_teeth - 6 if kind == "internal" else 200
         self.sp_gear_ratio.blockSignals(True)
-        self.sp_gear_ratio.setRange(max(0.1, 6.0 / primary_teeth),
-                                    min(10.0, maximum_teeth / primary_teeth))
+        if kind == "rack":      # any 6…200-tooth pinion, whatever the rack's length
+            self.sp_gear_ratio.setRange(6.0 / primary_teeth, 200.0 / primary_teeth)
+        else:
+            self.sp_gear_ratio.setRange(max(0.1, 6.0 / primary_teeth),
+                                        min(10.0, maximum_teeth / primary_teeth))
         self.sp_gear_ratio.blockSignals(False)
 
     def _gear_ratio_changed(self, *_):
@@ -27953,9 +29153,23 @@ class MainWindow(QMainWindow):
         if not self.chk_gear_mate.isChecked():
             return
         try:
+            if self.cb_gear_type.currentData() == "bevel":
+                # the cone angle follows ratio and shaft angle; the module is kept
+                teeth = self.sp_gear_teeth.value()
+                mate_teeth = int(round(teeth * self.sp_gear_ratio.value()))
+                shift = self.sp_gear_shift.value()
+                module = gear_module_from_outside("bevel", self.sp_gear_outside.value(), teeth,
+                                                  shift, self.sp_bevel_angle.value())
+                bevel_angle = bevel_pitch_angles(teeth, max(1, mate_teeth),
+                                                 self.sp_bevel_shaft.value())[0]
+                for widget, value in ((self.sp_bevel_angle, bevel_angle),
+                                      (self.sp_gear_outside, gear_outside_from_module(
+                                          "bevel", module, teeth, shift, bevel_angle))):
+                    widget.blockSignals(True)
+                    widget.setValue(value)
+                    widget.blockSignals(False)
             primary = self._gear_parameters_from_controls()
-            mate = matching_gear_parameters(
-                primary, self.sp_gear_ratio.value(), self.sp_gear_mate_bore.value())
+            mate = self._mate_parameters(primary)
         except (ValueError, ArithmeticError):
             if self._gear_preview is not None:
                 self._queue_gear_preview()
@@ -27964,13 +29178,36 @@ class MainWindow(QMainWindow):
         self.sp_gear_mate_outside.setValue(mate["outside_diameter"])
         self.sp_gear_mate_outside.blockSignals(False)
         self._update_gear_pair_distance(primary, mate)
-        if primary["kind"] == "bevel":
-            bevel_angle = math.degrees(math.atan2(primary["teeth"], mate["teeth"]))
-            self.sp_bevel_angle.blockSignals(True)
-            self.sp_bevel_angle.setValue(bevel_angle)
-            self.sp_bevel_angle.blockSignals(False)
         if self._gear_preview is not None:
             self._queue_gear_preview()
+
+    def _mate_parameters(self, primary):
+        return matching_gear_parameters(
+            primary, self.sp_gear_ratio.value(), self.sp_gear_mate_bore.value(),
+            self.sp_gear_mate_shift.value(), self.sp_bevel_shaft.value())
+
+    @staticmethod
+    def _gear_profile_notes(parameters, label):
+        """Warnings about undercut roots and thin tips of a generated external gear."""
+        kind = parameters.get("kind")
+        if kind not in ("spur", "helical", "herringbone", "bevel"):
+            return []
+        tredgold = kind == "bevel" and parameters.get("bevel_profile") == "tredgold"
+        try:
+            module = gear_module(parameters)
+            _, info = external_gear_outline(
+                module, int(parameters["teeth"]), float(parameters.get("pressure_angle", 20.0)),
+                float(parameters.get("profile_shift", 0.0)), float(parameters.get("backlash", 0.0)),
+                float(parameters.get("tip_reduction", 0.0)),
+                float(parameters.get("bevel_angle", 45.0)) if tredgold else None)
+        except (ValueError, ArithmeticError):
+            return []
+        notes = []
+        if info["undercut"]:
+            notes.append(f"{label} roots are undercut; a larger profile shift avoids it.")
+        if info["tip_land"] < 0.25 * module:
+            notes.append(f"{label} tips are thin ({info['tip_land']:.2f} mm).")
+        return notes
 
     def _planetary_teeth_changed(self, *_, source=None):
         if self.cb_gear_type.currentData() != "planetary":
@@ -28158,17 +29395,22 @@ class MainWindow(QMainWindow):
             return
         primary_teeth = self.sp_gear_teeth.value()
         kind = self.cb_gear_type.currentData()
-        module = self.sp_gear_module.value() if kind == "rack" else \
-             self.sp_gear_outside.value() / (primary_teeth +
-                              (7.5 if kind == "internal" else 2.0))
+        try:
+            module = self._gear_parameters_from_controls()["module"]
+        except (ValueError, ArithmeticError):
+            return
+        if kind == "bevel":
+            mate_shift = -self.sp_gear_shift.value()
+            mate_angle = self.sp_bevel_shaft.value() - self.sp_bevel_angle.value()
+            extra = 2.0 * (1.0 + mate_shift) * math.cos(math.radians(mate_angle))
+        else:
+            mate_shift = 0.0 if kind == "internal" else self.sp_gear_mate_shift.value()
+            extra = 2.0 + 2.0 * mate_shift
         max_mate_teeth = primary_teeth - 6 if kind == "internal" else 200
-        mate_teeth = max(6, min(max_mate_teeth, int(round(outside_diameter / module - 2.0))))
+        mate_teeth = max(6, min(max_mate_teeth, int(round(outside_diameter / module - extra))))
         self.sp_gear_ratio.blockSignals(True)
         self.sp_gear_ratio.setValue(mate_teeth / primary_teeth)
         self.sp_gear_ratio.blockSignals(False)
-        self.sp_gear_mate_outside.blockSignals(True)
-        self.sp_gear_mate_outside.setValue(module * (mate_teeth + 2))
-        self.sp_gear_mate_outside.blockSignals(False)
         self._gear_ratio_changed()
 
     def _gear_pair_distance_changed(self, *_):
@@ -28176,12 +29418,7 @@ class MainWindow(QMainWindow):
             self._queue_gear_preview()
 
     def _update_gear_pair_distance(self, primary, mate):
-        if primary["kind"] == "rack":
-            distance = mate["module"] * mate["teeth"] / 2.0
-        elif primary["kind"] == "internal":
-            distance = primary["module"] * (primary["teeth"] - mate["teeth"]) / 2.0
-        else:
-            distance = primary["module"] * (primary["teeth"] + mate["teeth"]) / 2.0
+        distance = gear_pair_center_distance(primary, mate)
         self.sp_gear_pair_distance.blockSignals(True)
         self.sp_gear_pair_distance.setValue(distance)
         self.sp_gear_pair_distance.blockSignals(False)
@@ -28213,27 +29450,47 @@ class MainWindow(QMainWindow):
                 "sun_bore_diameter": self.sp_planetary_sun_bore.value(),
                 "planet_bore_diameter": self.sp_planetary_planet_bore.value(),
                 "thickness": self.sp_gear_thickness.value(), "bore_diameter": 0.0,
+                "backlash": self.sp_gear_backlash.value(),
+                "tooth_trace": self.cb_gear_trace.currentData(),
+                "planetary_helix_angle": self.sp_gear_helix_angle.value()
+                                         if self.cb_gear_trace.currentData() != "straight" else 0.0,
             }
         is_rack = kind == "rack"
-        module = self.sp_gear_module.value() if is_rack else \
-                 self.sp_gear_outside.value() / (teeth + (7.5 if kind == "internal" else 2.0))
+        shift = self.sp_gear_shift.value() if kind in ("spur", "helical", "herringbone", "bevel") else 0.0
         outside = self.sp_gear_outside.value()
+        module = self.sp_gear_module.value() if is_rack else gear_module_from_outside(
+            self._gear_outside_kind(), outside, teeth, shift, self.sp_bevel_angle.value())
+        tip_reduction = 0.0
+        if kind in ("spur", "helical", "herringbone") and self.chk_gear_mate.isChecked():
+            mate_teeth = int(round(teeth * self.sp_gear_ratio.value()))
+            if mate_teeth >= 6:
+                tip_reduction = involute_pair_geometry(
+                    module, teeth, mate_teeth, self.sp_gear_pressure.value(), shift,
+                    self.sp_gear_mate_shift.value())[2]
         parameters = {
             "kind": kind,
             "outside_diameter": outside,
             "teeth": teeth,
             "module": module,
-            "backlash": self.sp_gear_backlash.value() if is_rack else 0.0,
+            "profile_shift": shift,
+            "tip_reduction": tip_reduction,
+            "backlash": self.sp_gear_backlash.value(),
             "round_tips": is_rack and self.chk_gear_round_tips.isChecked(),
+            "rack_length": self.sp_gear_rack_length.value() if is_rack else 0.0,
             "tooth_radius": self.sp_gear_tooth_radius.value(),
             "pressure_angle": self.sp_gear_pressure.value(),
             "bevel_angle": self.sp_bevel_angle.value(),
-            "helix_angle": self.sp_gear_helix_angle.value() if kind == "helical" else 0.0,
+            "helix_angle": self.sp_gear_helix_angle.value() if self._gear_has_helix() else 0.0,
+            "tooth_trace": self.cb_gear_trace.currentData() if kind in ("rack", "internal")
+                           else "straight",
             "thickness": self.sp_gear_thickness.value(),
             "bore_diameter": 0.0 if is_rack or kind == "internal" else self.sp_gear_bore.value(),
         }
         if is_rack:
             parameters["outside_diameter"] = module * (teeth + 2)
+        if kind == "bevel":
+            parameters["bevel_profile"] = "tredgold"
+            parameters["shaft_angle"] = self.sp_bevel_shaft.value()
         return parameters
 
     def _begin_gear_preview(self, source=None):
@@ -28253,7 +29510,7 @@ class MainWindow(QMainWindow):
         }
         gear_entry = {
             "type": "extrusion", "name": "Gear preview", "parent": sketch_entry,
-            "height": self.sp_gear_thickness.value(), "opacity": 0.82,
+            "height": self.sp_gear_thickness.value(), "opacity": self._gear_preview_opacity(),
             "direction": "one", "cut": False, "through": False,
             "to_surface": False, "ring": None, "color": (0.3, 0.85, 0.55),
             "material": DEFAULT_MATERIAL, "visible": True, "preview": True,
@@ -28286,21 +29543,36 @@ class MainWindow(QMainWindow):
         self.cb_gear_type.blockSignals(True)
         self.cb_gear_type.setCurrentIndex(self.cb_gear_type.findData(parameters.get("kind", "spur")))
         self.cb_gear_type.blockSignals(False)
+        self.cb_gear_trace.blockSignals(True)
+        self.cb_gear_trace.setCurrentIndex(max(0, self.cb_gear_trace.findData(
+            parameters.get("tooth_trace", "straight"))))
+        self.cb_gear_trace.blockSignals(False)
         self._gear_type_changed()
+        kind = parameters.get("kind", "spur")
+        outside = parameters["outside_diameter"]
+        if kind == "bevel" and parameters.get("bevel_profile") != "tredgold":
+            # older bevel gears: keep their module under the heel outside-diameter convention
+            outside = gear_outside_from_module("bevel", gear_module(parameters), parameters["teeth"],
+                                               0.0, parameters.get("bevel_angle", 45.0))
         for widget, value in (
-                (self.sp_gear_outside, parameters["outside_diameter"]),
+                (self.sp_gear_outside, outside),
                 (self.sp_gear_teeth, parameters["teeth"]),
                 (self.sp_gear_module, parameters.get("module", 2.0)),
-                (self.sp_gear_backlash, parameters.get("backlash", 0.1)),
+                (self.sp_gear_rack_length, parameters.get("rack_length") or
+                 parameters["teeth"] * math.pi * parameters.get("module", 2.0)),
+                (self.sp_gear_backlash, parameters.get("backlash", 0.1 if kind == "rack" else 0.0)),
+                (self.sp_gear_shift, parameters.get("profile_shift", 0.0)),
+                (self.sp_bevel_shaft, parameters.get("shaft_angle", 90.0)),
                 (self.sp_gear_tooth_radius, parameters.get("tooth_radius", 0.2)),
                 (self.sp_bevel_angle, parameters.get("bevel_angle", 45.0)),
-                (self.sp_gear_helix_angle, parameters.get("helix_angle", 20.0)),
+                (self.sp_gear_helix_angle, parameters.get("helix_angle") or 20.0),
                 (self.sp_gear_pressure, parameters["pressure_angle"]),
                 (self.sp_gear_thickness, entry.get("height", parameters["thickness"])),
                 (self.sp_gear_bore, parameters["bore_diameter"])):
             widget.blockSignals(True)
             widget.setValue(value)
             widget.blockSignals(False)
+        self._gear_last_shift = self.sp_gear_shift.value()
         self.chk_gear_round_tips.setChecked(
             bool(parameters.get("round_tips", False)))
         self.chk_gear_mate.setChecked(False)
@@ -28337,7 +29609,7 @@ class MainWindow(QMainWindow):
         mate_preview = {
             "type": "extrusion", "name": "Matching gear preview",
             "parent": mate_sketch_entry, "height": mate.get("height", 10.0),
-            "opacity": 0.82, "direction": "one", "cut": False, "through": False,
+            "opacity": self._gear_preview_opacity(), "direction": "one", "cut": False, "through": False,
             "to_surface": False, "ring": None, "color": (0.95, 0.65, 0.25),
             "material": DEFAULT_MATERIAL, "visible": True, "preview": True,
         }
@@ -28357,6 +29629,11 @@ class MainWindow(QMainWindow):
         self.sp_gear_ratio.setValue(
             mate["gear_parameters"]["teeth"] / primary["gear_parameters"]["teeth"])
         self.sp_gear_ratio.blockSignals(False)
+        self.sp_gear_mate_shift.blockSignals(True)
+        self.sp_gear_mate_shift.setValue(
+            0.0 if primary["gear_parameters"].get("kind") == "bevel"
+            else mate["gear_parameters"].get("profile_shift", 0.0))
+        self.sp_gear_mate_shift.blockSignals(False)
         self.chk_gear_mate.setEnabled(True)
         self.chk_gear_mate.setChecked(True)
         self.chk_gear_mate.setEnabled(False)
@@ -28369,13 +29646,20 @@ class MainWindow(QMainWindow):
         elif kind == "bevel":
             primary_parameters = primary["gear_parameters"]
             mate_parameters = mate["gear_parameters"]
-            module = primary_parameters["module"]
-            self.sp_bevel_mate_x.setValue(
-                mate_position[0] - primary_position[0] +
-                module * primary_parameters["teeth"] / 2.0)
-            self.sp_bevel_mate_z.setValue(
-                mate_position[2] - primary_position[2] -
-                module * mate_parameters["teeth"] / 2.0)
+            rotation = _import_rotation_matrix(primary.get("gear_rotation", (0.0, 0.0, 0.0)))
+            local = rotation.T @ (mate_position - primary_position)
+            if primary_parameters.get("bevel_profile") == "tredgold" and \
+                    mate_parameters.get("bevel_profile") == "tredgold":
+                nominal = bevel_mate_frame(primary_parameters, mate_parameters)[0]
+            else:                                   # older pairs: 90° shafts, apex at r1 / r2
+                module = primary_parameters["module"]
+                nominal = np.array([-module * primary_parameters["teeth"] / 2.0, 0.0,
+                                    module * mate_parameters["teeth"] / 2.0])
+            for widget, value in ((self.sp_bevel_mate_x, local[0] - nominal[0]),
+                                  (self.sp_bevel_mate_z, local[2] - nominal[2])):
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
             distance = self.sp_gear_pair_distance.value()
         else:
             distance = float(np.linalg.norm(mate_position - primary_position))
@@ -28426,10 +29710,17 @@ class MainWindow(QMainWindow):
                 (self.sp_planetary_planet_bore,
                  selected_parameters.get("planet_bore_diameter", 0.0)),
                 (self.sp_gear_pressure, selected_parameters.get("pressure_angle", 20.0)),
+                (self.sp_gear_backlash, selected_parameters.get("backlash", 0.0)),
+                (self.sp_gear_helix_angle,
+                 selected_parameters.get("planetary_helix_angle") or 20.0),
                 (self.sp_gear_thickness, selected_entry.get("height", selected_parameters.get("thickness", 10.0)))):
             widget.blockSignals(True)
             widget.setValue(value)
             widget.blockSignals(False)
+        self.cb_gear_trace.blockSignals(True)
+        self.cb_gear_trace.setCurrentIndex(max(0, self.cb_gear_trace.findData(
+            selected_parameters.get("tooth_trace", "straight"))))
+        self.cb_gear_trace.blockSignals(False)
         self.cb_gear_type.blockSignals(True)
         self.cb_gear_type.setCurrentIndex(self.cb_gear_type.findData("planetary"))
         self.cb_gear_type.blockSignals(False)
@@ -28469,7 +29760,7 @@ class MainWindow(QMainWindow):
         if self.cb_gear_type.currentData() == "rack":
             module = self.sp_gear_module.value()
             self.lbl_gear_derived.setText(
-                f"Rack length: {teeth * math.pi * module:.2f} mm · Pitch: {math.pi * module:.2f} mm")
+                f"Rack length: {max(self.sp_gear_rack_length.value(), teeth * math.pi * module):.2f} mm · toothed {teeth * math.pi * module:.2f} mm · Pitch: {math.pi * module:.2f} mm")
         elif self.cb_gear_type.currentData() == "planetary":
             planet_teeth = self.sp_planet_teeth.value()
             ring_teeth = teeth + 2 * planet_teeth
@@ -28484,10 +29775,18 @@ class MainWindow(QMainWindow):
                 f"Sun fixed: {sun_fixed:.3f}:1 (ring → carrier)\n"
                 f"Carrier fixed: {carrier_fixed:.3f}:1 reverse (sun ↔ ring)")
         else:
-            divisor = teeth + (7.5 if self.cb_gear_type.currentData() == "internal" else 2.0)
-            module = self.sp_gear_outside.value() / divisor
-            self.lbl_gear_derived.setText(
-                f"Derived module: {module:.3f} mm · Pitch diameter: {module * teeth:.2f} mm")
+            kind = self.cb_gear_type.currentData()
+            shift = self.sp_gear_shift.value() if kind in ("spur", "helical", "herringbone", "bevel") else 0.0
+            module = gear_module_from_outside(self._gear_outside_kind(), self.sp_gear_outside.value(),
+                                              teeth, shift, self.sp_bevel_angle.value())
+            text = f"Derived module: {module:.3f} mm · Pitch diameter: {module * teeth:.2f} mm"
+            if kind in ("spur", "helical", "herringbone", "bevel"):
+                virtual = teeth / math.cos(math.radians(self.sp_bevel_angle.value())) \
+                    if kind == "bevel" else teeth
+                minimum = undercut_free_shift(virtual, self.sp_gear_pressure.value())
+                text += (f"\nUndercut-free from x ≥ {minimum:.3f}" if minimum > 0 else
+                         "\nNo undercut at x = 0")
+            self.lbl_gear_derived.setText(text)
         self.lbl_gear_info.setText("Updating preview…")
         self.btn_gear_ok.setEnabled(False)
         self._gear_timer.start()
@@ -28498,12 +29797,17 @@ class MainWindow(QMainWindow):
         ring_teeth = parameters["ring_teeth"]
         module = parameters["module"]
         pressure = parameters["pressure_angle"]
-        sun_parameters = dict(parameters, kind="spur", teeth=sun_teeth,
+        # helical / herringbone set: sun and planets mesh externally (opposite hands), planets
+        # and ring internally (same hand); "planetary_helix_angle" is the sun's angle
+        trace = parameters.get("tooth_trace", "straight")
+        helix = float(parameters.get("planetary_helix_angle", 0.0)) if trace != "straight" else 0.0
+        gear_kind = "spur" if trace == "straight" else trace
+        sun_parameters = dict(parameters, kind=gear_kind, teeth=sun_teeth, helix_angle=helix,
                               outside_diameter=parameters["sun_outside_diameter"],
                               bore_diameter=parameters["sun_bore_diameter"])
-        ring_parameters = dict(parameters, kind="internal", teeth=ring_teeth,
+        ring_parameters = dict(parameters, kind="internal", teeth=ring_teeth, helix_angle=-helix,
                                outside_diameter=parameters["ring_outside_diameter"], bore_diameter=0.0)
-        planet_parameters = dict(parameters, kind="spur", teeth=planet_teeth,
+        planet_parameters = dict(parameters, kind=gear_kind, teeth=planet_teeth, helix_angle=-helix,
                                  outside_diameter=parameters["planet_outside_diameter"],
                                  bore_diameter=parameters["planet_bore_diameter"])
         components = [{"role": "Sun", "sketch": preview["sketch"], "entry": preview["gear"],
@@ -28517,7 +29821,7 @@ class MainWindow(QMainWindow):
                            "tree_item": None, "parent": None, "face": None,
                            "visible": False, "opacity": 1.0, "preview": True}
             ring_entry = {"type": "extrusion", "name": "Ring gear preview",
-                          "parent": ring_sketch, "height": thickness, "opacity": 0.82,
+                          "parent": ring_sketch, "height": thickness, "opacity": self._gear_preview_opacity(),
                           "direction": "one", "cut": False, "through": False,
                           "to_surface": False, "ring": None, "color": (0.95, 0.65, 0.25),
                           "material": DEFAULT_MATERIAL, "visible": True, "preview": True}
@@ -28541,7 +29845,7 @@ class MainWindow(QMainWindow):
                             "tree_item": None, "parent": None, "face": None,
                             "visible": False, "opacity": 1.0, "preview": True}
             gear_entry = {"type": "extrusion", "name": f"Planet {index} preview",
-                          "parent": sketch_entry, "height": thickness, "opacity": 0.82,
+                          "parent": sketch_entry, "height": thickness, "opacity": self._gear_preview_opacity(),
                           "direction": "one", "cut": False, "through": False,
                           "to_surface": False, "ring": None, "color": (0.3, 0.75, 0.95),
                           "material": DEFAULT_MATERIAL, "visible": True, "preview": True}
@@ -28571,7 +29875,8 @@ class MainWindow(QMainWindow):
             sketch = component["maker"](
                 component["sketch"]["name"], component["parameters"],
                 frame=component["frame"])
-            mesh = extrude_profile(sketch.profile_loop_edges(), thickness, sketch.frame)
+            mesh = gear_extrusion(sketch.profile_loop_edges(), thickness, sketch.frame,
+                                  component["parameters"])
             component["sketch"]["sketch"] = sketch
             component["entry"]["height"] = thickness
             self._set_solid(component["entry"], mesh)
@@ -28582,7 +29887,9 @@ class MainWindow(QMainWindow):
             f"Planetary preview · {sun_teeth}/{planet_teeth}/{ring_teeth} teeth · "
                         +(f"{parameters['reduction_ratio']:.3f}:1 reduction"
                             if parameters["reduction_ratio"] is not None
-                            else "no fixed member; ratio is undefined"))
+                            else "no fixed member; ratio is undefined")
+                        +(f" · {trace} teeth, sun {helix:+g}°, planets and ring {-helix:+g}°"
+                          if trace != "straight" else ""))
         self.btn_gear_ok.setEnabled(True)
         self.view3d.update()
 
@@ -28606,27 +29913,18 @@ class MainWindow(QMainWindow):
                      "internal": make_internal_gear_sketch}.get(parameters["kind"], make_gear_sketch)
             sketch = maker(preview["sketch"]["name"], parameters,
                            frame=preview["sketch"]["sketch"].frame)
-            if parameters["kind"] == "bevel":
-                mesh = bevel_gear_extrusion(
-                    sketch.profile_loop_edges(), thickness, sketch.frame,
-                    parameters["module"], parameters["teeth"], parameters["bevel_angle"])
-            elif parameters["kind"] == "helical":
-                mesh = helical_gear_extrusion(
-                    sketch.profile_loop_edges(), thickness, sketch.frame,
-                    parameters["module"], parameters["teeth"], parameters["helix_angle"])
-            else:
-                mesh = extrude_profile(sketch.profile_loop_edges(), thickness, sketch.frame)
+            mesh = gear_extrusion(sketch.profile_loop_edges(), thickness, sketch.frame, parameters)
             mate_parameters = None
+            mate_thickness = thickness
             if self.chk_gear_mate.isChecked() and (
                     preview["source"] is None or preview.get("matched_edit") is not None):
-                mate_parameters = matching_gear_parameters(
-                    parameters, self.sp_gear_ratio.value(), self.sp_gear_mate_bore.value())
+                mate_parameters = self._mate_parameters(parameters)
                 if parameters["kind"] == "bevel":
-                    mate_parameters["kind"] = "bevel"
-                    mate_parameters["bevel_angle"] = 90.0 - parameters["bevel_angle"]
-                elif parameters["kind"] == "helical":
-                    mate_parameters["kind"] = "helical"
-                    mate_parameters["helix_angle"] = -parameters["helix_angle"]
+                    # same face width along the common pitch-cone line
+                    mate_thickness = thickness * math.cos(math.radians(
+                        mate_parameters["bevel_angle"])) / math.cos(math.radians(
+                        parameters["bevel_angle"]))
+                    mate_parameters["thickness"] = mate_thickness
                 if parameters["kind"] == "rack":
                     mate_center = (0.0, self.sp_gear_pair_distance.value(), 0.0)
                     phase_offset = math.pi / mate_parameters["teeth"] \
@@ -28635,22 +29933,13 @@ class MainWindow(QMainWindow):
                 elif parameters["kind"] == "internal":
                     mate_center = (self.sp_gear_pair_distance.value(), 0.0, 0.0)
                     mate_angle = -math.pi / mate_parameters["teeth"]
-                elif parameters["kind"] == "bevel":
-                    mate_base_offset = parameters["module"] * parameters["teeth"] / 2.0
-                    apex_distance = parameters["module"] * mate_parameters["teeth"] / 2.0
-                    mate_center = (-mate_base_offset + self.sp_bevel_mate_x.value(), 0.0,
-                                   apex_distance + self.sp_bevel_mate_z.value())
-                    mate_angle = math.pi - math.pi / mate_parameters["teeth"]
-                else:
+                elif parameters["kind"] != "bevel":
                     mate_center = (self.sp_gear_pair_distance.value(), 0.0, 0.0)
                     mate_angle = math.pi - math.pi / mate_parameters["teeth"]
                 if parameters["kind"] == "bevel":
-                    mate_u = (math.cos(mate_angle) * np.array([0., 1., 0.]) +
-                              math.sin(mate_angle) * np.array([0., 0., 1.]))
-                    mate_v = (-math.sin(mate_angle) * np.array([0., 1., 0.]) +
-                              math.cos(mate_angle) * np.array([0., 0., 1.]))
-                    mate_frame = (np.asarray(mate_center, float), mate_u, mate_v,
-                                  np.array([1., 0., 0.]))
+                    mate_frame = bevel_mate_frame(
+                        parameters, mate_parameters,
+                        (self.sp_bevel_mate_x.value(), 0.0, self.sp_bevel_mate_z.value()))
                 else:
                     mate_frame = (
                         np.asarray(mate_center, float),
@@ -28672,7 +29961,7 @@ class MainWindow(QMainWindow):
                     }
                     mate_entry = {
                         "type": "extrusion", "name": "Matching gear preview",
-                        "parent": mate_sketch_entry, "height": thickness, "opacity": 0.82,
+                        "parent": mate_sketch_entry, "height": thickness, "opacity": self._gear_preview_opacity(),
                         "direction": "one", "cut": False, "through": False,
                         "to_surface": False, "ring": None, "color": (0.95, 0.65, 0.25),
                         "material": DEFAULT_MATERIAL, "visible": True, "preview": True,
@@ -28682,19 +29971,8 @@ class MainWindow(QMainWindow):
                 mate_maker = make_gear_sketch
                 mate_sketch = mate_maker(
                     preview["mate_sketch"]["name"], mate_parameters, frame=mate_frame)
-                if parameters["kind"] == "bevel":
-                    mate_mesh = bevel_gear_extrusion(
-                        mate_sketch.profile_loop_edges(), thickness, mate_sketch.frame,
-                        mate_parameters["module"], mate_parameters["teeth"],
-                        mate_parameters["bevel_angle"])
-                elif parameters["kind"] == "helical":
-                    mate_mesh = helical_gear_extrusion(
-                        mate_sketch.profile_loop_edges(), thickness, mate_sketch.frame,
-                        mate_parameters["module"], mate_parameters["teeth"],
-                        mate_parameters["helix_angle"])
-                else:
-                    mate_mesh = extrude_profile(mate_sketch.profile_loop_edges(), thickness,
-                                                mate_sketch.frame)
+                mate_mesh = gear_extrusion(mate_sketch.profile_loop_edges(), mate_thickness,
+                                           mate_sketch.frame, mate_parameters)
         except (ValueError, ArithmeticError) as ex:
             gear_entry.pop("solid", None)
             gear_entry.pop("base", None)
@@ -28711,24 +29989,38 @@ class MainWindow(QMainWindow):
         preview["parameters"] = parameters
         if mate_parameters is not None:
             preview["mate_sketch"]["sketch"] = mate_sketch
-            preview["mate"]["height"] = thickness
+            preview["mate"]["height"] = mate_thickness
             self._set_solid(preview["mate"], mate_mesh)
             preview["mate_parameters"] = mate_parameters
-            low_tooth_warning = " Low tooth counts may undercut or interfere." \
-                if mate_parameters["teeth"] < 18 else ""
-            self.lbl_gear_info.setText(
-                f"Live matched preview · mate has {mate_parameters['teeth']} teeth."
-                f"{low_tooth_warning}")
+            notes = [f"Live matched preview · mate has {mate_parameters['teeth']} teeth."]
+            if parameters["kind"] == "bevel":
+                notes.append(f"Cone angles {parameters['bevel_angle']:.2f}° / "
+                             f"{mate_parameters['bevel_angle']:.2f}° at "
+                             f"{mate_parameters['shaft_angle']:g}° shafts.")
+            elif parameters["kind"] in ("spur", "helical", "herringbone") and \
+                    abs(parameters["profile_shift"] + mate_parameters["profile_shift"]) > 1e-9:
+                _, working, _ = involute_pair_geometry(
+                    parameters["module"], parameters["teeth"], mate_parameters["teeth"],
+                    parameters["pressure_angle"], parameters["profile_shift"],
+                    mate_parameters["profile_shift"])
+                notes.append(f"Working pressure angle {working:.2f}°"
+                             + (f", tips shortened {parameters['tip_reduction']:.3f}·m."
+                                if parameters["tip_reduction"] > 1e-6 else "."))
+            notes += self._gear_profile_notes(parameters, "Gear")
+            notes += self._gear_profile_notes(mate_parameters, "Mate")
+            self.lbl_gear_info.setText(" ".join(notes))
         else:
             if preview["mate"] is not None:
                 mate_sketch_entry, mate_entry = preview["mate_sketch"], preview["mate"]
                 self.state["objects"][:] = [entry for entry in self.state["objects"]
                                              if entry is not mate_sketch_entry and entry is not mate_entry]
                 preview["mate_sketch"], preview["mate"], preview["mate_parameters"] = None, None, None
-            self.lbl_gear_info.setText(
-                "Live rack preview." if parameters["kind"] == "rack"
-                else "Live tapered bevel preview." if parameters["kind"] == "bevel"
-                else "Live preview · outside diameter is measured tip-to-tip.")
+            notes = ["Live rack preview." if parameters["kind"] == "rack"
+                     else "Live straight bevel preview (Tredgold teeth, flanks through the cone apex)."
+                     if parameters["kind"] == "bevel"
+                     else "Live preview · outside diameter is measured tip-to-tip."]
+            notes += self._gear_profile_notes(parameters, "Gear")
+            self.lbl_gear_info.setText(" ".join(notes))
         self.btn_gear_ok.setEnabled(True)
         self.view3d.update()
 
@@ -28776,10 +30068,13 @@ class MainWindow(QMainWindow):
             sketch_entry["sketch"].name = sketch_entry["name"]
             gear_entry["preview"] = False
             gear_entry["name"] = name
-            gear_entry["opacity"] = 1.0
-            gear_entry["color"] = (DEFAULT_SOLID_COLOR if role == "Sun" else
-                                    (0.95, 0.65, 0.25) if role == "Ring" else
-                                    (0.3, 0.75, 0.95))
+            # an edited member keeps its own opacity and colour; new members get the defaults
+            gear_entry["opacity"] = old_entry.get("opacity", 1.0) if old_entry is not None else 1.0
+            default_color = (DEFAULT_SOLID_COLOR if role == "Sun" else
+                             (0.95, 0.65, 0.25) if role == "Ring" else
+                             (0.3, 0.75, 0.95))
+            gear_entry["color"] = tuple(old_entry.get("color", default_color)) \
+                if old_entry is not None else default_color
             gear_entry["gear_parameters"] = parameters
             frame = component["frame"]
             gear_entry["gear_position"] = np.asarray(frame[0], float).tolist()
@@ -28819,7 +30114,8 @@ class MainWindow(QMainWindow):
         if parameters["kind"] == "planetary":
             self._confirm_planetary_gear(preview)
             return
-        kind_name = {"rack": "Rack", "internal": "Ring gear", "bevel": "Bevel gear"}.get(
+        kind_name = {"rack": "Rack", "internal": "Ring gear", "bevel": "Bevel gear",
+                     "herringbone": "Herringbone gear"}.get(
             parameters["kind"], "Gear")
         gear_name = preview["source"]["name"] if preview["source"] is not None else \
                     self._unique_name(f"{kind_name} {self.sp_gear_teeth.value()}T ")
@@ -28880,7 +30176,7 @@ class MainWindow(QMainWindow):
                 mate_source["gear_parameters"] = dict(
                     preview["mate_parameters"], gear_pair_id=matched_edit["pair_id"],
                     gear_pair_role="mate")
-                mate_source["height"] = parameters["thickness"]
+                mate_source["height"] = preview["mate_parameters"]["thickness"]
                 mate_source["gear_position"] = np.asarray(
                     mate_sketch_preview.frame[0], float).tolist()
                 mate_source["gear_rotation"] = _import_euler_angles(
@@ -29162,44 +30458,10 @@ class MainWindow(QMainWindow):
         O, u, v, n = rotated_face_frame(face["frame"], rotation)
         sk = face_reference_sketch(face, (O, u, v, n))
         sk.face_rotation = rotation
-        profile_entry = entry.get("parent")
-        projected_lines = 0
-        projected_circles = 0
-        projected_points = 0
-        projected_curve_segments = 0
-        if profile_entry is not None and profile_entry.get("type") == "sketch":
-            source = profile_entry["sketch"]
-            source_normal = np.asarray(source.frame[3], dtype=float)
-            distance = float((np.asarray(source.frame[0]) - O) @ n)
-            parallel = abs(float(source_normal @ n)) >= 1.0 - 1e-6
-            level = round(distance, 4) if parallel and distance < -1e-4 else None
-            # Only a parallel source sketch below the face is projected (and tied to its
-            # Sketch Explorer level). A perpendicular or tilted one would collapse into
-            # untracked edge-on lines that cannot be hidden.
-            if level is None:
-                profile_entry = None
-        if profile_entry is not None and profile_entry.get("type") == "sketch":
-            previous = {key: set(getattr(sk, key)) for key in
-                        ("vertices", "segments", "circles", "arcs", "ellipses")}
-            before = len(sk.segments)
-            project_sketch_segments(source, sk)
-            projected_lines = len(sk.segments) - before
-            projected_points = project_sketch_points(source, sk)
-            before = len(sk.circles)
-            project_sketch_circles(source, sk)
-            projected_circles = len(sk.circles) - before
-            projected_curve_segments = project_sketch_curves(source, sk)
-            if level is not None:
-                for key, old in previous.items():
-                    for element in getattr(sk, key):
-                        if element not in old:
-                            element.reference_level = level
+        # Other sketches (e.g. the body's profile sketch below) are not projected by default:
+        # tick Reference of their level in the Sketch Explorer to use them
         self._sketch_parent = (entry, fi)
         self._begin_sketch(sk, f"{entry['name']} / {face['kind']} face {fi}")
-        if projected_lines or projected_circles or projected_points or projected_curve_segments:
-            self._st(f"Underlying sketch {profile_entry['name']} is shown as fixed references "
-                     f"({projected_lines} lines, {projected_circles} circles, {projected_points} points, "
-                     f"{projected_curve_segments} projected curve segments)")
         self._update_info()
 
     def _migrate_legacy_sketch_references(self, sk):
@@ -29308,7 +30570,8 @@ class MainWindow(QMainWindow):
         """Parallel sketches grouped by height relative to active_sketch. Sketches that hang
         off the same body in the object explorer (siblings, e.g. two sketches on faces of one
         extrusion) form their own groups: shown in yellow — bright on the same height, darker
-        when physically lower/higher — and never usable as references."""
+        when physically lower/higher — and usable as references only on the same height
+        (0 mm, see underlay_referenceable)."""
         origin, axis_u, axis_v, normal = (
             np.asarray(axis, dtype=float) for axis in active_sketch.frame)
         sketch_parent = getattr(self, "_sketch_parent", None)
@@ -29375,11 +30638,11 @@ class MainWindow(QMainWindow):
                     sources.setdefault(level, set()).add(source[0])
         current = set(sources)
         for item in underlays:
-            if item.get("sibling") or item["level"] in current:
+            if not underlay_referenceable(item) or item["level"] in current:
                 continue
             names = {entry.get("name") for entry in item["entries"]}
             old = next((level for level, used in sources.items()
-                        if level not in {u["level"] for u in underlays if not u.get("sibling")}
+                        if level not in {u["level"] for u in underlays if underlay_referenceable(u)}
                         and used & names), None)
             if old is None:
                 continue
@@ -29395,8 +30658,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _reference_underlays(underlays):
         """{level: underlay} of the groups whose geometry can be projected / referenced
-        (sibling sketches from the object explorer are display-only)."""
-        return {item["level"]: item for item in underlays if not item.get("sibling")}
+        (sketches of the same body only on the same height, see reference_levels)."""
+        return reference_levels(underlays)
 
     def _project_sketch_level(self, active_sketch, underlay):
         """Project the sketches of one underlying level into active_sketch as fixed references.
@@ -29531,7 +30794,7 @@ class MainWindow(QMainWindow):
         """A height that now only holds sibling sketches (same body in the object explorer)
         cannot be referenced: drop geometry projected from it earlier and untag the face
         outline, which then stays visible / pickable like an ordinary face reference."""
-        available = {item["level"] for item in underlays if not item.get("sibling")}
+        available = {item["level"] for item in underlays if underlay_referenceable(item)}
         display_only = {item["level"] for item in underlays if item.get("sibling")} - available
         if not display_only:
             return
@@ -29658,6 +30921,19 @@ class MainWindow(QMainWindow):
         self.sketch_levels.clear()
         active = QTreeWidgetItem(["Current: " + sk.name, ""])
         self.sketch_levels.addTopLevelItem(active)
+        if any(hasattr(e, "reference_boundary") for e in sk.segments + sk.circles + sk.arcs):
+            # the edges of the face the sketch lies on (white): show / use as reference
+            state = self.state.get("sketch_view_state", {}).get("face_outline") or \
+                {"visible": True, "reference": True}
+            row = QTreeWidgetItem(["Face outline", ""])
+            row.setData(0, Qt.UserRole, FACE_OUTLINE_ROW)
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setCheckState(0, Qt.Checked if state["visible"] else Qt.Unchecked)
+            row.setCheckState(1, Qt.Checked if state["reference"] else Qt.Unchecked)
+            row.setForeground(0, QColor(*FACE_OUTLINE_COLOR))
+            row.setToolTip(0, "Edges of the face this sketch lies on — show them / use them "
+                              "as fixed references (constraints already on them stay)")
+            self.sketch_levels.addTopLevelItem(row)
         for item in underlays:
             level = item["level"]
             label = "Same level" if level == 0 else \
@@ -29670,11 +30946,15 @@ class MainWindow(QMainWindow):
             row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
             row.setCheckState(0, Qt.Checked)
             row.setForeground(0, QColor(*item["color"]))
-            if item.get("sibling"):      # display only: no reference checkbox
-                row.setToolTip(0, "Sketch on the same body in the object explorer — "
-                                  "shown for orientation, cannot be used as reference")
-            elif level < 0:
+            if underlay_has_reference_box(item):
                 row.setCheckState(1, Qt.Checked if item["reference"] else Qt.Unchecked)
+                if item.get("sibling"):
+                    row.setToolTip(0, "Sketch on the same body in the object explorer, on the "
+                                      "same height — tick Reference to use its geometry")
+            elif item.get("sibling"):    # display only: no reference checkbox
+                row.setToolTip(0, "Sketch on the same body in the object explorer — "
+                                  "shown for orientation; only on the same height (0 mm) "
+                                  "can it be used as reference")
             self.sketch_levels.addTopLevelItem(row)
             for entry in item["entries"]:
                 row.addChild(QTreeWidgetItem([entry["name"], ""]))
@@ -29699,6 +30979,13 @@ class MainWindow(QMainWindow):
         level = row.data(0, Qt.UserRole)
         if level is None:
             return
+        if level == FACE_OUTLINE_ROW:
+            sv = self.state["sketch_view_state"]
+            sv["face_outline"] = {"visible": row.checkState(0) == Qt.Checked,
+                                  "reference": row.checkState(1) == Qt.Checked}
+            self.view3d._hover2d = None
+            self.view3d.update()
+            return
         underlays = self.state.get("sketch_view_state", {}).get("underlays", [])
         sibling = bool(row.data(0, Qt.UserRole + 1))
         item = next((item for item in underlays if item["level"] == level and
@@ -29706,11 +30993,14 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         item["visible"] = row.checkState(0) == Qt.Checked
-        if level < 0 and not sibling:
+        if underlay_has_reference_box(item):
+            was = item["reference"]
             item["reference"] = row.checkState(1) == Qt.Checked
-            if item["reference"]:
+            # same height: "Same level" and "Same body" share one reference level
+            state = reference_levels(underlays).get(level)
+            if state is not None and state["reference"] and (item["reference"] or was):
                 self._sketch_commit()
-                self._project_sketch_level(self.state["active_sketch"], item)
+                self._project_sketch_level(self.state["active_sketch"], state)
                 self._sk_hist.cur = self._sketch_state()
         sv = self.state["sketch_view_state"]
         for key in ("sel_seg", "sel_vtx1", "sel_vtx2", "sel_curve", "dist_first",
@@ -29859,18 +31149,18 @@ class MainWindow(QMainWindow):
         underlays = self._collect_sketch_underlays(sk)
         solid_underlay = self._collect_solid_underlay(sk)
         coplanar_underlay = self._collect_coplanar_underlay(sk)
-        parent = self._sketch_parent[0] if self._sketch_parent else None
-        direct_source = parent.get("parent") if parent is not None else None
         self._release_unreferenceable_levels(sk, underlays)
         self._follow_moved_levels(sk, underlays)
+        # Reference starts unticked; a level this sketch already uses references from stays on
+        # (its references and the constraints on them are kept up to date)
         for item in underlays:
-            if item["level"] < 0 and not item.get("sibling"):
-                item["reference"] = any(entry is direct_source for entry in item["entries"]) or \
-                    any(getattr(element, "reference_level", None) == item["level"]
-                        for key in ("vertices", "segments", "circles", "arcs", "ellipses")
-                        for element in getattr(sk, key))
-                if item["reference"]:
-                    self._project_sketch_level(sk, item)
+            if underlay_has_reference_box(item):
+                item["reference"] = any(getattr(element, "reference_level", None) == item["level"]
+                                        for key in ("vertices", "segments", "circles", "arcs", "ellipses")
+                                        for element in getattr(sk, key))
+        for level, state in reference_levels(underlays).items():
+            if level <= 0 and state["reference"]:
+                self._project_sketch_level(sk, state)
         self.state["active_sketch"]=sk
         self.state["sketch_view_state"]={
             "mode":DTOOL_SELECT,"draw_tool":"line","ctool":CTOOL_NONE,
@@ -29881,6 +31171,7 @@ class MainWindow(QMainWindow):
             "sel_seg":None,"sel_vtx1":None,"sel_vtx2":None,"_sel_segs":[],"sel_curve":None,
             "hl_constraint":None,"dist_first":None,"equal_first":None,
             "underlays":underlays,
+            "face_outline":{"visible": True, "reference": True},
             "solid_underlay":solid_underlay,
             "coplanar_underlay":coplanar_underlay,
         }
@@ -30015,6 +31306,10 @@ class MainWindow(QMainWindow):
     def _on_delete_selected(self):
         sv=self.state.get("sketch_view_state",{})
         sk=self.state.get("active_sketch")
+        # selected constraints (clicked dimension / symbol, list rows, rubber band) go first
+        picked = [c for c in (sv.get("hl_constraint") or ()) if sk is not None and c in sk.constraints]
+        if picked:
+            self._on_constraint_remove([sk.constraints.index(c) for c in picked])
         self.view3d._delete_selected(sv, sk)
         self.sketch_panel.set_has_selection(False)
         self._sketch_commit()
@@ -30629,6 +31924,125 @@ class MainWindow(QMainWindow):
             self._st(f"Editing {entry['name']} — adjust size or edges, then OK")
 
     def _refresh_face_references(self, sk, face, previous_face=None):
+        try:
+            MainWindow._follow_face_outline(self, sk, face, previous_face)
+        except FaceOutlineChanged:
+            # the outline gained / lost edges (a fillet, a cut notch): rebuild the references
+            MainWindow._remap_face_outline(sk, face)
+
+    @staticmethod
+    def _remap_face_outline(sk, face):
+        """Replace the face outline references of sk by the face's current outline when its
+        edges changed in number or kind. A constraint on an old outline line / circle / arc
+        moves to the new element on the same line / circle; one on an old outline point to a
+        new outline point at the same place; constraints with nothing to follow are dropped."""
+        frame = rotated_face_frame(face["frame"], sk.face_rotation)
+        projected = face_reference_sketch(face, frame)
+        old_elements = [e for e in sk.segments + sk.circles + sk.arcs
+                        if hasattr(e, "reference_boundary")]
+        old_set = set(old_elements)
+
+        def element_vertices(e):
+            return (e.v0, e.v1) if isinstance(e, Segment) else (e.center,) if isinstance(e, Circle) \
+                else (e.center, e.v_start, e.v_end)
+        old_vertices = {v for e in old_elements for v in element_vertices(e)}
+        still_used = {v for e in sk.segments + sk.circles + sk.arcs if e not in old_set
+                      for v in element_vertices(e)} | set(sk.points_free)
+        for ellipse in sk.ellipses: still_used.update(ellipse.vertices())
+        old_vertices -= still_used
+        # compared in the face plane: the face may also have moved along its normal
+        n = np.asarray(frame[3], float)
+        flat = lambda p: p - (p @ n)*n
+        P = lambda v: flat(np.asarray(sk.to3d(v.xy()), float))          # old frame
+        Q = lambda v: flat(np.asarray(projected.to3d(v.xy()), float))   # new frame
+        radius = lambda e: e.radius if isinstance(e, Circle) else e.radius()
+        new_elements = projected.segments + projected.circles + projected.arcs
+        element_map = {}
+        for old in old_elements:
+            best, best_score = None, None
+            for new in new_elements:
+                if isinstance(old, Segment) != isinstance(new, Segment): continue
+                if isinstance(old, Segment):
+                    a, b = P(old.v0), P(old.v1); d = b - a; L = float(np.linalg.norm(d))
+                    if L < 1e-9: continue
+                    d /= L
+                    c, e = Q(new.v0), Q(new.v1)
+                    off = [float(np.linalg.norm((p - a) - ((p - a) @ d)*d)) for p in (c, e)]
+                    if max(off) > 1e-5: continue                    # not on the same line
+                    t = sorted(((c - a) @ d, (e - a) @ d))
+                    score = min(t[1], L) - max(t[0], 0.0)            # overlap (negative: gap)
+                else:
+                    if float(np.linalg.norm(P(old.center) - Q(new.center))) > 1e-5 or \
+                            abs(radius(old) - radius(new)) > 1e-5:
+                        continue
+                    score = 1.0 if type(old) is type(new) else 0.5
+                if best_score is None or score > best_score:
+                    best, best_score = new, score
+            element_map[old] = best
+        new_vertices = list(projected.vertices)
+        vertex_map = {}
+        for old in old_vertices:
+            p = P(old)
+            vertex_map[old] = next((n for n in new_vertices
+                                    if float(np.linalg.norm(Q(n) - p)) < 1e-5), None)
+
+        # an outline point that no longer exists (a corner rounded by a fillet) stays as a
+        # fixed reference point where it was when constraints use it — they keep their meaning
+        constrained = set()
+        for c in sk.constraints:
+            for value in vars(c).values():
+                for item in (value if isinstance(value, tuple) else (value,)):
+                    if isinstance(item, Vertex): constrained.add(item)
+        kept_points = {v for v, n in vertex_map.items() if n is None and v in constrained}
+        for v in kept_points: vertex_map[v] = v
+
+        def remap(value):
+            if isinstance(value, (Segment, Circle, Arc)) and value in old_set:
+                return element_map.get(value)
+            if isinstance(value, Vertex) and value in old_vertices:
+                return vertex_map.get(value)
+            if isinstance(value, tuple):
+                return tuple(remap(item) for item in value)
+            return value
+
+        def lost(value, mapped):
+            if isinstance(value, tuple):
+                return any(lost(a, b) for a, b in zip(value, mapped))
+            return value is not None and mapped is None
+
+        kept, dropped = [], 0
+        for c in sk.constraints:
+            changes = {}
+            for name, value in vars(c).items():
+                mapped = remap(value)
+                if lost(value, mapped): break
+                if mapped is not value: changes[name] = mapped
+            else:
+                for name, value in changes.items(): setattr(c, name, value)
+                kept.append(c); continue
+            dropped += 1
+        sk.constraints = kept
+        old_vertices -= kept_points
+        # other fixed references (projected sketches, kept corner points) keep their place
+        origin, u, v, _ = (np.asarray(axis, dtype=float) for axis in frame)
+        for vertex in sk.vertices:
+            if vertex.locked and vertex not in old_vertices:
+                delta = P(vertex) - origin
+                vertex.x, vertex.y = float(delta @ u), float(delta @ v)
+        sk.points_free = list(sk.points_free) + [p for p in kept_points if p not in sk.points_free]
+        sk.segments = [e for e in sk.segments if e not in old_set] + projected.segments
+        sk.circles = [e for e in sk.circles if e not in old_set] + projected.circles
+        sk.arcs = [e for e in sk.arcs if e not in old_set] + projected.arcs
+        sk.vertices = [vertex for vertex in sk.vertices if vertex not in old_vertices] + new_vertices
+        sk.frame = frame
+        sk._an_key = None
+        if dropped:
+            _dbg(f"{sk.name}: face outline changed — {dropped} constraint(s) on removed outline "
+                 "edges dropped")
+        if not sk.solve():
+            raise ValueError(f"{sk.name}: constraints cannot follow the changed supporting face.")
+
+    def _follow_face_outline(self, sk, face, previous_face=None):
         frame = rotated_face_frame(face["frame"], sk.face_rotation)
         projected = face_reference_sketch(face, frame)
         previous = face_reference_sketch(previous_face, sk.frame) \
@@ -30669,14 +32083,24 @@ class MainWindow(QMainWindow):
                     target.reference_boundary = index
                     mapped[index] = target
             current = {element.reference_boundary: element for element in getattr(projected, key)}
+            if mapped and set(mapped) != set(current):
+                raise FaceOutlineChanged(f"{sk.name}: the supporting face outline changed topology.")
             for index, element in mapped.items():
                 target = current.get(index)
                 if target is None:
-                    raise ValueError(f"{sk.name}: the supporting face outline changed topology.")
+                    raise FaceOutlineChanged(f"{sk.name}: the supporting face outline changed topology.")
+                if isinstance(element, Segment):
+                    # the same edge keeps its direction; otherwise the outline was renumbered
+                    da = np.subtract(sk.to3d(element.v1.xy()), sk.to3d(element.v0.xy()))
+                    db = np.subtract(projected.to3d(target.v1.xy()), projected.to3d(target.v0.xy()))
+                    la, lb = float(np.linalg.norm(da)), float(np.linalg.norm(db))
+                    if la > 1e-9 and lb > 1e-9 and \
+                            float(np.linalg.norm(np.cross(da, db)))/(la*lb) > 1e-3:
+                        raise FaceOutlineChanged(f"{sk.name}: the supporting face outline was renumbered.")
                 for old_vertex, new_vertex in zip(vertices(element), vertices(target)):
                     xy = new_vertex.xy()
                     if old_vertex in positions and math.dist(positions[old_vertex], xy) > 1e-5:
-                        raise ValueError(f"{sk.name}: the supporting face has incompatible vertices.")
+                        raise FaceOutlineChanged(f"{sk.name}: the supporting face has incompatible vertices.")
                     positions[old_vertex] = xy
                 if isinstance(element, Circle):
                     element.radius = target.radius
@@ -30735,10 +32159,9 @@ class MainWindow(QMainWindow):
                         self._follow_moved_levels(sk, underlays)
                         referenced = {getattr(e, "reference_level", None) for key in keys
                                       for e in getattr(sk, key)} - {None}
-                        for item in underlays:
-                            if item["level"] < 0 and not item.get("sibling") and \
-                                    item["level"] in referenced:
-                                self._project_sketch_level(sk, item)
+                        for level, state in reference_levels(underlays).items():
+                            if level <= 0 and level in referenced:
+                                self._project_sketch_level(sk, state)
                     except (ValueError, ArithmeticError) as ex:
                         _dbg(f"_refresh_projected_references: {entry.get('name')}: {ex}")
                         continue
@@ -30789,8 +32212,11 @@ class MainWindow(QMainWindow):
                 self._regenerate_tree(child)
         else:
             faces = entry.get("faces", [])
+            # a body that still gets cuts / fillets has its final faces only after _apply_cuts;
+            # its face sketches follow those then (_rebind_face_sketches), not the bare faces
+            modified = self._body_gets_modified(entry)
             for child in entry_children(entry, objects):
-                if child["type"] == "sketch":
+                if child["type"] == "sketch" and not modified:
                     fi = child.get("face")
                     # a face index that now names a non-parallel face (renumbered faces) is
                     # re-resolved after the cuts by _rebind_face_sketches instead
@@ -31016,7 +32442,7 @@ class MainWindow(QMainWindow):
                 lbl.setText("—")
             self.lbl_prop_surface_area.setText("Surface area:")
             self.p_surface_area.setText("—"); self.p_volume.setText("—"); self.p_weight.setText("—")
-            self.p_extra.setText(""); self.p_color.setText(""); self.p_color.setStyleSheet("")
+            self.p_extra.setText(""); self.p_color.setStyleSheet("")
             selected_face = self.state.get("sel_face")
             if selected_face is not None:
                 entry, face_index = selected_face
@@ -31223,12 +32649,10 @@ class MainWindow(QMainWindow):
             self.p_center.setText(fmt((lo+hi)/2))
             self.p_size.setText(f"{size[0]:.2f} × {size[1]:.2f} × {size[2]:.2f} mm")
         if sel["type"] == "extrusion":
-            r, g, bl = sel.get("color", DEFAULT_SOLID_COLOR)
-            hexcol = QColor.fromRgbF(r, g, bl).name()
-            self.p_color.setEnabled(True); self.p_color.setText("")
-            self.p_color.setStyleSheet(f"background-color:{hexcol}; border:1px solid palette(mid);")
+            self.p_color.setEnabled(True)
+            self.p_color.setStyleSheet(color_button_style(sel.get("color", DEFAULT_SOLID_COLOR)))
         else:
-            self.p_color.setEnabled(False); self.p_color.setText("")
+            self.p_color.setEnabled(False)
             self.p_color.setStyleSheet("")
         material_entry = sel if sel["type"] == "extrusion" else \
                          sel.get("parent") if sel["type"] == "feature" else None
@@ -31901,7 +33325,7 @@ class MainWindow(QMainWindow):
 
     def _build_extrusion(self, sel, h, direction="one", through=False, cut=False,
                          to_surface=False, exclude=None, objects=None, target=None, ring=None,
-                         draft=None, apply_draft=True):
+                         draft=None, apply_draft=True, gear_parameters=None):
         """Extrude every closed profile loop along the sketch normal (support geometry is
         ignored). h < 0 extrudes the other way; direction "rev" goes against the normal, "sym"
         puts |h| half on each side of the sketch plane. through=True (cuts) spans the parent
@@ -31942,15 +33366,12 @@ class MainWindow(QMainWindow):
                 elif h < 0:            z0, hh = h, -h
                 else:                  z0, hh = 0.0, h
         self._last_ext = (z0, hh)
-        gear_parameters = sel.get("gear_parameters") or {}
-        if gear_parameters.get("kind") == "bevel":
-            mesh = bevel_gear_extrusion(
-                loops, hh, sk.frame, gear_parameters["module"], gear_parameters["teeth"],
-                gear_parameters.get("bevel_angle", 45.0), z0)
-        elif gear_parameters.get("kind") == "helical":
-            mesh = helical_gear_extrusion(
-                loops, hh, sk.frame, gear_parameters["module"], gear_parameters["teeth"],
-                gear_parameters.get("helix_angle", 20.0), z0)
+        # generated gears keep their parameters on the extrusion entry (exclude while it is
+        # rebuilt, or passed explicitly on project load), not on the profile sketch
+        gear_parameters = gear_parameters or sel.get("gear_parameters") or \
+                          (exclude.get("gear_parameters") if isinstance(exclude, dict) else None) or {}
+        if gear_parameters:
+            mesh = gear_extrusion(loops, hh, sk.frame, gear_parameters, z0)
         else:
             mesh = extrude_profile(loops, hh, sk.frame, z0)
         if draft is None and apply_draft and exclude is not None:
@@ -32174,6 +33595,8 @@ class MainWindow(QMainWindow):
                     for chain in matched]
             for face in mesh[2][previous_faces:]:
                 face["_feature_owner"] = id(fo)
+            # the faces the feature trimmed get their real outline (rounded / chamfered corners)
+            mesh = (mesh[0], mesh[1], refresh_face_boundaries(mesh[0], mesh[1], mesh[2]))
             fo.pop("_error", None)
             if item is not None:
                 try: item.setToolTip(0, "")
@@ -32344,11 +33767,33 @@ class MainWindow(QMainWindow):
         if progress is not None:
             progress(100)
 
-    def _rebind_face_sketches(self):
+    def _body_gets_modified(self, entry):
+        """True if entry's final body differs from its bare extrusion: a later cut extrusion
+        overlaps it or it has chamfer / fillet features."""
+        objs = self.state["objects"]
+        if entry.get("type") != "extrusion" or entry.get("cut") or "base" not in entry:
+            return False
+        if any(o["type"] == "feature" and o.get("parent") is entry and o.get("visible", True)
+               for o in objs):
+            return True
+        later = objs[objs.index(entry) + 1:] if entry in objs else []
+        return any(c["type"] == "extrusion" and c.get("cut") and "base" in c and
+                   _cut_overlaps(entry, c) for c in later)
+
+    def _rebind_face_sketches(self, passes=3):
+        """Keep sketches on the face they were drawn on (see _rebind_face_sketches_once).
+        Rebuilding a sketch's extrusion can change other faces again, so this repeats while
+        sketches still move."""
+        for _ in range(passes):
+            if not self._rebind_face_sketches_once():
+                break
+
+    def _rebind_face_sketches_once(self):
         """Keep sketches on the face they were drawn on. Sketches refer to their face by index;
         when the body is rebuilt with a different face count (e.g. a changed wall thickness adds
         or removes cut faces) the index can point at another face, and cut faces are only known
-        after _apply_cuts. Re-find the face by plane / position and update the face outline."""
+        after _apply_cuts. Re-find the face by plane / position and update the face outline.
+        Returns True if sketches with dependent bodies were changed (and rebuilt)."""
         active = self.state.get("active_sketch")
         changed = []
         for entry in self.state["objects"]:
@@ -32383,6 +33828,7 @@ class MainWindow(QMainWindow):
                 self._apply_cuts()
             finally:
                 self._rebinding_faces = False
+        return bool(dependants)
 
     @staticmethod
     def _outline_points(sk):
@@ -32422,7 +33868,9 @@ class MainWindow(QMainWindow):
             if count and len(face.get("boundary", [])) != count:
                 value += 50.0                     # a different outline topology is a poor match
             if i == index:
-                value -= 5.0                      # keep the stored face when it is a close call
+                # keep the stored face when it is a close call — and always while it still lies
+                # in the sketch plane (its outline may have changed shape: fillet, cut notch)
+                value -= 5.0 if offset > 1e-6 else 60.0
             return value
 
         return min(candidates, key=cost)
@@ -32476,7 +33924,7 @@ class MainWindow(QMainWindow):
                 if not mine:
                     continue
                 if len(mine) != len(theirs):
-                    raise ValueError("the face outline has a different number of edges")
+                    continue        # the outline changed shape: rebuilt by _refresh_face_references
 
                 def anchor(element, sketch, centre):
                     if isinstance(element, Segment):
@@ -33782,7 +35230,8 @@ class MainWindow(QMainWindow):
                 else:
                     res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
                                               e["to_surface"], objects=objs, target=e.get("target"),
-                                              ring=e["ring"], draft=e.get("draft"))
+                                              ring=e["ring"], draft=e.get("draft"),
+                                              gear_parameters=e.get("gear_parameters"))
                     if res is None and e["to_surface"] and e.get("target"):   # target gone: automatic
                         res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
                                                   True, objects=objs, ring=e["ring"])

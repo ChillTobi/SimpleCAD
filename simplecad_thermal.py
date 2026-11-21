@@ -2519,6 +2519,7 @@ class ThermalDialog(QDialog):
         self._view_actions = [
             action(icon, text, f"{text} view", lambda rx=rot_x, rz=rot_z: self.view.set_camera(rx, rz))
             for icon, text, rot_x, rot_z in _VIEWS]
+        self.act_origin = cad.origin_toggle_action(self, lambda: getattr(self, "view", None))
         self.act_show_all = action("show_all_objects.png", "Show all",
                                    "Show all parts and fit them into the view", self._show_all)
         self.act_update_selected = action(
@@ -2546,9 +2547,9 @@ class ThermalDialog(QDialog):
                               "border-radius:3px;}")
         for act in (self.act_new, self.act_open, self.act_save, self.act_save_as, None,
                     self.act_import, self.act_export, None, self.act_undo, self.act_redo, None,
-                    self.act_remove, self.act_heat, self.act_condition, self.act_probe, None,
+                    self.act_probe, self.act_remove, None, self.act_heat, self.act_condition, None,
                     self.act_start, self.act_results, None,
-                    *self._view_actions, self.act_show_all, None,
+                    *self._view_actions, self.act_origin, self.act_show_all, None,
                     self.act_update_selected, self.act_update_all):
             toolbar.addSeparator() if act is None else toolbar.addAction(act)
 
@@ -2570,7 +2571,7 @@ class ThermalDialog(QDialog):
         edit_menu.addAction(self.act_update_selected)
         edit_menu.addAction(self.act_update_all)
         view_menu = menu_bar.addMenu("&View")
-        for item in self._view_actions + [None, self.act_show_all, self.act_results]:
+        for item in self._view_actions + [None, self.act_origin, self.act_show_all, self.act_results]:
             view_menu.addSeparator() if item is None else view_menu.addAction(item)
         simulation_menu = menu_bar.addMenu("&Simulation")
         simulation_menu.addMenu(self.heat_menu)

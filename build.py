@@ -33,6 +33,12 @@ REQUIREMENTS = [
     "qt_modern_style",
     "manifold3d"
 ]
+# optional add-ons: bundled when their file sits next to SimpleCAD.py (SimpleCAD loads them
+# with importlib, so PyInstaller has to be told about them)
+ADDONS = {"simplecad_thermal": ["scipy"]}
+for _addon, _packages in ADDONS.items():
+    if (ROOT / f"{_addon}.py").exists():
+        REQUIREMENTS += [p for p in _packages if p not in REQUIREMENTS]
 
 
 def detect_platform(override: str | None) -> str:
@@ -79,6 +85,11 @@ def build_exe(os_name: str):
         "--icon", str(icon),
         str(ENTRY),
     ]
+
+    for addon in ADDONS:
+        if (ROOT / f"{addon}.py").exists():
+            cmd += ["--hidden-import", addon]
+            print(f"[exe] Bundling add-on {addon}")
 
     if qt_modern_style_path and qt_modern_style_path.exists():
         cmd += ["--add-data", f"{qt_modern_style_path}{sep}qt_modern_style"]

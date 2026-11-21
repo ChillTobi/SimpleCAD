@@ -2420,6 +2420,9 @@ class ThermalDialog(QDialog):
                             Qt.WindowCloseButtonHint | Qt.WindowSystemMenuHint)
         self.resize(1480, 900)
         self._build_ui()
+        # Enter in a number field only confirms it: no button is the dialog's default button
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False); button.setDefault(False)
         self._refresh_status()
         self._rebuild_scene()
         self._rebuild_tree()

@@ -66,7 +66,7 @@ import ctypes
 import SimpleCAD as cad        # the running application (SimpleCAD.load_addon registers it)
 
 ADDON_TITLE = "Thermal"
-ADDON_VERSION = "2.1"         # add-on release, shown in SimpleCAD's Help → About
+ADDON_VERSION = "2.1b"         # add-on release, shown in SimpleCAD's Help → About
 THERMAL_FORMAT = "simplecad-thermal-study"
 THERMAL_EXTENSION = ".thml"
 THERMAL_DEFAULT_NAME = "Untitled"
@@ -5498,7 +5498,7 @@ class ThermalView3D(cad.AssemblyView3D):
         t, entry, face = hit
         return entry, face, origin + t * direction
 
-    def _click_select3d(self, pos, ctrl=False):
+    def _click_select3d(self, pos, ctrl=False, shift=False):
         if self.pick_mode in ("faces", "extrude"):
             hit = self._surface_hit(pos)
             if hit is not None and hit[1] >= 0:

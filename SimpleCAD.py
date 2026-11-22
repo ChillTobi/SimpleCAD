@@ -146,12 +146,23 @@ Workflow:
   5. Select sketch in tree → Extrude → direction (one direction / opposite / symmetric),
      extent (distance, through all touching bodies [cuts], or to the next surface: the next
      extrusion, sketch region or coordinate plane in line with the extrusion, straight only),
-     "Remove material" → OK. Opacity is set per object in the Properties panel (no edit mode).
-     A click on a body in the 3-D view selects that surface only (the body as a whole is
-     selected in the object explorer); with "To next surface" the clicked face becomes the target.
+     "Remove material" → OK. Colour and Transparency are set per object in the Properties panel
+     (no edit mode).
+     A click on a body in the 3-D view selects that surface only (Ctrl+click adds / removes
+     surfaces); Shift+click selects the whole extrusion / imported part the surface belongs to,
+     as a click in the object explorer does; Ctrl+Shift+click adds / removes further ones
+     (several selected objects, e.g. for Export). In the Objects explorer Shift+click (or
+     Ctrl+click) adds / removes objects. With several objects selected, Colour and Transparency
+     apply to all selected bodies (not cut extrusions, sketches, assemblies or technical
+     drawings). With "To next surface" the clicked face becomes the target.
+     A comma typed into a decimal number field becomes a dot.
     Extrusion appears under its parent sketch in the Objects tree; a valid extrusion preview
     hides its source sketch in 3D. Cancelling restores the previous visibility (show or hide
     the accepted extrusion's source sketch with the tree checkbox).
+     Flat faces of a body can be extruded directly (select them, then Extrude, no sketch): such
+     a face extrusion sits under that body, remembers its source faces and is rebuilt from them
+     whenever the body changes (height, profile, cuts, fillets …); Edit rebuilds the face profile
+     as during creation. If the source faces are gone it keeps its last shape.
      Bridge connects solid faces: click Bridge, then click faces on the two bodies. For two
      extrusions, if those faces do not oppose each other, Bridge searches for a suitable pair.
      A curved CAD face (such as a cylinder) can be the target even when it has multiple boundary
@@ -167,7 +178,8 @@ Workflow:
      dependent sketches automatically fix the model until the last dependency is deleted (or a
      new sketch is cancelled). A manually fixed model stays fixed until its checkbox is cleared.
     File → Export writes the chosen extrusion (and the solids built on it) as STEP or STL:
-    select the extrusion first (Objects explorer or 3-D view, Ctrl+click for several).
+    select the extrusion first (Objects explorer, Ctrl+click for several; or 3-D view, Shift+click
+    a surface, Ctrl+Shift+click for several).
     Choose Technical Drawing to open its editor: it starts with the selected solid, or with an
     empty sheet when none is selected. The model of a sheet is chosen in the Views panel (Model of
     this sheet): an extrusion or imported part of the project, a STEP / STL file imported into
@@ -251,8 +263,14 @@ Workflow:
     Alignments panel: two surfaces are kept parallel and in one plane, points coincide. It follows
     when the target part moves, Apply restores it, unticking releases it.
     A part whose source changed is marked (outdated); Update Selected / Update All re-read the
-    sources and keep the placement. Save / Open handle .asby files and Export writes the complete
-    assembly as STEP or STL. Measure and Cut Surface open their own tab next to the Alignments on
+    sources and keep the placement, the colour and the transparency (only the shape changes). Importing parts of the open project gives the assembly an
+    "Assembly N" entry under the (first) imported object in the Objects explorer, like a Technical
+    Drawing: Save stores the assembly there (written with the project), double-click / Edit opens
+    it again. Save As writes a .asby file; an assembly without such an entry is saved to a .asby
+    file (the first Save asks for it). Open loads .asby files. The Colour and Transparency of a part
+    apply to all of its bodies. Export writes the parts
+    ticked in its list (preset: the selected part, else every visible part) as one STEP or STL
+    file. Measure and Cut Surface open their own tab next to the Alignments on
     the right while they are on. Cut Surface (toolbar / Tools menu) cuts the whole assembly at a
     movable plane (Move / Rotate fields or the coloured arrows and rings in the view, "Keep the
     other side", "Show the cut plane"); the cut faces are hatched and Export
@@ -363,13 +381,13 @@ from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QBy
                           QLocale, QEventLoop, QEvent, QObject, QtCriticalMsg, QtFatalMsg)
 from PyQt5.QtGui import (QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath,
                          QTransform, QCursor, QPolygonF, QKeySequence, QPixmap, QIcon,
-                         QPalette, QPdfWriter, QImage, QFontInfo, QPicture, QPageSize)
+                         QPalette, QPdfWriter, QImage, QFontInfo, QPicture, QPageSize, QKeyEvent)
 from PyQt5.QtSvg import QSvgGenerator
 import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "1.9b"
+APP_VERSION = "2.0b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -536,6 +554,28 @@ def _apply_dark_theme(app):
     """)
 
 
+class ExplorerTree(QTreeWidget):
+    """Tree of the object / assembly explorers: the expand / collapse markers of the dark
+    theme are invisible, so items with children get a bold cyan "+" (collapsed) or "−"
+    (expanded) in front of them; clicking it toggles the item as usual."""
+    MARKER_COLOR = QColor(0, 220, 255)
+
+    def drawBranches(self, painter, rect, index):
+        super().drawBranches(painter, rect, index)
+        if not self.model().hasChildren(index):
+            return
+        size = self.indentation()
+        box = QRect(rect.right() - size + 1, rect.top(), size, rect.height())
+        painter.save()
+        font = QFont(self.font())
+        font.setBold(True)
+        font.setPointSizeF(max(font.pointSizeF(), 9.0) + 2.0)
+        painter.setFont(font)
+        painter.setPen(self.MARKER_COLOR)
+        painter.drawText(box, Qt.AlignCenter, "−" if self.isExpanded(index) else "+")
+        painter.restore()
+
+
 def _style_checkbox_like_explorer(checkbox):
     checkbox.setStyleSheet("""
         QCheckBox::indicator {
@@ -612,6 +652,32 @@ def install_dark_title_bars(app):
     if sys_platform.system() == "Windows":
         app._dark_title_bar_filter = _DarkTitleBarFilter(app)
         app.installEventFilter(app._dark_title_bar_filter)
+
+
+class _DecimalPointFilter(QObject):
+    """Application-wide: a comma typed into a decimal number field (every QDoubleSpinBox, also
+    the ones of input dialogs) becomes a dot - the numbers use the dot as decimal separator,
+    and a comma would otherwise be refused or read as a thousands separator."""
+
+    @staticmethod
+    def _decimal_field(obj):
+        if isinstance(obj, QDoubleSpinBox):
+            return True
+        return isinstance(obj, QLineEdit) and isinstance(obj.parent(), QDoubleSpinBox)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress and event.text() == "," and self._decimal_field(obj):
+            QApplication.sendEvent(obj, QKeyEvent(QEvent.KeyPress, Qt.Key_Period, event.modifiers(),
+                                                  ".", event.isAutoRepeat(), event.count()))
+            return True
+        return False
+
+
+def install_decimal_point_keys(app):
+    """Comma -> dot in decimal number fields (_DecimalPointFilter); installed once."""
+    if app is not None and getattr(app, "_decimal_point_filter", None) is None:
+        app._decimal_point_filter = _DecimalPointFilter(app)
+        app.installEventFilter(app._decimal_point_filter)
 
 
 # simplecad_debug.txt output; overridden by the "debug_enabled" user setting (Edit → Settings → Debug).
@@ -737,6 +803,9 @@ FACE_HOVER_FILL       = (0.55, 1.0, 0.55, 0.8)
 FACE_HOVER_OUTLINE    = (0.75, 1.0, 0.75, 1.0)
 FACE_SELECTED_FILL    = (0.15, 0.62, 0.22, 0.85)
 FACE_SELECTED_OUTLINE = (0.05, 0.42, 0.12, 1.0)
+# the face chosen first for a Merge / Bridge: violet
+BRIDGE_FACE_FILL      = (0.62, 0.35, 0.95, 0.85)
+BRIDGE_FACE_OUTLINE   = (0.42, 0.18, 0.75, 1.0)
 DEFAULT_GRID = 10.0
 DEFAULT_SNAP = 5.0
 DEFAULT_SHORTCUTS = {
@@ -1007,7 +1076,7 @@ class CDimension:
             self.sign = 1.0 if d >= 0 else -1.0
         # drawing placement (user-draggable); None = automatic
         self.off_mm = None; self.side = None; self.t_frac = 0.5; self.angle = None
-    def label(self): return f"{self.value:.1f}"
+    def label(self): return f"{self.value:.2f}"
 
 class CPerpendicular:
     """Two segments are perpendicular."""
@@ -1247,7 +1316,7 @@ class CDistance:
 
     def label(self):
         v = self.value if self.driving else self.measure()
-        txt = f"{v:.1f}°" if self.mode == "angle" else f"{v:.1f}"
+        txt = f"{v:.2f}°" if self.mode == "angle" else f"{v:.2f}"
         return txt if self.driving else f"({txt})"
 
 def constraint_refs(c):
@@ -1326,7 +1395,7 @@ def describe_constraint(sk, c):
                 return f"C{sk.circles.index(entity)}" if entity in sk.circles else "C?"
             return f"A{sk.arcs.index(entity)}" if entity in sk.arcs else "A?"
         if c.mode == "angle":
-            head = f"∠ Angle {c.value:.1f}°" if c.driving else f"ⓘ Angle ({c.measure():.1f}°)"
+            head = f"∠ Angle {c.value:.2f}°" if c.driving else f"ⓘ Angle ({c.measure():.2f}°)"
         else:
             name = {"H": "Horiz. length", "V": "Vert. length"}.get(
                 getattr(c, "orient", "D"), "Clearance" if c.pair in ("cc", "cs") else "Length")
@@ -3608,6 +3677,75 @@ def _resample_bridge_loop(points, normals, count):
         sampled_normals.append(_unit(normal))
     return sampled_points, sampled_normals
 
+def _bridge_loop_params(points):
+    """Normalised arc-length position (0 … 1) of each vertex of a closed loop."""
+    lengths = np.array([float(np.linalg.norm(points[(i + 1) % len(points)] - points[i]))
+                        for i in range(len(points))])
+    perimeter = float(lengths.sum())
+    if perimeter < 1e-9:
+        raise ValueError("A selected face boundary has zero length.")
+    return np.concatenate(([0.0], np.cumsum(lengths)[:-1])) / perimeter
+
+def _sample_bridge_loop(points, normals, params):
+    """Points / normals of a closed loop at normalised arc-length positions `params`."""
+    own = _bridge_loop_params(points)
+    count = len(points)
+    sampled_points, sampled_normals = [], []
+    for t in params:
+        t = float(t) % 1.0
+        edge = min(max(int(np.searchsorted(own, t, side="right")) - 1, 0), count - 1)
+        following = (edge + 1) % count
+        end = own[following] if following else 1.0
+        fraction = (t - own[edge]) / max(end - own[edge], 1e-12)
+        sampled_points.append(points[edge] * (1 - fraction) + points[following] * fraction)
+        sampled_normals.append(_unit(normals[edge] * (1 - fraction) +
+                                     normals[following] * fraction))
+    return sampled_points, sampled_normals
+
+def _match_bridge_loops(points_a, normals_a, points_b, normals_b, u, v):
+    """Pair the outlines of the two bridged faces so every corner stays a corner (an even
+    resampling put the points of e.g. a long thin rectangle mid-edge, which twisted the
+    bridge). Same corner count: corners are paired directly (best rotation). Otherwise each
+    loop also gets a point where the other one has a corner. Returns the paired loops."""
+    points_a = [np.asarray(p, dtype=float) for p in points_a]
+    points_b = [np.asarray(p, dtype=float) for p in points_b]
+    normals_a = [np.asarray(n, dtype=float) for n in normals_a]
+    normals_b = [np.asarray(n, dtype=float) for n in normals_b]
+    limit = 256
+    if len(points_a) > limit:
+        points_a, normals_a = _resample_bridge_loop(points_a, normals_a, limit)
+    if len(points_b) > limit:
+        points_b, normals_b = _resample_bridge_loop(points_b, normals_b, limit)
+
+    def area(points):
+        return poly_area([(float(p @ u), float(p @ v)) for p in points])
+    if area(points_a) * area(points_b) < 0:       # same turning sense seen along the bridge
+        points_b.reverse(); normals_b.reverse()
+    same = len(points_a) == len(points_b)
+    params_a = None if same else _bridge_loop_params(points_a)
+    best = None
+    for shift in range(len(points_b)):
+        candidate = points_b[shift:] + points_b[:shift]
+        candidate_normals = normals_b[shift:] + normals_b[:shift]
+        if same:
+            score = sum(float((a - b) @ (a - b)) for a, b in zip(points_a, candidate))
+        else:
+            at_a, _ = _sample_bridge_loop(candidate, candidate_normals, params_a)
+            at_b, _ = _sample_bridge_loop(points_a, normals_a, _bridge_loop_params(candidate))
+            score = sum(float((a - b) @ (a - b)) for a, b in zip(points_a, at_a)) + \
+                sum(float((a - b) @ (a - b)) for a, b in zip(at_b, candidate))
+        if best is None or score < best[0]:
+            best = (score, candidate, candidate_normals)
+    _, points_b, normals_b = best
+    if same:
+        return points_a, normals_a, points_b, normals_b
+    params = sorted(set(np.round(np.concatenate((params_a, _bridge_loop_params(points_b))),
+                                 9).tolist()))
+    params = [t for i, t in enumerate(params) if i == 0 or t - params[i - 1] > 1e-6]
+    points_a, normals_a = _sample_bridge_loop(points_a, normals_a, params)
+    points_b, normals_b = _sample_bridge_loop(points_b, normals_b, params)
+    return points_a, normals_a, points_b, normals_b
+
 def _simplify_bridge_loop(vertices, ids):
     """Drop boundary vertices lying on a straight run (e.g. the extra vertices the fusing of
     bodies inserts into face edges), so the corners of a face stay corners when the boundary
@@ -3713,22 +3851,9 @@ def _bridge_faces(entry_a, face_index_a, entry_b, face_index_b):
         normals_a = [np.asarray(normal, dtype=float) for normal in frame_a[4]]
         normals_b = list(normals_b)
     else:
-        count = min(max(len(points_a), len(points_b)), 256)
-        points_a, normals_a = _resample_bridge_loop(points_a, frame_a[4], count)
-        points_b, normals_b = _resample_bridge_loop(points_b, normals_b, count)
-
-        best = None
-        for reverse in (False, True):
-            candidate = points_b if not reverse else list(reversed(points_b))
-            for shift in range(len(candidate)):
-                aligned = candidate[shift:] + candidate[:shift]
-                score = sum(float(np.dot(a - b, a - b)) for a, b in zip(points_a, aligned))
-                if best is None or score < best[0]:
-                    best = (score, aligned, reverse, shift)
-        _, points_b, reverse, shift = best
-        if reverse:
-            normals_b.reverse()
-        normals_b = normals_b[shift:] + normals_b[:shift]
+        points_a, normals_a, points_b, normals_b = _match_bridge_loops(
+            points_a, frame_a[4], points_b, normals_b, frame_a[1], frame_a[2])
+        count = len(points_a)
     frame_u, frame_v = frame_a[1], frame_a[2]
     projected_a = [((point - center_a) @ frame_u, (point - center_a) @ frame_v)
                    for point in points_a]
@@ -7476,6 +7601,7 @@ def entry_children(entry, objects):
         children += [o for o in objects if o["type"] == "extrusion" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "feature" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "technical_drawing" and o.get("parent") is entry]
+        children += [o for o in objects if o["type"] == "assembly" and o.get("parent") is entry]
         children += [o for o in objects if o["type"] == "surface" and o.get("parent") is entry]
         children += [o for o in objects if o.get("source_format") == "bridge" and
                      o.get("parent") is entry]
@@ -9130,8 +9256,11 @@ class View3D(QGLWidget):
                 _entry_preview = getattr(_mw, "_thread_preview_mesh", None)
             _has_preview = _entry_preview is not None
             if stack_level and not cut:
+                # a body fused into a Bridge lies under the Bridge's coincident surface: pushed
+                # back normally, but pulled in front while selected so its highlight shows
                 glEnable(GL_POLYGON_OFFSET_FILL)
-                glPolygonOffset(float(stack_level), float(stack_level))
+                offset = -float(stack_level) if sel else float(stack_level)
+                glPolygonOffset(offset, offset)
             if not _has_preview:
                 # draw triangles via VBO — one GPU call instead of per-triangle Python loop
                 faces = entry.get("faces", [])
@@ -9265,10 +9394,14 @@ class View3D(QGLWidget):
                 for selected_entry, selected_face in self._bridge_faces:
                     if selected_entry is not entry or not 0 <= selected_face < len(entry.get("faces", [])):
                         continue
+                    # the first face of a Merge / Bridge: violet (other selections are green)
+                    glEnable(GL_LIGHTING)
                     highlight_depth(stack_level, True)
                     glDepthFunc(GL_LEQUAL)
-                    glColor4f(0.25, 1.0, 0.45, 0.22)
+                    glColor4f(*BRIDGE_FACE_FILL)
                     self._draw_face_triangles(entry, selected_face)
+                    glColor4f(*BRIDGE_FACE_OUTLINE); glLineWidth(3.0)
+                    self._draw_face_outline(entry, selected_face)
                     glDepthFunc(GL_LESS)
                     highlight_depth(stack_level, False)
             if self._angle_mode and entry is self._angle_entry:
@@ -9599,7 +9732,8 @@ class View3D(QGLWidget):
             elif self._mode == MODE_SELPLANE and hv[0] == "face":
                 txt += " — click to sketch on this face" if clickable else " — not planar"
             elif hv[0] == "face":
-                txt += " — click to select this surface"
+                txt += (f" — click to select this surface, Shift+click: the whole "
+                        f"{hv[1][0]['name']}, Ctrl+Shift+click: add / remove it")
             mw._st(txt)
         self.update()
 
@@ -9916,17 +10050,21 @@ class View3D(QGLWidget):
         def is_outline(geometry):
             return hasattr(geometry, "reference_boundary") or geometry in outline_vertices
 
-        def visible(geometry):
-            if is_outline(geometry):          # the face's own edges: "Face outline" row
-                return outline_state["visible"]
-            level = getattr(geometry, "reference_level", None)
-            if level is None:
-                return True
-            item = levels.get(level)
+        def level_shown(geometry):
+            item = levels.get(getattr(geometry, "reference_level", None))
             return item is not None and item["visible"] and item["reference"]
 
-        def reference_color(geometry):
+        def visible(geometry):
+            # the face's own edges follow the "Face outline" row; an edge that is also a line of
+            # a referenced sketch level (the projection reuses coinciding edges) shows with it
             if is_outline(geometry):
+                return outline_state["visible"] or level_shown(geometry)
+            if getattr(geometry, "reference_level", None) is None:
+                return True
+            return level_shown(geometry)
+
+        def reference_color(geometry):
+            if is_outline(geometry) and (outline_state["visible"] or not level_shown(geometry)):
                 return QColor(*FACE_OUTLINE_COLOR)
             item = levels.get(getattr(geometry, "reference_level", None))
             return QColor(*item["color"]) if item is not None and item.get("color") else REF
@@ -10351,10 +10489,12 @@ class View3D(QGLWidget):
         p.setBrush(Qt.NoBrush)
         sv = self.state.get("sketch_view_state", {})
         for g in constraint_refs(c):
-            if hasattr(g, "reference_boundary") and \
-                    not (sv.get("face_outline") or {"visible": True})["visible"]:
-                continue
-            level = None if hasattr(g, "reference_boundary") else getattr(g, "reference_level", None)
+            level = getattr(g, "reference_level", None)
+            if hasattr(g, "reference_boundary"):
+                if (sv.get("face_outline") or {"visible": True})["visible"]:
+                    level = None              # shown as a face edge
+                elif level is None:
+                    continue
             state = reference_levels(
                 self.state.get("sketch_view_state", {}).get("underlays", [])).get(level)
             if level is not None and not (state is not None and state["visible"]):
@@ -10500,7 +10640,8 @@ class View3D(QGLWidget):
         outline_shown = (sv.get("face_outline") or {"visible": True})["visible"]
         for seg in sk.segments:
             if hasattr(seg, "reference_boundary"):
-                if not outline_shown: continue
+                if not outline_shown and getattr(seg, "reference_level", None) not in shown_levels:
+                    continue
                 a, b = self.to_px(seg.v0.xy()), self.to_px(seg.v1.xy())
                 cover.append(((a.x(), a.y()), (b.x(), b.y()))); continue
             level = getattr(seg, "reference_level", None)
@@ -10544,17 +10685,17 @@ class View3D(QGLWidget):
                     if L < 1e-6: continue
                     n0 = (-(B.y()-A.y())/L, (B.x()-A.x())/L)
                 c._auto_side = auto_side(n0, mid)   # used until the user moves the dimension
-                self._paint_dim_linear(p, c, A, B, n0, f"{c.value:.1f}", col)
+                self._paint_dim_linear(p, c, A, B, n0, f"{c.value:.2f}", col)
             elif isinstance(t, Circle):
                 dia = c.dim_mode == "diameter"
-                lbl = f"⌀{c.value:.1f}" if dia else f"R{c.value:.1f}"
+                lbl = f"⌀{c.value:.2f}" if dia else f"R{c.value:.2f}"
                 ang = c.angle if c.angle is not None else math.pi/4
                 self._paint_dim_radial(p, c, self.to_px(t.center.xy()), t.radius*self.scale,
                                        ang, lbl, dia, col)
             elif isinstance(t, Arc):
                 ang = c.angle if c.angle is not None else t.mid_angle()
                 self._paint_dim_radial(p, c, self.to_px(t.center.xy()), t.radius()*self.scale,
-                                       ang, f"R{c.value:.1f}", False, col)
+                                       ang, f"R{c.value:.2f}", False, col)
 
     def _paint_support_info(self, p, sk):
         """Support geometry always shows its size as information (blue, in brackets):
@@ -10568,18 +10709,18 @@ class View3D(QGLWidget):
             if math.hypot(B.x()-A.x(), B.y()-A.y()) < 24: continue
             mid = QPointF((A.x()+B.x())/2, (A.y()+B.y())/2)
             self._dim_text(p, mid, math.degrees(math.atan2(B.y()-A.y(), B.x()-A.x())),
-                           f"({s.length():.1f})", col)
+                           f"({s.length():.2f})", col)
         for c in sk.circles:
             if not c.construction or c.reference or c in dimmed: continue
             cp, r = self.to_px(c.center.xy()), c.radius*self.scale
             if r < 6: continue
-            self._dim_text(p, QPointF(cp.x(), cp.y()-r-2), 0.0, f"(⌀{2*c.radius:.1f})", col)
+            self._dim_text(p, QPointF(cp.x(), cp.y()-r-2), 0.0, f"(⌀{2*c.radius:.2f})", col)
         for a in sk.arcs:
             if not a.construction or a.reference or a in dimmed: continue
             cp, r, m = self.to_px(a.center.xy()), a.radius()*self.scale, a.mid_angle()
             if r < 6: continue
             P = QPointF(cp.x()+(r+4)*math.cos(m), cp.y()-(r+4)*math.sin(m)+6)
-            self._dim_text(p, P, 0.0, f"(R{a.radius():.1f})", col)
+            self._dim_text(p, P, 0.0, f"(R{a.radius():.2f})", col)
 
     def _paint_distance(self, p, c, col, auto_side):
         """Distance between points, lines or circles, or angle between two lines."""
@@ -10746,7 +10887,7 @@ class View3D(QGLWidget):
         support = "  SUPPORT GEOMETRY" if sv.get("construction") else ""
         p.drawText(8,18,f"{plane}  [{mode}/{tool}]  "
                         f"snap:{self.snap_mm}mm  grid:{self.grid_mm}mm  "
-                        f"cursor:{self._cursor_mm[0]:.1f},{self._cursor_mm[1]:.1f}")
+                        f"cursor:{self._cursor_mm[0]:.2f},{self._cursor_mm[1]:.2f}")
         if support:
             p.setPen(QColor(110,160,255)); p.setFont(QFont("Arial",9,QFont.Bold))
             p.drawText(self.width()-160, 18, "┄ Support geometry")
@@ -10848,15 +10989,18 @@ class View3D(QGLWidget):
         if self._mode in (MODE_SELPLANE, MODE_SELSURFACE) and e.button()==Qt.RightButton:
             self.sigCancelSketch.emit(); return
         if self._bridge_mode and e.button() == Qt.LeftButton:
-            origin, direction = self._ray(e.pos())
-            hit = self._pick_face(origin, direction)
-            if hit is not None and hit[2] is not None and hit[2] >= 0:
-                self.bridgeFaceSelected.emit(hit[1], hit[2])
-            elif self._main_window is not None:
-                self._main_window._st("Click a face on a solid")
+            # a click picks the face on release; a drag orbits the camera (also while the first
+            # face is chosen — it stays selected)
+            self._last_pos = self._press_pos = e.pos()
             return
         if self._bridge_mode and e.button() == Qt.RightButton:
-            if self._main_window is not None:
+            if self._bridge_faces:              # deselect the first face, stay in Bridge
+                self._bridge_faces = []
+                self.update()
+                if self._main_window is not None:
+                    self._main_window._st("Bridge: first face deselected — click the first face "
+                                          "again | RMB: cancel Bridge")
+            elif self._main_window is not None:
                 self._main_window._cancel_bridge()
             return
         if self._measure_mode and e.button() == Qt.RightButton:
@@ -11005,9 +11149,17 @@ class View3D(QGLWidget):
             self._pan_start=None; self.setCursor(self._default_cursor())
         if e.button()==Qt.LeftButton:
             clicked = self._press_pos is not None and (e.pos()-self._press_pos).manhattanLength() < 4
-            if clicked and self._mode == MODE_NORMAL:
+            if clicked and self._bridge_mode:
+                origin, direction = self._ray(e.pos())
+                hit = self._pick_face(origin, direction)
+                if hit is not None and hit[2] is not None and hit[2] >= 0:
+                    self.bridgeFaceSelected.emit(hit[1], hit[2])
+                elif self._main_window is not None:
+                    self._main_window._st("Click a face on a solid (a drag turns the view)")
+            elif clicked and self._mode == MODE_NORMAL:
                 if self._measure_mode: self._measure_click(e.pos())
-                else: self._click_select3d(e.pos(), bool(e.modifiers() & Qt.ControlModifier))
+                else: self._click_select3d(e.pos(), bool(e.modifiers() & Qt.ControlModifier),
+                                           bool(e.modifiers() & Qt.ShiftModifier))
             elif clicked and self._mode == MODE_THREADPICK:
                 self._thread_click(e.pos())
             self._press_pos = None
@@ -11126,7 +11278,7 @@ class View3D(QGLWidget):
             I = data
             c.off_mm = max(10.0, math.hypot(px.x()-I.x(), px.y()-I.y()))/self.scale
 
-    def _click_select3d(self, pos, ctrl=False):
+    def _click_select3d(self, pos, ctrl=False, shift=False):
         hv = self._pick3d(pos)
         if hv is None or hv[0] not in ("face", "sketch", "object"): return
         mw = self._main_window
@@ -11134,6 +11286,12 @@ class View3D(QGLWidget):
         if hv[0] in ("sketch", "object"):
             mw._select_entry(hv[1]); return
         entry, fi = hv[1]
+        if shift and ctrl:
+            # Ctrl+Shift+click: add / remove the whole extrusion to / from the selection
+            mw._toggle_entry_selection(entry); return
+        if shift:
+            # Shift+click: the whole extrusion / imported part the surface belongs to
+            mw._select_entry(entry); return
         # Face clicks select only the surface; bodies and features are selected in the explorer.
         mw._select_face(entry, fi, ctrl=ctrl)
 
@@ -11672,15 +11830,15 @@ class View3D(QGLWidget):
             sv["sel_vtx1"] = vi; sv["sel_seg"] = None; sv["_sel_segs"] = []
             self._drag_vtx = vi
             v = sk.vertices[vi]
-            self._sel_info = f"Vertex {vi}  ({v.x:.1f}, {v.y:.1f})"
+            self._sel_info = f"Vertex {vi}  ({v.x:.2f}, {v.y:.2f})"
         elif si is not None:
             sv["sel_seg"] = si; sv["sel_vtx1"] = None; sv["_sel_segs"] = [si]
             self._drag_seg = si
             seg = sk.segments[si]
             self._sel_info = (f"Seg {si}  "
-                              f"({seg.v0.x:.1f},{seg.v0.y:.1f})"
-                              f"→({seg.v1.x:.1f},{seg.v1.y:.1f})"
-                              f"  L={seg.length():.1f}mm"
+                              f"({seg.v0.x:.2f},{seg.v0.y:.2f})"
+                              f"→({seg.v1.x:.2f},{seg.v1.y:.2f})"
+                              f"  L={seg.length():.2f}mm"
                               + ("  [support]" if seg.construction else ""))
         elif ci is not None or ai is not None:
             sv["sel_seg"] = None; sv["sel_vtx1"] = None; sv["_sel_segs"] = []
@@ -11688,12 +11846,12 @@ class View3D(QGLWidget):
             sv["sel_curve"] = sel; self._drag_curve = sel
             if ci is not None:
                 c = sk.circles[ci]
-                self._sel_info = (f"Circle {ci}  centre ({c.center.x:.1f},{c.center.y:.1f})"
-                                  f"  R={c.radius:.1f}mm")
+                self._sel_info = (f"Circle {ci}  centre ({c.center.x:.2f},{c.center.y:.2f})"
+                                  f"  R={c.radius:.2f}mm")
             else:
                 a = sk.arcs[ai]; _, sw = a.angles()
-                self._sel_info = (f"Arc {ai}  centre ({a.center.x:.1f},{a.center.y:.1f})"
-                                  f"  R={a.radius():.1f}mm  {math.degrees(sw):.1f}°")
+                self._sel_info = (f"Arc {ai}  centre ({a.center.x:.2f},{a.center.y:.2f})"
+                                  f"  R={a.radius():.2f}mm  {math.degrees(sw):.2f}°")
         elif ei is not None:
             sv["sel_seg"] = None; sv["_sel_segs"] = []
             sv["sel_vtx1"] = sk.vertices.index(sk.ellipses[ei].major_start)
@@ -12355,7 +12513,7 @@ class View3D(QGLWidget):
             idx = [i for i, s in enumerate(sk.segments) if any(s is t for t in d["segments"])]
             sv["_sel_segs"] = idx; sv["sel_seg"] = idx[0] if idx else None
         n = sum(len(d[k]) for k in ("segments", "circles", "arcs", "points"))
-        self.sigSelInfo.emit(f"{n} element(s) pasted at ({at_mm[0]:.1f}, {at_mm[1]:.1f})")
+        self.sigSelInfo.emit(f"{n} element(s) pasted at ({at_mm[0]:.2f}, {at_mm[1]:.2f})")
         return True
 
     # ── scissor ────────────────────────────────────────────────────────────────
@@ -12834,7 +12992,7 @@ class View3D(QGLWidget):
             self._add_constraint(sk, CPointOnLine(v, s), "", prefer_lock=[s.v0, s.v1], silent=True)
         names = " × ".join(f"L{sk.segments.index(s)}" for s in segs)
         where = f"at crossing {names}" if len(segs) == 2 else f"on {names}" if segs else \
-                f"at ({mm[0]:.1f}, {mm[1]:.1f})"
+                f"at ({mm[0]:.2f}, {mm[1]:.2f})"
         self.sigSelInfo.emit(f"Point P{sk.vertices.index(v)} added {where}")
 
     def _draw_text(self, sk, mm):
@@ -13320,9 +13478,13 @@ class View3D(QGLWidget):
         if hasattr(element, "reference_boundary") or \
                 (isinstance(element, Vertex) and element.locked and sk is not None and
                  element in self._outline_vertex_set(sk)):
-            # the face's own edges follow the "Face outline" row of the Sketch Explorer
+            # the face's own edges follow the "Face outline" row of the Sketch Explorer — or the
+            # level of a referenced sketch whose projected line they also are
             state = sv.get("face_outline") or {"visible": True, "reference": True}
-            return state["visible"] and state["reference"]
+            if state["visible"] and state["reference"]:
+                return True
+            if getattr(element, "reference_level", None) is None:
+                return False
         level = getattr(element, "reference_level", None)
         if level is None:
             return True
@@ -23419,8 +23581,16 @@ def _assembly_is_solid(entry):
     return entry.get("type") in _ASSEMBLY_SOLID_TYPES and not entry.get("cut") \
         and not entry.get("preview") and bool(entry.get("solid", (None, []))[1])
 
-def assembly_root_entries(objects):
-    """First-level solids: extrusions / imports that are not built on another solid."""
+def _assembly_solid_root(entry):
+    """The first-level solid (not built on another solid) an entry belongs to."""
+    root, ancestor = entry, entry.get("parent")
+    while ancestor is not None:
+        if ancestor.get("type") in _ASSEMBLY_SOLID_TYPES:
+            root = ancestor
+        ancestor = ancestor.get("parent")
+    return root
+
+def _assembly_first_level_solids(objects):
     roots = []
     for entry in objects:
         if not _assembly_is_solid(entry):
@@ -23432,14 +23602,45 @@ def assembly_root_entries(objects):
             roots.append(entry)
     return roots
 
+def assembly_root_entries(objects):
+    """The parent solids that make the objects of an assembly: first-level extrusions / imports
+    (not built on another solid). A solid fused into a Bridge of another one belongs to that
+    one's object (assembly_part_entries), so it is not a parent solid of its own; when two
+    solids each hold a Bridge with the other one, the first in the project is kept."""
+    candidates = _assembly_first_level_solids(objects)
+    members = {id(root): {id(part) for part in assembly_part_entries(root, objects)}
+               for root in candidates}
+    absorbed = {id(root) for root in candidates
+                if any(id(root) in members[id(other)] for other in candidates if other is not root)}
+    roots, claimed = [], set()
+    for root in candidates:                     # not part of another object: always a root
+        if id(root) not in absorbed:
+            roots.append(root); claimed |= members[id(root)]
+    for root in candidates:                     # only Bridges among each other: the first one
+        if id(root) in absorbed and id(root) not in claimed:
+            roots.append(root); claimed |= members[id(root)]
+    order = {id(entry): index for index, entry in enumerate(objects)}
+    return sorted(roots, key=lambda root: order.get(id(root), 0))
+
 def assembly_part_entries(root, objects):
-    """A parent solid followed by every visible solid that depends on it. Cut tools are left out:
-    their effect is already part of the solids."""
-    parts, seen = [root], {id(root)}
-    for entry in entry_descendants(root, objects):
-        if id(entry) in seen or not _assembly_is_solid(entry) or not entry.get("visible", True):
-            continue
-        seen.add(id(entry)); parts.append(entry)
+    """A parent solid followed by every visible solid that depends on it. A Bridge in it brings
+    the solids it fused (and what is built on them): they are one object with it. Cut tools are
+    left out: their effect is already part of the solids."""
+    present = {id(entry) for entry in objects}
+    parts, seen, pending = [], set(), [root]
+    while pending:
+        base = pending.pop(0)
+        for entry in [base] + entry_descendants(base, objects):
+            if id(entry) in seen or not _assembly_is_solid(entry):
+                continue
+            if entry is not base and not entry.get("visible", True):
+                continue
+            seen.add(id(entry)); parts.append(entry)
+            if entry.get("source_format") == "bridge" and entry.get("visible", True):
+                for source in entry.get("bridge_sources", []):
+                    other = source.get("entry")
+                    if other is not None and id(other) in present and id(other) not in seen:
+                        pending.append(_assembly_solid_root(other))
     return parts
 
 def _assembly_mesh_signature(vertices, triangles):
@@ -23742,13 +23943,48 @@ def assembly_component_status(component, objects, assembly=None):
         return "missing"
     return "ok" if stamp == component.get("file_stamp") else "outdated"
 
+def assembly_keep_appearance(old_bodies, new_bodies):
+    """Update re-reads only the shape: the colour and transparency the bodies have in the
+    assembly stay. A new body takes them from the old body of the same name (or, if the names
+    changed, the one at the same place when the count is the same); a body that is new gets the
+    object's transparency when all its old bodies had the same one."""
+    if not old_bodies:
+        return
+    by_name = {}
+    for body in old_bodies:
+        by_name.setdefault(body.get("name"), body)
+    by_index = len(old_bodies) == len(new_bodies)
+    opacities = {round(float(body.get("opacity", 1.0)), 6) for body in old_bodies}
+    common = float(old_bodies[0].get("opacity", 1.0)) if len(opacities) == 1 else None
+    for index, body in enumerate(new_bodies):
+        old = by_name.get(body.get("name"))
+        if old is None and by_index:
+            old = old_bodies[index]
+        if old is not None:
+            body["color"] = [float(c) for c in list(old.get("color", body["color"]))[:3]]
+            body["opacity"] = float(old.get("opacity", body["opacity"]))
+        elif common is not None:
+            body["opacity"] = common
+
 def assembly_refresh_component(component, objects, window=None):
-    """Re-read the source of a component; position, rotation and applied cuts stay. Returns
-    [(group, make)] of split parts the assembly has no component for yet (the caller adds them
-    with assembly_add_split_components)."""
+    """Re-read the source of a component; position, rotation, applied cuts and the colour /
+    transparency of its bodies stay (only the shape changes). Returns [(group, make)] of split
+    parts the assembly has no component for yet (the caller adds them with
+    assembly_add_split_components)."""
+    shown = list(component.get("bodies") or [])
+    names = {body.get("name") for body in shown}
+    # bodies a cut removed completely are only in the uncut snapshot
+    old = shown + [body for body in component.get("uncut_bodies") or []
+                   if body.get("name") not in names]
     new_parts = _assembly_refresh_source(component, objects, window)
+    assembly_keep_appearance(old, component["bodies"])
+    for group, _make in new_parts:              # new split parts look like the object
+        assembly_keep_appearance(old, group.get("bodies") or [])
     if component.get("cuts"):
+        component["uncut_bodies"] = component["bodies"]       # cut again when the code improves
         component["bodies"] = assembly_apply_cuts(component["bodies"], component["cuts"])
+    else:
+        component.pop("uncut_bodies", None)
     return new_parts
 
 def _assembly_refresh_source(component, objects, window=None):
@@ -24040,13 +24276,58 @@ def assembly_apply_cuts(bodies, cuts):
                                  body["opacity"], body.get("fused", False), body.get("material")))
     return out
 
-def assembly_export_mesh(assembly):
-    """(vertices, triangles) of all visible parts in assembly coordinates, or None. An active
-    Cut Surface cuts them as in the view: only the remaining part is exported."""
+# Version of the cutting code the stored cut bodies were made with. Assemblies saved with an
+# older one are cut again from their uncut geometry when loaded (better section faces).
+ASSEMBLY_CUT_VERSION = 2
+
+def assembly_recut(component, previous=None):
+    """Cut the component's uncut bodies by its cuts again (current cutting code). Colour,
+    opacity and material of the bodies it had (`previous`, same order) are kept."""
+    uncut = component.get("uncut_bodies")
+    if not uncut or not component.get("cuts"):
+        return False
+    bodies = assembly_apply_cuts(uncut, component["cuts"])
+    previous = previous if previous is not None else component.get("bodies") or []
+    if len(previous) == len(bodies):
+        for body, old in zip(bodies, previous):
+            if body["name"] == old["name"]:
+                for key in ("color", "opacity", "material", "fused"):
+                    if key in old:
+                        body[key] = old[key]
+    component["bodies"] = bodies
+    return True
+
+def assembly_upgrade_legacy_cuts(assembly, objects, window=None):
+    """Components cut in an assembly saved before the uncut geometry was stored: their cut
+    faces may come from older cutting code. If their source is unchanged, read it again as the
+    uncut geometry and cut it anew. Returns the names of the upgraded components."""
+    upgraded = []
+    for component in assembly["components"]:
+        if not component.get("cuts") or component.get("uncut_bodies"):
+            continue
+        try:
+            if assembly_component_status(component, objects) != "ok":
+                continue                          # changed / missing source: Update does it
+            previous = component["bodies"]
+            work = dict(component)
+            _assembly_refresh_source(work, objects, window)
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as ex:
+            _dbg(f"assembly: cannot upgrade the cut of {component.get('name')}: {ex}")
+            continue
+        component["uncut_bodies"] = work["bodies"]
+        assembly_recut(component, previous)
+        upgraded.append(component["name"])
+    return upgraded
+
+def assembly_export_mesh(assembly, components=None):
+    """(vertices, triangles) in assembly coordinates of the given components (default: all
+    visible parts), or None. An active Cut Surface cuts them as in the view: only the remaining
+    part is exported."""
     section = assembly_active_section(assembly)
     vertices, triangles = [], []
+    chosen = None if components is None else {id(component) for component in components}
     for component in assembly["components"]:
-        if not component["visible"]:
+        if (not component["visible"]) if chosen is None else id(component) not in chosen:
             continue
         for body in component["bodies"]:
             if body.get("fused") or not body["triangles"]:
@@ -24072,6 +24353,14 @@ def assembly_to_data(assembly, keep_empty=False):
             "fused": body.get("fused", False), "material": body.get("material"),
             "vertices": body["vertices"].tolist(), "triangles": [list(t) for t in body["triangles"]],
             "faces": body["faces"]} for body in component["bodies"]]
+        if component.get("cuts") and component.get("uncut_bodies"):
+            data["uncut_bodies"] = [{
+                "name": body["name"], "color": body["color"], "opacity": body["opacity"],
+                "fused": body.get("fused", False), "material": body.get("material"),
+                "vertices": np.asarray(body["vertices"], float).tolist(),
+                "triangles": [list(t) for t in body["triangles"]],
+                "faces": body["faces"]} for body in component["uncut_bodies"]]
+            data["cut_version"] = ASSEMBLY_CUT_VERSION
         components.append(data)
     return {"name": assembly["name"], "alignment_direction": "second-follows-first",
             "components": components,
@@ -24126,6 +24415,15 @@ def assembly_from_data(data):
             component["cuts"] = [{"origin": [float(x) for x in cut["origin"]],
                                   "normal": [float(x) for x in cut["normal"]]}
                                  for cut in item["cuts"]]
+            if item.get("uncut_bodies"):
+                component["uncut_bodies"] = [
+                    assembly_body(body["name"], body["vertices"], body["triangles"],
+                                  body.get("faces", []), body.get("color", DEFAULT_SOLID_COLOR),
+                                  body.get("opacity", 1.0), body.get("fused", False),
+                                  body.get("material"))
+                    for body in item["uncut_bodies"]]
+                if item.get("cut_version") != ASSEMBLY_CUT_VERSION:
+                    assembly_recut(component)     # made with older cutting code
         assembly["components"].append(component)
     for item in data.get("constraints", []):
         if item.get("kind") not in ("coincident", "mate"):
@@ -24198,9 +24496,10 @@ class AssemblyView3D(View3D):
         self.explosion_arrow = None
         self._explosion_drag = None
         self._pick_modifiers = Qt.NoModifier
+        self.alignment_picking = False       # Align on: references in neon orange
 
     # ── picking ───────────────────────────────────────────────────────────────
-    def _click_select3d(self, pos, ctrl=False):
+    def _click_select3d(self, pos, ctrl=False, shift=False):
         hit = self._pick_face(*self._ray(pos)) if self._mvp is not None else None
         self.bodyClicked.emit(hit[1] if hit else None)
 
@@ -24244,14 +24543,164 @@ class AssemblyView3D(View3D):
         item["ref"] = "object centre"
         return item
 
+    # alignment references in the assembly: neon orange (edges, corners, surfaces), so Align
+    # and Measure (brown, the inverted body colour as in the main window) are told apart
+    ALIGN_HIGHLIGHT = (1.0, 0.37, 0.0)
+    ALIGN_HIGHLIGHT_HOT = (1.0, 0.6, 0.2)
+
+    @staticmethod
+    def _outline_probes(entry, face):
+        """Outline pieces of a planar face and, for each, a probe point just inside the face
+        beside it (NaN where no side lies in the face). Depends on the geometry only: cached on
+        the body until its mesh changes."""
+        reference = AssemblyView3D._face_reference(entry, face)
+        vertices = View3D._face_outline_array(entry, face)
+        if reference is None or not len(vertices):
+            return None
+        cache = entry.get("_outline_probes")
+        if cache is None or cache[0] is not entry["solid"][0]:   # only the current mesh
+            cache = (entry["solid"][0], {})
+            entry["_outline_probes"] = cache
+        if face in cache[1]:
+            return cache[1][face]
+        normal = np.asarray(reference[1], float)
+        segments = np.asarray(vertices, float).reshape(-1, 2, 3)
+        direction = segments[:, 1] - segments[:, 0]
+        length = np.linalg.norm(direction, axis=1)
+        real = length > 1e-9
+        segments, direction, length = segments[real], direction[real], length[real]
+        # long edges are checked in pieces (only the seen part of an edge is drawn)
+        counts = np.clip(np.ceil(length / 2.0), 1, 48).astype(int)
+        rows = np.repeat(np.arange(len(segments)), counts)
+        index = np.concatenate([np.arange(c) for c in counts]) if len(counts) else np.zeros(0, int)
+        fraction = counts[rows].astype(float)
+        starts = segments[rows, 0] + direction[rows] * (index / fraction)[:, None]
+        ends = segments[rows, 0] + direction[rows] * ((index + 1) / fraction)[:, None]
+        across = np.cross(normal, direction[rows]) / length[rows][:, None]
+        # far enough inside that a wall standing on the edge clearly hides a covered probe
+        step = np.clip(0.1 * length[rows] / fraction, 0.1, 0.5)[:, None]
+        middle = (starts + ends) / 2
+        candidates = np.stack([middle + across * step, middle - across * step], axis=1)
+        triangles = View3D._face_vertex_array(entry, face).astype(float).reshape(-1, 3, 3)
+        u = triangles[0, 1] - triangles[0, 0]
+        u /= max(float(np.linalg.norm(u)), 1e-12)
+        v = np.cross(normal, u)
+        tri = np.stack([triangles @ u, triangles @ v], axis=-1)              # (m, 3, 2)
+        q = np.stack([candidates @ u, candidates @ v], axis=-1).reshape(-1, 2)  # (2k, 2)
+        def side(points, i, j):
+            a, b = tri[None, :, i], tri[None, :, j]
+            return (b[..., 0] - a[..., 0]) * (points[:, None, 1] - a[..., 1]) - \
+                   (b[..., 1] - a[..., 1]) * (points[:, None, 0] - a[..., 0])
+        inside = np.zeros(len(q), bool)
+        for chunk in range(0, len(q), 512):           # (bounded memory for big faces)
+            points = q[chunk:chunk + 512]
+            d1, d2, d3 = side(points, 0, 1), side(points, 1, 2), side(points, 2, 0)
+            inside[chunk:chunk + 512] = (((d1 >= 0) & (d2 >= 0) & (d3 >= 0)) |
+                                         ((d1 <= 0) & (d2 <= 0) & (d3 <= 0))).any(axis=1)
+        inside = inside.reshape(-1, 2)
+        probes = np.where(inside[:, :1], candidates[:, 0],
+                          np.where(inside[:, 1:], candidates[:, 1], np.nan))
+        # lifted a little off the face so its own surface never hides it
+        result = (np.stack([starts, ends], axis=1).astype(np.float32), probes + normal * 0.03)
+        cache[1][face] = result
+        return result
+
+    def _seen_points(self, points):
+        """Which world points are not hidden behind what the view has drawn (depth buffer of
+        this frame). NaN points count as seen."""
+        seen = np.ones(len(points), bool)
+        valid = ~np.isnan(points).any(axis=1)
+        if not valid.any() or self._mvp is None:
+            return seen
+        clip = np.c_[points[valid], np.ones(int(valid.sum()))] @ self._mvp.T
+        w = clip[:, 3]
+        front = w > 1e-6
+        ndc = clip[:, :3] / np.where(front, w, 1.0)[:, None]
+        x0, y0, width, height = (int(value) for value in glGetIntegerv(GL_VIEWPORT))
+        px = np.floor((ndc[:, 0] + 1) / 2 * width).astype(int)
+        py = np.floor((ndc[:, 1] + 1) / 2 * height).astype(int)
+        on = front & (px >= 0) & (px < width) & (py >= 0) & (py < height)
+        result = np.ones(len(w), bool)
+        if on.any():
+            left, right = int(px[on].min()), int(px[on].max())
+            bottom, top = int(py[on].min()), int(py[on].max())
+            depth = np.frombuffer(glReadPixels(x0 + left, y0 + bottom, right - left + 1,
+                                               top - bottom + 1, GL_DEPTH_COMPONENT, GL_FLOAT),
+                                  np.float32).reshape(top - bottom + 1, right - left + 1)
+            buffer = depth[py[on] - bottom, px[on] - left].astype(float)
+            if self._ortho_plane:
+                result[on] = (ndc[on, 2] + 1) / 2 <= buffer + 1e-5
+            else:                                    # compare eye distances (mm)
+                near, far = 0.1, 10000.0
+                drawn = 2 * near * far / (far + near - (2 * buffer - 1) * (far - near))
+                result[on] = w[on] <= drawn + 0.01 + 0.0002 * w[on]
+        seen[valid] = result
+        return seen
+
+    def _visible_outline(self, entry, face):
+        """Outline pieces of a planar face whose neighbouring part of the face is seen (a face
+        edge can lie on another body's visible wall while the face beside it is hidden inside
+        that body)."""
+        probes = self._outline_probes(entry, face)
+        if probes is None:
+            return View3D._face_outline_array(entry, face)
+        segments, points = probes
+        return segments[self._seen_points(points)].reshape(-1, 3)
+
+    def _draw_visible_face(self, entry, face, color, fill_alpha, width, line_color=None):
+        """A picked surface, but only where it is seen: the parts of a part's bodies overlap
+        (a body built into another one keeps its whole face), and without a depth test the
+        hidden rest of the face lit up too. Pulled a hair forward to win over its own surface."""
+        glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL)
+        # its own triangles: equal depth passes LEQUAL; a tiny constant pull (no slope term,
+        # which poked through neighbouring walls at grazing angles)
+        glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0.0, -2.0)
+        glColor4f(*color, fill_alpha)
+        self._draw_face_triangles(entry, face)
+        glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0.0, 0.0)
+        glDepthFunc(GL_LESS); glDisable(GL_DEPTH_TEST)
+        outline = self._visible_outline(entry, face)
+        if len(outline):                          # drawn on top: only the edges that are seen
+            glColor3f(*(line_color or color)); glLineWidth(width)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glVertexPointer(3, GL_FLOAT, 0, np.ascontiguousarray(outline, np.float32))
+            glDrawArrays(GL_LINES, 0, len(outline))
+            glDisableClientState(GL_VERTEX_ARRAY)
+
     def _draw_measure_item(self, it, label, font=None, hot=False):
+        if not self.alignment_picking:
+            if it["kind"] != "face":
+                return super()._draw_measure_item(it, label, font, hot)
+            self._draw_visible_face(it["entry"], it["face"], measure_highlight_color(it["entry"]),
+                                    0.5 if hot else 0.35, 5 if hot else 3)
+            if label:
+                glColor3f(1.0, 1.0, 1.0)
+                self.renderText(float(it["P"][0]), float(it["P"][1]), float(it["P"][2]), "S", font)
+            return
+        color = self.ALIGN_HIGHLIGHT_HOT if hot else self.ALIGN_HIGHLIGHT
         if it["kind"] != "face":
-            return super()._draw_measure_item(it, label, font, hot)
-        color = measure_highlight_color(it["entry"])
-        glColor4f(*color, 0.5 if hot else 0.35)
-        self._draw_face_triangles(it["entry"], it["face"])
-        glColor3f(*color); glLineWidth(5 if hot else 3)
-        self._draw_face_outline(it["entry"], it["face"])
+            glColor3f(*color)
+            if it["kind"] == "edge":
+                glLineWidth(7 if hot else 4)
+                glBegin(GL_LINE_STRIP)
+                for pt in it["P"]: glVertex3f(*pt)
+                glEnd()
+            else:
+                glPushAttrib(GL_ENABLE_BIT)
+                glDisable(GL_MULTISAMPLE)
+                glPointSize(15 if hot else 11)
+                glBegin(GL_POINTS); glVertex3f(*it["P"]); glEnd()
+                glPopAttrib()
+            if label:
+                glColor3f(1.0, 1.0, 1.0)
+                self.renderText(float(it["label"][0]), float(it["label"][1]),
+                                float(it["label"][2]), label, font)
+            return
+        # (weaker fills turned grey on the blue body); the outline always in the strong orange,
+        # so it stays visible on a surface that is picked and hovered at once
+        self._draw_visible_face(it["entry"], it["face"], color, 0.75 if hot else 0.6,
+                                5 if hot else 3, line_color=self.ALIGN_HIGHLIGHT)
         if label:
             glColor3f(1.0, 1.0, 1.0)
             self.renderText(float(it["P"][0]), float(it["P"][1]), float(it["P"][2]), "S", font)
@@ -24726,6 +25175,7 @@ class AssemblyDialog(QDialog):
         # dialog's default button (otherwise Enter "clicks" e.g. the colour button)
         for button in self.findChildren(QPushButton):
             button.setAutoDefault(False); button.setDefault(False)
+        self._upgrade_legacy_cuts()
         self._update_title()
         self._refresh_status()
         self._rebuild_scene()
@@ -24803,8 +25253,8 @@ class AssemblyDialog(QDialog):
         self.act_save_as = action("save_as.png", "Save assembly as",
                                   "Save the assembly under a new name", lambda: self._save(True))
         self.act_export = action(
-            "export.png", "Export", "Export the complete assembly (all visible parts) as STEP or STL",
-            self._export)
+            "export.png", "Export", "Export the chosen parts of the assembly as one STEP or STL file",
+            lambda: self._export())
         self.act_undo = action("undo.png", "Undo", "Undo the last assembly change", self._undo)
         self.act_redo = action("redo.png", "Redo", "Redo the last undone assembly change", self._redo)
         self.act_undo.setEnabled(False)
@@ -24908,7 +25358,7 @@ class AssemblyDialog(QDialog):
                     self.act_section, None, self.act_update_selected, self.act_update_all):
             tools_menu.addSeparator() if act is None else tools_menu.addAction(act)
 
-        self.tree = QTreeWidget()
+        self.tree = ExplorerTree()
         self.tree.setHeaderLabel("Assembly  (☑ = visible)")
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         self.tree.itemChanged.connect(self._on_tree_item_changed)
@@ -24927,13 +25377,15 @@ class AssemblyDialog(QDialog):
         self.sl_body_transparency = QSlider(Qt.Horizontal)
         self.sl_body_transparency.setRange(0, 100)
         self.sl_body_transparency.setFixedWidth(130)
-        self.sl_body_transparency.setToolTip("Transparency of the selected assembly object")
+        self.sl_body_transparency.setToolTip("Transparency of the selected assembly object (all of "
+                                             "its bodies)")
         self.sl_body_transparency.valueChanged.connect(self._on_body_transparency)
         self.sl_body_transparency.sliderReleased.connect(self._commit_body_appearance)
         self.lbl_body_transparency = QLabel("0%")
         self.lbl_body_transparency.setFixedWidth(36)
         self.btn_body_color = QPushButton("Choose color…")
         self.btn_body_color.setFixedWidth(140)
+        self.btn_body_color.setToolTip("Colour of the selected assembly object (all of its bodies)")
         self.btn_body_color.clicked.connect(self._choose_body_color)
         self.sp_pos = [self._spin(-100000.0, 100000.0, " mm", 1.0, f"{axis} ") for axis in "XYZ"]
         self.sp_rot = [self._spin(-360.0, 360.0, "°", 1.0, f"{axis} ") for axis in "XYZ"]
@@ -25211,9 +25663,32 @@ class AssemblyDialog(QDialog):
         path = self._window._assembly_file
         # " *" = unsaved changes since the last save / open (like the main window title)
         unsaved = getattr(self, "_saved_state", None) is not None and self.has_unsaved_changes()
-        # like the main window: the file name, or "Untitled" while it has no file yet
-        file_name = os.path.basename(path) if path else "Untitled"
-        self.setWindowTitle(f"Assembly — {file_name}" + (" *" if unsaved else ""))
+        # its entry in the Objects explorer, else the file name, or "Untitled" without either
+        entry = self._window._bound_assembly_entry()
+        if entry is not None:
+            parent = entry.get("parent")
+            name = entry["name"] + (f" ({parent['name']})" if parent else "")
+        else:
+            name = os.path.basename(path) if path else "Untitled"
+        self.setWindowTitle(f"Assembly — {name}" + (" *" if unsaved else ""))
+
+    def load_assembly(self, data, status=""):
+        """Show another assembly (e.g. an "Assembly" entry of the Objects explorer opened by
+        double-click / Edit) in this window."""
+        for act in (self.act_align, self.act_exploded, self.act_measure):
+            if act.isChecked():
+                act.setChecked(False)
+        self.assembly.clear()
+        self.assembly.update(data)
+        self._upgrade_legacy_cuts()
+        self._selected = None
+        self._selected_alignment = None
+        self._after_components_changed()
+        self._reset_history()
+        self._mark_saved()
+        self.view.fit_all()
+        if status:
+            self._set_status(status)
 
     def event(self, e):
         # parts may have been edited in the main window meanwhile: refresh the Outdated markers
@@ -25289,14 +25764,19 @@ class AssemblyDialog(QDialog):
         keep = []
         for component in self.assembly["components"]:
             entries = []
-            for body in component["bodies"]:
+            shown = []
+            for index, body in enumerate(component["bodies"]):
                 entry = body.get("_render")
                 if entry is None:
                     entry = {"type": "extrusion", "name": body["name"], "opacity": body["opacity"],
                              "color": tuple(body["color"]), "faces": body["faces"], "parent": None}
                     body["_render"] = entry
                 entry["_component"] = component
-                entry["_body_index"] = len(entries)
+                entry["_body_index"] = index
+                # a body fused into a Bridge is contained in it: not drawn or picked (its
+                # coincident surfaces / old outline would be picked instead of the Bridge's)
+                if not body.get("fused"):
+                    shown.append(entry)
                 entry["opacity"] = body["opacity"]
                 entry["color"] = tuple(body["color"])
                 entry["visible"] = component["visible"]
@@ -25305,7 +25785,7 @@ class AssemblyDialog(QDialog):
             profile = {"type": "sketch", "name": "", "parent": None}
             for entry in entries:
                 entry["parent"] = profile
-            keep.extend(entries)
+            keep.extend(shown or entries)
             self._apply_transform(component)
         for entry in self._scene:
             if not any(entry is kept for kept in keep):
@@ -25429,9 +25909,8 @@ class AssemblyDialog(QDialog):
         self._loading = True
         try:
             self.tree.clear()
-            root_item = QTreeWidgetItem([self.assembly["name"]])
-            font = root_item.font(0); font.setBold(True); root_item.setFont(0, font)
-            self.tree.addTopLevelItem(root_item)
+            # parts and alignments are top-level entries (no "assembly name" root row)
+            root_item = self.tree.invisibleRootItem()
             selected_item = None
             component_indices = {component["name"]: index
                                  for index, component in enumerate(self.assembly["components"])}
@@ -25502,7 +25981,6 @@ class AssemblyDialog(QDialog):
                 item = add_component(index, root_item, show_axes_checkbox=True)
                 if component is self._selected:
                     selected_item = item
-            root_item.setExpanded(True)
             self.tree.expandAll()
             if selected_item is not None:
                 self.tree.setCurrentItem(selected_item)
@@ -25595,14 +26073,16 @@ class AssemblyDialog(QDialog):
             self._selected_body = None
         elif body_index is not None and 0 <= body_index < len(component["bodies"]):
             self._selected_body = body_index
-        else:
-            self._selected_body = 0 if component["bodies"] else None
+        else:                    # the first body that is shown (not one fused into a Bridge)
+            self._selected_body = next((i for i, body in enumerate(component["bodies"])
+                                        if not body.get("fused")),
+                                       0 if component["bodies"] else None)
         self._selected_alignment = alignment
         if update_tree:
             self._loading = True
             try:
                 self.tree.clearSelection()
-                root_item = self.tree.topLevelItem(0)
+                root_item = self.tree.invisibleRootItem()
                 if alignment is not None:
                     def select_alignment(parent):
                         for row in range(parent.childCount()):
@@ -25680,15 +26160,16 @@ class AssemblyDialog(QDialog):
         self.btn_body_color.setStyleSheet(color_button_style(color))
 
     def _on_body_transparency(self, value):
+        """Transparency of the whole object: every body it is made of (not only the first)."""
         component = self._selected
         index = self._selected_body
         if self._loading or component is None or index is None:
             return
-        body = component["bodies"][index]
-        body["opacity"] = 1.0 - value / 100.0
-        entry = body.get("_render")
-        if entry is not None:
-            entry["opacity"] = body["opacity"]
+        for body in component["bodies"]:
+            body["opacity"] = 1.0 - value / 100.0
+            entry = body.get("_render")
+            if entry is not None:
+                entry["opacity"] = body["opacity"]
         self.lbl_body_transparency.setText(f"{value}%")
         self.view.update()
         self._window._mark_dirty()
@@ -25705,6 +26186,8 @@ class AssemblyDialog(QDialog):
             self._changed()
 
     def _choose_body_color(self):
+        """Colour of the whole object: every body it is made of (not only the parent
+        extrusion), like the transparency."""
         component = self._selected
         index = self._selected_body
         if component is None or index is None:
@@ -25713,11 +26196,13 @@ class AssemblyDialog(QDialog):
         color = QColorDialog.getColor(QColor.fromRgbF(*body["color"]), self, "Assembly object color")
         if not color.isValid():
             return
-        body["color"] = [color.redF(), color.greenF(), color.blueF()]
-        entry = body.get("_render")
-        if entry is not None:
-            entry["color"] = tuple(body["color"])
-        self._set_body_color_button(body["color"])
+        rgb = [color.redF(), color.greenF(), color.blueF()]
+        for body in component["bodies"]:
+            body["color"] = list(rgb)
+            entry = body.get("_render")
+            if entry is not None:
+                entry["color"] = tuple(rgb)
+        self._set_body_color_button(rgb)
         self.view.update()
         self._commit_body_appearance()
         self._changed()
@@ -26099,7 +26584,8 @@ class AssemblyDialog(QDialog):
         dialog.setWindowTitle("Parts of the open project")
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel("Choose the parent objects. Everything built on a parent "
-                                "is part of it automatically."))
+                                "is part of it automatically,\nas are the bodies merged into "
+                                "its Bridges (they are one object with it)."))
         listing = QListWidget()
         listing.setStyleSheet(                      # check boxes as in the object explorer
             "QListWidget::indicator { width: 15px; height: 15px; border: 2px solid rgb(28, 198, 251);"
@@ -26119,15 +26605,22 @@ class AssemblyDialog(QDialog):
         dialog.resize(380, 360)
         if dialog.exec_() != QDialog.Accepted:
             return
-        added = [component for row in range(listing.count())
-                 if listing.item(row).checkState() == Qt.Checked
-                 for component in assembly_add_project_components(self.assembly, roots[row],
-                                                                  objects)]
+        chosen = [roots[row] for row in range(listing.count())
+                  if listing.item(row).checkState() == Qt.Checked]
+        added = [component for root in chosen
+                 for component in assembly_add_project_components(self.assembly, root, objects)]
         if not added:
             return
         self._after_components_changed(select=added[-1])
         self.view.fit_all()
-        self._set_status(f"Added {', '.join(c['name'] for c in added)}")
+        text = f"Added {', '.join(c['name'] for c in added)}"
+        # an assembly made of project objects is kept in the project: it gets an "Assembly"
+        # entry under the (first) object in the Objects explorer, like a Technical Drawing
+        if self._window._bound_assembly_entry() is None:
+            entry = self._window._create_assembly_entry(chosen[0])
+            self._update_title()
+            text += f" — stored as {entry['name']} under {chosen[0]['name']} in the Objects explorer"
+        self._set_status(text)
 
     def _import_files(self, kind=None):
         """Import files of one kind ("step" / "stl" / "obj", chosen in the Import menu)."""
@@ -26244,6 +26737,19 @@ class AssemblyDialog(QDialog):
 
     # ── save / open / export ──────────────────────────────────────────────────
     def _save(self, save_as=False):
+        """Save: an assembly made of project objects is stored in its "Assembly" entry of the
+        Objects explorer (saved with the project); otherwise in its .asby file (the first time
+        a file dialog asks for it). Save As always writes a .asby file (and keeps the entry
+        up to date)."""
+        entry = self._window._bound_assembly_entry()
+        if entry is not None and not save_as:
+            self._window._store_assembly_in_entry(entry)
+            self._mark_saved()
+            parent = entry.get("parent")
+            self._set_status(f"Assembly saved in {entry['name']}" +
+                             (f" under {parent['name']}" if parent else "") +
+                             " — it is written to disk with the project (File → Save)")
+            return True
         path = None if save_as else self._window._assembly_file
         if not path:
             start = self._window._assembly_file or os.path.join(
@@ -26261,9 +26767,12 @@ class AssemblyDialog(QDialog):
             QMessageBox.critical(self, "Save failed", f"Could not save\n{path}\n\n{ex}")
             return False
         self._window._assembly_file = path
+        if entry is not None:                     # Save As: the project's entry follows
+            self._window._store_assembly_in_entry(entry)
         self._mark_saved()
         self._update_title()
-        self._set_status(f"Assembly saved to {path} (it is also stored in the project file)")
+        self._set_status(f"Assembly saved to {path}" +
+                         (f" (and in {entry['name']} of the project)" if entry is not None else ""))
         return True
 
     def _new_file(self):
@@ -26284,11 +26793,25 @@ class AssemblyDialog(QDialog):
         self._selected = None
         self._selected_alignment = None
         self._window._assembly_file = None
+        self._window._assembly_entry = None       # a new assembly gets its own entry on import
         self._after_components_changed()
         self._reset_history()
         self._mark_saved()
         self.view.fit_all()
         self._set_status("New assembly — import parts with Import")
+
+    def _upgrade_legacy_cuts(self):
+        """Cut faces of an older assembly: rebuilt from the unchanged source (see
+        assembly_upgrade_legacy_cuts); a changed source is shown as outdated, Update rebuilds it."""
+        try:
+            upgraded = assembly_upgrade_legacy_cuts(self.assembly, self._window.state["objects"],
+                                                    self._window)
+        except Exception as ex:                    # never block opening the assembly
+            _dbg(f"assembly: upgrading cuts failed: {ex}")
+            return []
+        if upgraded:
+            _dbg(f"assembly: recut {', '.join(upgraded)} with the current cutting code")
+        return upgraded
 
     def _open_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -26307,8 +26830,10 @@ class AssemblyDialog(QDialog):
             return
         self.assembly.clear()
         self.assembly.update(loaded)
+        self._upgrade_legacy_cuts()
         self._selected = None
         self._window._assembly_file = path
+        self._window._assembly_entry = None       # an opened .asby belongs to its file
         self._update_title()
         self._after_components_changed()
         self._reset_history()
@@ -26316,10 +26841,70 @@ class AssemblyDialog(QDialog):
         self.view.fit_all()
         self._set_status(f"Opened {path}")
 
-    def _export(self):
-        mesh = assembly_export_mesh(self.assembly)
+    def _choose_export_components(self):
+        """Ask which parts to export: a check list of all parts, ticked are the selected part
+        (or, without a selection, every visible part). Returns the chosen components or None."""
+        components = self.assembly["components"]
+        if not components:
+            QMessageBox.warning(self, "Nothing to export", "The assembly has no parts.")
+            return None
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export assembly")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Choose the parts to export (as one STEP / STL file):"))
+        listing = QListWidget()
+        listing.setStyleSheet(                      # check boxes as in the object explorer
+            "QListWidget::indicator { width: 15px; height: 15px; border: 2px solid rgb(28, 198, 251);"
+            " border-radius: 3px; background-color: #171a1f; }"
+            "QListWidget::indicator:checked { background-color: rgb(28, 198, 251); }"
+            "QListWidget::indicator:unchecked:hover { background-color: #263744; }")
+        for component in components:
+            preset = component is self._selected if self._selected is not None \
+                else component["visible"]
+            item = QListWidgetItem(component["name"] + ("" if component["visible"] else "   (hidden)"))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if preset else Qt.Unchecked)
+            listing.addItem(item)
+        layout.addWidget(listing)
+        row = QHBoxLayout()
+        for text, state in (("Select all", Qt.Checked), ("Select none", Qt.Unchecked)):
+            button = QPushButton(text)
+            button.setAutoDefault(False)
+            button.clicked.connect(lambda _=False, state=state: [
+                listing.item(i).setCheckState(state) for i in range(listing.count())])
+            row.addWidget(button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        if assembly_active_section(self.assembly) is not None:
+            note = QLabel("The Cut Surface is on: only the remaining part of the cut objects "
+                          "is exported.")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Export…")
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def update_ok(*_):
+            buttons.button(QDialogButtonBox.Ok).setEnabled(any(
+                listing.item(i).checkState() == Qt.Checked for i in range(listing.count())))
+        listing.itemChanged.connect(update_ok)
+        update_ok()
+        dialog.resize(380, 360)
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        return [component for i, component in enumerate(components)
+                if listing.item(i).checkState() == Qt.Checked]
+
+    def _export(self, components=None):
+        if components is None:
+            components = self._choose_export_components()
+            if not components:
+                return None
+        mesh = assembly_export_mesh(self.assembly, components)
         if mesh is None:
-            QMessageBox.warning(self, "Nothing to export", "The assembly has no visible parts.")
+            QMessageBox.warning(self, "Nothing to export",
+                                "The chosen parts have no geometry (or are cut away completely).")
             return None
         start = os.path.splitext(self._window._assembly_file)[0] if self._window._assembly_file \
             else self.assembly["name"]
@@ -26472,6 +27057,8 @@ class AssemblyDialog(QDialog):
                     "normal": [float(x) for x in local_normal]}
             other = {"origin": keep["origin"], "normal": [-x for x in keep["normal"]]}
             previous = list(component.get("cuts", []))
+            # the geometry before any cut (an older assembly may not have it for earlier cuts)
+            uncut = component.get("uncut_bodies") if previous else component["bodies"]
             if split:
                 base = component["name"]
                 fields = {key: copy.deepcopy(component[key]) for key in (
@@ -26484,6 +27071,8 @@ class AssemblyDialog(QDialog):
                 for key in ("position", "rotation", "pivot"):
                     second[key] = list(component[key])
                 second["visible"] = component["visible"]
+                if uncut:
+                    second["uncut_bodies"] = uncut
                 first_name = f"{base} part 1"
                 if assembly_component(self.assembly, first_name) is None:
                     for constraint in self.assembly["constraints"]:
@@ -26496,6 +27085,8 @@ class AssemblyDialog(QDialog):
                 cut_names.append(component["name"])
             component["cuts"] = previous + [keep]
             component["bodies"] = assembly_apply_cuts(component["bodies"], [keep])
+            if uncut:
+                component["uncut_bodies"] = uncut
         if not cut_names:
             self._set_status("The cut plane crosses no object" + (
                 f" ({', '.join(skipped)} lie completely on the removed side)" if skipped else ""))
@@ -26525,6 +27116,7 @@ class AssemblyDialog(QDialog):
             self.act_measure.setChecked(False)
         if on and self._explosion_offsets:
             self._fit_together()
+        self.view.alignment_picking = bool(on)     # neon orange references (Measure: brown)
         self.view.set_measure_mode(on)
         self._update_gizmo()
         self._set_status(self._ALIGN_HINT if on else "Align off")
@@ -26535,6 +27127,8 @@ class AssemblyDialog(QDialog):
             self.act_align.setChecked(False)
         if on and self._explosion_offsets:
             self._fit_together()
+        if on:
+            self.view.alignment_picking = False
         self.view.set_measure_mode(on)
         self._show_tool_tab(self._measurement_panel, "Measurement", on)
         self.txt_measure.clear()
@@ -26612,6 +27206,7 @@ class AssemblyDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        install_decimal_point_keys(QApplication.instance())   # also when started from elsewhere
         icon_dir = os.path.join(_LOG_DIR, "icons")
         self.setWindowIcon(QIcon(os.path.join(icon_dir, "cad_app_dark.ico")))
         self._settings_path=os.path.join(_LOG_DIR, ".settings")
@@ -26628,6 +27223,7 @@ class MainWindow(QMainWindow):
                     "active_sketch":None,"sketch_view_state":{}}
         self._file=None; self._dirty=False
         self._assembly=assembly_new(); self._assembly_dialog=None; self._assembly_file=None
+        self._assembly_entry=None     # the "Assembly" entry of the Objects explorer it is kept in
         self._preview_workers = {}
         self._retired_preview_workers = set()
         self._preview_restart_pending = False
@@ -27176,7 +27772,7 @@ class MainWindow(QMainWindow):
         self._dock_obj.setObjectName("dock_objects")
         self._dock_obj.setWindowIcon(QIcon(os.path.join(icon_dir, "objects.png")))
         self._dock_obj.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
-        self.obj_tree=QTreeWidget(); self.obj_tree.setHeaderLabel("Scene  (☑ = visible)")
+        self.obj_tree=ExplorerTree(); self.obj_tree.setHeaderLabel("Scene  (☑ = visible)")
         self.obj_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.obj_tree.itemClicked.connect(self._on_tree_click)
         self.obj_tree.itemDoubleClicked.connect(self._on_tree_double_click)
@@ -27776,7 +28372,7 @@ class MainWindow(QMainWindow):
             bool(self._settings["user"].get("gear_preview_transparent", False)))
         self.chk_gear_transparent.setToolTip(
             "Show the gears being created or edited see-through. Only the preview is affected: "
-            "the finished bodies keep their own opacity setting")
+            "the finished bodies keep their own transparency setting")
         for checkbox in (self.chk_planetary_fix_sun, self.chk_planetary_fix_ring,
                          self.chk_planetary_fix_carrier, self.chk_gear_round_tips,
                          self.chk_gear_mate, self.chk_gear_transparent):
@@ -28248,7 +28844,10 @@ class MainWindow(QMainWindow):
                     self.p_extra, self.p_children):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse); lbl.setWordWrap(True)
         self.p_color=QPushButton("Choose color…"); self.p_color.setFixedWidth(140)   # as in Assembly
-        self.p_color.setToolTip("Change the colour (extrusions only)")
+        self.p_color.setToolTip("Change the colour (extrusions and imported bodies). With several "
+                                "objects selected (Shift+click in the explorer) all selected "
+                                "bodies get it - not cut extrusions, sketches, assemblies or "
+                                "technical drawings")
         self.p_color.clicked.connect(self._choose_color)
         form.addRow("Name:", self.p_name)
         form.addRow(self.lbl_prop_surface_area, self.p_surface_area)
@@ -28270,16 +28869,21 @@ class MainWindow(QMainWindow):
             form.setAlignment(field, Qt.AlignLeft)
         self.lbl_prop_material.hide(); self.cb_prop_material.hide()
         from PyQt5.QtWidgets import QSlider
-        self.sl_prop_opacity=QSlider(Qt.Horizontal); self.sl_prop_opacity.setRange(10,100)
+        # shown as transparency (0 % = solid, as in the assembly); stored as "opacity" = 1 - it
+        self.sl_prop_opacity=QSlider(Qt.Horizontal); self.sl_prop_opacity.setRange(0,90)
         self.sl_prop_opacity.setMaximumWidth(100)
-        self.sl_prop_opacity.setValue(100)
-        self.sl_prop_opacity.setToolTip("Opacity of the selected object (extrusions and sketches)")
-        self.lbl_prop_opacity=QLabel("100%")
+        self.sl_prop_opacity.setValue(0)
+        self.sl_prop_opacity.setToolTip("Transparency of the selected object (extrusions, imported "
+                                        "bodies and sketches): 0 % = solid. With several objects "
+                                        "selected (Shift+click in the explorer) all selected bodies "
+                                        "get it - not cut extrusions, sketches, assemblies or "
+                                        "technical drawings")
+        self.lbl_prop_opacity=QLabel("0%")
         self.sl_prop_opacity.valueChanged.connect(self._on_prop_opacity)
         orow=QHBoxLayout(); orow.setContentsMargins(0,0,0,0)
         orow.addWidget(self.sl_prop_opacity); orow.addWidget(self.lbl_prop_opacity)
         self.w_prop_opacity=QWidget(); self.w_prop_opacity.setLayout(orow)
-        self.lbl_prop_opacity_title=QLabel("Opacity:")
+        self.lbl_prop_opacity_title=QLabel("Transparency:")
         form.addRow(self.lbl_prop_opacity_title, self.w_prop_opacity)
         self._show_prop_opacity(False)
         lay.addLayout(form); lay.addStretch()
@@ -31153,10 +31757,11 @@ class MainWindow(QMainWindow):
             entry, face_index = self.view3d._bridge_faces[0]
             face = entry["faces"][face_index]
             self._st(f"Bridge: keeping selected face {face_index} ({face.get('kind', 'face')}) "
-                     f"on {entry['name']}; click the target face in the 3-D view")
+                     f"on {entry['name']}; click the target face in the 3-D view | LMB drag: "
+                     "turn the view | RMB: deselect the face")
         else:
             self._st("Bridge: click a face with a boundary in the 3-D view, then its target face "
-                     "| Esc / RMB: cancel")
+                     "| LMB drag: turn the view | Esc / RMB: cancel")
 
     def _cancel_bridge(self):
         if not self.view3d._bridge_mode:
@@ -31224,7 +31829,8 @@ class MainWindow(QMainWindow):
             self.view3d.update()
             face = faces[face_index]
             self._st(f"Bridge: selected face {face_index} ({face.get('kind', 'face')}) on "
-                     f"{entry['name']} — click the target face in the 3-D view")
+                     f"{entry['name']} — click the target face in the 3-D view | LMB drag: turn "
+                     "the view | RMB: deselect the face")
             return
 
         first_entry, first_face = self.view3d._bridge_faces[0]
@@ -32349,7 +32955,8 @@ class MainWindow(QMainWindow):
 
         handled_pairs = set()
         for entry in objects:
-            if entry["type"] not in ("sketch", "imported", "surface", "technical_drawing") or \
+            if entry["type"] not in ("sketch", "imported", "surface", "technical_drawing",
+                                     "assembly") or \
                     entry.get("parent") is not None:
                 continue
             pair_id = profile_pairs.get(id(entry))
@@ -32397,6 +33004,7 @@ class MainWindow(QMainWindow):
             icon = "\u25b1" if entry["type"] == "surface" else \
                    "\U0001f4d0" if entry["type"] == "sketch" else \
                      "\U0001f4c4" if entry["type"] == "technical_drawing" else \
+                   "\U0001f9e9" if entry["type"] == "assembly" else \
                    "\u2736" if entry["type"] == "feature" else \
                    "\u2702" if entry["type"] == "cut_surface" else \
                    "\U0001f7e5" if entry.get("cut") else "\u2b1b"
@@ -32436,6 +33044,7 @@ class MainWindow(QMainWindow):
             icon = "\u25b1" if entry["type"] == "surface" else \
                    "\U0001f4d0" if entry["type"] == "sketch" else \
                      "\U0001f4c4" if entry["type"] == "technical_drawing" else \
+                   "\U0001f9e9" if entry["type"] == "assembly" else \
                    "\u2736" if entry["type"] == "feature" else \
                    "\u2702" if entry["type"] == "cut_surface" else \
                    "\U0001f7e5" if entry.get("cut") else "\u2b1b"
@@ -32471,6 +33080,7 @@ class MainWindow(QMainWindow):
     def _select_entry(self, entry):
         """Select a scene entry (from the 3-D view or the tree) and sync tree + properties."""
         self.state["selected"] = entry
+        self.state["selected_entry_ids"] = set()     # a single selection ends a multi-selection
         self.state["sel_face"] = None
         self.state["sel_faces"] = []
         item = entry.get("tree_item") if entry else None
@@ -32481,6 +33091,42 @@ class MainWindow(QMainWindow):
             self.obj_tree.clearSelection()
         self.view3d.update(); self._update_info()
         self._st(f"Selected: {entry['name']}" if entry else "Deselected")
+
+    def _toggle_entry_selection(self, entry):
+        """Ctrl+Shift+click in the 3-D view or Shift / Ctrl+click in the Objects explorer: add the
+        object to the selection or remove it. The selected objects are highlighted in the view
+        and selected in the Objects explorer (Export takes all of them, Colour / Transparency of
+        the Properties apply to all selected bodies); the last added one is shown in the
+        Properties."""
+        objects = self.state["objects"]
+        ids = set(self.state.get("selected_entry_ids") or ())
+        current = self.state.get("selected")
+        if not ids and current is not None and any(o is current for o in objects):
+            ids.add(id(current))                 # start from the single selection
+        if id(entry) in ids:
+            ids.discard(id(entry))
+        else:
+            ids.add(id(entry))
+        chosen = [o for o in objects if id(o) in ids]
+        primary = entry if id(entry) in ids else (chosen[-1] if chosen else None)
+        self.state["selected"] = primary
+        self.state["selected_entry_ids"] = {id(o) for o in chosen}
+        self.state["sel_face"] = None
+        self.state["sel_faces"] = []
+        tree = self.obj_tree
+        tree.blockSignals(True)
+        tree.clearSelection()
+        for obj in chosen:
+            item = obj.get("tree_item")
+            if item is not None:
+                item.setSelected(True)
+        if primary is not None and primary.get("tree_item") is not None:
+            tree.setCurrentItem(primary["tree_item"], 0, QItemSelectionModel.NoUpdate)
+        tree.blockSignals(False)
+        self.view3d.update(); self._update_info()
+        names = ", ".join(o["name"] for o in chosen)
+        self._st(f"{len(chosen)} objects selected: {names}" if len(chosen) > 1 else
+                 f"Selected: {names}" if chosen else "Deselected")
 
     def _select_face(self, entry, fi, ctrl=False):
         """Ctrl toggles surfaces; the last selected surface stays the target for single-face tools."""
@@ -32516,10 +33162,20 @@ class MainWindow(QMainWindow):
         self._select_entry(None)
 
     def _on_tree_click(self, item, _col):
+        """Click: select the object. Shift+click (or Ctrl+click): add it to the selection or
+        remove it - colour / transparency then apply to all selected bodies."""
         entry = self._entry_of(item)
-        if entry is not None: self._select_entry(entry)
+        if entry is None: return
+        if QApplication.keyboardModifiers() & (Qt.ShiftModifier | Qt.ControlModifier):
+            self._toggle_entry_selection(entry)
+        else:
+            self._select_entry(entry)
 
     def _on_tree_double_click(self, item, _col):
+        clicked = self._entry_of(item)
+        if clicked is not None and clicked.get("type") == "assembly":
+            self._open_assembly_entry(clicked)    # an assembly kept in the project
+            return
         if item.data(0, Qt.UserRole + 1) != "draft":
             return
         entry = self._entry_of(item.parent())
@@ -32528,11 +33184,17 @@ class MainWindow(QMainWindow):
             self._open_angle_draft()
 
     def _on_tree_item_changed(self, item, _col):
-        """Checkbox toggled → change the object's own visibility."""
+        """Checkbox toggled → change the object's own visibility. itemChanged also fires for
+        tooltips / colours set on the item (e.g. a feature that failed): only a real change of
+        the checkbox counts — otherwise _set_visible → _apply_cuts → the failing feature sets
+        its tooltip again → itemChanged … recursed until Python's recursion limit."""
         try:
             entry = self._entry_of(item)
             if entry is None: return
-            self._set_visible([entry], item.checkState(0) == Qt.Checked)
+            on = item.checkState(0) == Qt.Checked
+            if on == bool(entry.get("visible", True)):
+                return
+            self._set_visible([entry], on)
         except Exception as ex:
             import traceback; traceback.print_exc()
             self._st(f"Visibility toggle error: {ex}")
@@ -32699,6 +33361,11 @@ class MainWindow(QMainWindow):
             for component in self._assembly["components"]:
                 if component["kind"] == "project" and component.get("source_name") == old:
                     component["source_name"] = new_name
+            for stored in self.state["objects"]:         # assemblies kept in the project too
+                data = stored.get("assembly_data") if stored.get("type") == "assembly" else None
+                for component in (data or {}).get("components") or []:
+                    if component.get("kind") == "project" and component.get("source_name") == old:
+                        component["source_name"] = new_name
             for drawing in self.state["objects"]:        # drawing sheets name their model
                 options = (drawing.get("options") or {}) \
                     if drawing.get("type") == "technical_drawing" else {}
@@ -32716,6 +33383,9 @@ class MainWindow(QMainWindow):
         if self.view3d._feat_mode:
             self._st("Finish or cancel the current chamfer / fillet first"); return
         self._set_measure_mode(False)
+        if entry["type"] == "assembly":
+            self._open_assembly_entry(entry)
+            return
         if entry["type"] == "technical_drawing":
             parent = entry.get("parent")
             options = self._drawing_options_copy(entry.get("options", {}))
@@ -33134,7 +33804,7 @@ class MainWindow(QMainWindow):
 
     # ── properties panel ──────────────────────────────────────────────────────
     def _show_prop_opacity(self, on):
-        """The opacity row only exists while an object is selected."""
+        """The transparency row only exists while an object is selected."""
         self.lbl_prop_opacity_title.setVisible(on); self.w_prop_opacity.setVisible(on)
 
     def _request_body_metrics(self, entry):
@@ -33323,6 +33993,12 @@ class MainWindow(QMainWindow):
         view = getattr(self, "view3d", None)
         if view is not None: view.measure_validate()
         sel = self.state.get("selected")
+        multi = self.state.get("selected_entry_ids")
+        if multi:                               # Ctrl+Shift multi-selection: still valid?
+            if sel is None or id(sel) not in multi:
+                self.state["selected_entry_ids"] = set()      # selection was reset / replaced
+            else:
+                self.state["selected_entry_ids"] = multi & {id(o) for o in self.state["objects"]}
         selected_faces = self.state.get("sel_faces") or \
             ([self.state["sel_face"]] if self.state.get("sel_face") else [])
         selected_faces = [(entry, index) for entry, index in selected_faces
@@ -33347,6 +34023,8 @@ class MainWindow(QMainWindow):
             self.lbl_prop_surface_area.setText("Surface area:")
             self.p_surface_area.setText("—"); self.p_volume.setText("—"); self.p_weight.setText("—")
             self.p_extra.setText(""); self.p_color.setStyleSheet("")
+            self.p_color.setText("Choose color…")
+            self.lbl_prop_opacity_title.setText("Transparency:")
             selected_face = self.state.get("sel_face")
             if selected_face is not None:
                 entry, face_index = selected_face
@@ -33447,6 +34125,16 @@ class MainWindow(QMainWindow):
                                          f" · planetary reduction {gear['reduction_ratio']:.3f}:1")
             else:
                 self.p_extra.setText(f"{len(sel['solid'][1])} triangles")
+        elif sel["type"] == "assembly":
+            self.p_type.setText("Assembly")
+            self.p_parent.setText(par["name"] if par else "—")
+            data = sel.get("assembly_data") or {}
+            parts = data.get("components") or []
+            alignments = data.get("constraints") or []
+            self.p_extra.setText(f"{len(parts)} part(s): " +
+                                 ", ".join(part.get("name", "?") for part in parts[:6]) +
+                                 (" …" if len(parts) > 6 else "") +
+                                 f" · {len(alignments)} alignment(s) · double-click to open")
         elif sel["type"] == "technical_drawing":
             self.p_type.setText("Technical Drawing")
             self.p_parent.setText(par["name"] if par else "—")
@@ -33509,13 +34197,17 @@ class MainWindow(QMainWindow):
                 extent = "to next surface" if sel.get("to_surface") else \
                          "through all" if sel.get("through") and sel.get("cut") else f"{direction}"
                 self.p_extra.setText(f"Height {sel.get('height', 0):.2f} mm ({extent})")
-        has_op = sel["type"] in ("extrusion", "imported", "sketch")
+        op_targets = self._style_targets("opacity")
+        has_op = bool(op_targets)
         self._show_prop_opacity(True)
         self.sl_prop_opacity.setEnabled(has_op)
         self.sl_prop_opacity.blockSignals(True)
-        self.sl_prop_opacity.setValue(int(round(sel.get("opacity", 1.0)*100)) if has_op else 100)
+        self.sl_prop_opacity.setValue(
+            int(round((1.0 - self._style_shown(op_targets).get("opacity", 1.0))*100)) if has_op else 0)
         self.sl_prop_opacity.blockSignals(False)
         self.lbl_prop_opacity.setText(f"{self.sl_prop_opacity.value()}%" if has_op else "—")
+        self.lbl_prop_opacity_title.setText(
+            f"Transparency ({len(op_targets)}):" if len(op_targets) > 1 else "Transparency:")
         is_imported = sel["type"] == "imported"
         is_gear = sel["type"] == "extrusion" and bool(sel.get("gear_parameters"))
         is_transformable = is_imported or is_gear
@@ -33552,9 +34244,13 @@ class MainWindow(QMainWindow):
             self.p_pos.setText(fmt(lo) + "  (min)")
             self.p_center.setText(fmt((lo+hi)/2))
             self.p_size.setText(f"{size[0]:.2f} × {size[1]:.2f} × {size[2]:.2f} mm")
-        if sel["type"] == "extrusion":
+        color_targets = self._style_targets("color")
+        self.p_color.setText(f"Choose color… ({len(color_targets)})" if len(color_targets) > 1
+                             else "Choose color…")
+        if color_targets:
             self.p_color.setEnabled(True)
-            self.p_color.setStyleSheet(color_button_style(sel.get("color", DEFAULT_SOLID_COLOR)))
+            self.p_color.setStyleSheet(color_button_style(
+                self._style_shown(color_targets).get("color", DEFAULT_SOLID_COLOR)))
         else:
             self.p_color.setEnabled(False)
             self.p_color.setStyleSheet("")
@@ -33695,13 +34391,37 @@ class MainWindow(QMainWindow):
             timer.stop()
             self._record_import_position_history()
 
-    def _on_prop_opacity(self, value):
-        """Opacity slider of the properties panel: applies at once, no edit mode needed."""
+    def _style_targets(self, kind):
+        """The objects a colour ("color") or transparency ("opacity") change applies to: the
+        selected object - or, with several selected (Shift / Ctrl+click in the explorer,
+        Ctrl+Shift+click in the view), every selected body: extrusions and imported bodies /
+        Bridges, not cut extrusions, sketches, assemblies or technical drawings."""
+        objects = self.state["objects"]
         sel = self.state.get("selected")
+        if sel is None or not any(o is sel for o in objects):
+            return []
+        ids = self.state.get("selected_entry_ids") or set()
+        chosen = [o for o in objects if id(o) in ids]
+        if len(chosen) > 1:
+            return [o for o in chosen if not o.get("preview") and
+                    (o["type"] == "imported" or (o["type"] == "extrusion" and not o.get("cut")))]
+        allowed = ("extrusion", "imported") if kind == "color" else ("extrusion", "imported", "sketch")
+        return [sel] if sel["type"] in allowed else []
+
+    def _style_shown(self, targets):
+        """The object whose colour / transparency the panel shows: the selected one if it is
+        among the targets, otherwise the first target."""
+        sel = self.state.get("selected")
+        return sel if any(o is sel for o in targets) else targets[0]
+
+    def _on_prop_opacity(self, value):
+        """Transparency slider of the properties panel (stored as opacity = 1 - transparency):
+        applies at once, no edit mode needed - to all selected bodies (_style_targets)."""
         self.lbl_prop_opacity.setText(f"{value}%")
-        if sel is None or sel["type"] not in ("extrusion", "imported", "sketch") or \
-           not any(o is sel for o in self.state["objects"]): return
-        sel["opacity"] = value/100.0
+        targets = self._style_targets("opacity")
+        if not targets: return
+        for entry in targets:
+            entry["opacity"] = 1.0 - value/100.0
         if not hasattr(self, "_opacity_timer"):
             self._opacity_timer = QTimer(self); self._opacity_timer.setSingleShot(True)
             self._opacity_timer.timeout.connect(self._mark_dirty)
@@ -33709,14 +34429,18 @@ class MainWindow(QMainWindow):
         self.view3d.update()
 
     def _choose_color(self):
-        sel = self.state.get("selected")
-        if sel is None or sel["type"] != "extrusion": return
-        r, g, b = sel.get("color", DEFAULT_SOLID_COLOR)
-        col = QColorDialog.getColor(QColor.fromRgbF(r, g, b), self, "Extrusion colour")
+        """Colour of the selected body - or of all selected bodies (_style_targets)."""
+        targets = self._style_targets("color")
+        if not targets: return
+        r, g, b = self._style_shown(targets).get("color", DEFAULT_SOLID_COLOR)
+        title = f"Colour of {len(targets)} objects" if len(targets) > 1 else "Object colour"
+        col = QColorDialog.getColor(QColor.fromRgbF(r, g, b), self, title)
         if not col.isValid(): return
-        sel["color"] = (col.redF(), col.greenF(), col.blueF())
+        for entry in targets:
+            entry["color"] = (col.redF(), col.greenF(), col.blueF())
         self._mark_dirty(); self._update_info(); self.view3d.update()
-        self._st(f"Colour of {sel['name']} set to {col.name()}")
+        names = ", ".join(e["name"] for e in targets[:4]) + (" …" if len(targets) > 4 else "")
+        self._st(f"Colour of {names} set to {col.name()}")
 
     # ── extrusion ─────────────────────────────────────────────────────────────
     def _unique_name(self, prefix):
@@ -33805,25 +34529,110 @@ class MainWindow(QMainWindow):
         dock.show(); dock.raise_()
         self._fit_dock_to_content(dock)
 
-    def _face_extrusion_source_faces(self, entry):
-        """Indices of the parent-body faces a face extrusion was made from: the stored ones, or
-        (older projects) the planar faces of the parent that lie in the plane of one of the
+    @staticmethod
+    def _face_info(mesh, fi):
+        """Normal, area-weighted centre and area of planar face fi of mesh (verts, tris, faces):
+        what identifies a face extrusion's source face again after its body was rebuilt."""
+        verts, tris, faces = mesh
+        face = faces[fi]
+        V = np.asarray(verts, float).reshape(-1, 3)
+        T = np.asarray(tris, np.int64).reshape(-1, 3)
+        P = V[T[np.asarray(face["tris"], np.int64)]]
+        areas = 0.5 * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1)
+        area = float(areas.sum())
+        centre = (P.mean(axis=1) * areas[:, None]).sum(axis=0) / area if area > 1e-12 \
+            else P.reshape(-1, 3).mean(axis=0)
+        return {"normal": [float(x) for x in np.asarray(face["frame"][3], float)],
+                "centre": [float(x) for x in centre], "area": area}
+
+    def _face_extrusion_parent_mesh(self, entry):
+        """The parent-body mesh a face extrusion takes its profile from (see _body_source_mesh)."""
+        return self._body_source_mesh(entry.get("parent"), entry.get("cut"))
+
+    def _body_source_mesh(self, parent, cut=False):
+        """The mesh of a body a face extrusion takes its profile from: the finished body, but
+        as it is before Cut Surfaces (they only change what is shown); for a cutting face
+        extrusion the bare body (its finished body already has the cut, by the extrusion itself)."""
+        parent = parent or {}
+        if cut and parent.get("base") is not None:
+            base = parent["base"]
+            return base[0], base[1], base[2]
+        pre = parent.get("_pre_section")
+        if pre is not None and self._section_entries(parent):
+            return pre
+        if parent.get("solid") and parent.get("faces") is not None:
+            return parent["solid"][0], parent["solid"][1], parent["faces"]
+        return None
+
+    @staticmethod
+    def _match_source_face(mesh, index, info, taken=()):
+        """Index of the face of mesh that is the recorded source face `info` ({normal, centre,
+        area}): the stored index while it is still a parallel face of similar size near it,
+        otherwise the parallel face of similar size nearest to it in its plane; None if gone."""
+        faces = mesh[2]
+        normal = np.asarray(info["normal"], float)
+        centre = np.asarray(info["centre"], float)
+        area = max(float(info["area"]), 1e-12)
+        size = math.sqrt(area)
+
+        def usable(fi):
+            face = faces[fi]
+            return fi not in taken and face.get("planar") and "frame" in face and face.get("tris") \
+                and float(np.asarray(face["frame"][3], float) @ normal) >= 0.999
+
+        def measure(fi):
+            other = MainWindow._face_info(mesh, fi)
+            delta = np.asarray(other["centre"], float) - centre
+            offset = float(delta @ normal)
+            return float(np.linalg.norm(delta - offset * normal)), offset, other["area"] / area
+
+        if isinstance(index, int) and 0 <= index < len(faces) and usable(index):
+            in_plane, _, ratio = measure(index)
+            if 0.2 <= ratio <= 5.0 and in_plane <= 2.0 * size + 1.0:
+                return index
+        best, best_cost = None, None
+        for fi in range(len(faces)):
+            if not usable(fi):
+                continue
+            in_plane, offset, ratio = measure(fi)
+            if in_plane > size + 1.0 or not 0.2 <= ratio <= 5.0:
+                continue
+            cost = in_plane + 0.25 * abs(offset) + size * abs(math.log(ratio))
+            if best_cost is None or cost < best_cost:
+                best, best_cost = fi, cost
+        return best
+
+    def _face_extrusion_source_faces(self, entry, mesh=None):
+        """Indices (into _face_extrusion_parent_mesh) of the parent-body faces a face extrusion
+        was made from: re-found from the recorded face data, or the stored indices, or (older
+        projects) the planar faces of the parent that lie in the plane of one of the
         extrusion's own planar faces and are covered by it (its start face)."""
-        parent = entry.get("parent") or {}
-        faces = parent.get("faces", [])
+        mesh = mesh if mesh is not None else self._face_extrusion_parent_mesh(entry)
+        if mesh is None:
+            return []
+        par_verts = np.asarray(mesh[0], float).reshape(-1, 3)
+        par_tris = np.asarray(mesh[1], np.int64).reshape(-1, 3)
+        faces = mesh[2]
         def usable(fi):
             return isinstance(fi, int) and 0 <= fi < len(faces) and faces[fi].get("planar") \
                 and "frame" in faces[fi] and faces[fi].get("tris")
         stored = entry.get("source_faces") or []
+        infos = entry.get("source_face_info") or []
+        if stored and len(infos) == len(stored):
+            found = []
+            for fi, info in zip(stored, infos):
+                match = MainWindow._match_source_face(mesh, fi, info, found)
+                if match is None:
+                    return []
+                found.append(match)
+            return found
         if stored and all(usable(fi) for fi in stored):
             return list(stored)
         base = entry.get("base")
-        if not base or not parent.get("solid"):
+        if not base:
             return []
         ext_verts = np.asarray(base[0], float).reshape(-1, 3)
         ext_tris = np.asarray(base[1], np.int64).reshape(-1, 3)
-        par_verts = np.asarray(parent["solid"][0], float).reshape(-1, 3)
-        par_tris = np.asarray(parent["solid"][1], np.int64).reshape(-1, 3)
         found = []
         for own in base[2]:
             if not own.get("planar") or "frame" not in own or not own.get("tris"):
@@ -33854,16 +34663,126 @@ class MainWindow(QMainWindow):
                     found.append(fi)
         return found
 
-    def _face_extrusion_sketch(self, entry):
-        """The virtual sketch (as when it was created) of a face extrusion, or None."""
-        indices = self._face_extrusion_source_faces(entry)
+    def _face_extrusion_sketch(self, entry, mesh=None):
+        """The virtual sketch (as when it was created) of a face extrusion, from the current
+        faces of its parent body, or None if those faces are gone. Records the faces found."""
+        parent = entry.get("parent")
+        mesh = mesh if mesh is not None else self._face_extrusion_parent_mesh(entry)
+        if parent is None or mesh is None:
+            return None
+        indices = self._face_extrusion_source_faces(entry, mesh)
         if not indices:
             return None
-        sketches = self._sketch_from_faces([(entry["parent"], fi) for fi in indices])
-        if not sketches:
+
+        def proxy_of(body, body_mesh):
+            return {"type": body.get("type"), "name": body.get("name"),
+                    "solid": (body_mesh[0], body_mesh[1]), "faces": body_mesh[2], "_body": body}
+
+        proxy = proxy_of(parent, mesh)
+        pairs = [(proxy, fi) for fi in indices]
+        # faces of other bodies selected together with the parent's (one coplanar profile)
+        extra_meshes = []
+        objects = self.state["objects"]
+        for source in entry.get("extra_sources") or []:
+            body = source.get("entry")
+            if body is None or not any(o is body for o in objects):
+                return None                       # a source body was deleted: keep the shape
+            body_mesh = self._body_source_mesh(body, entry.get("cut"))
+            if body_mesh is None:
+                return None
+            match = MainWindow._match_source_face(body_mesh, source.get("face"), source["info"]) \
+                if source.get("info") else source.get("face")
+            if not isinstance(match, int) or not 0 <= match < len(body_mesh[2]):
+                return None
+            existing = next((p for p, _ in pairs if p["_body"] is body), None)
+            pairs.append((existing or proxy_of(body, body_mesh), match))
+            extra_meshes.append((body, body_mesh))
+        sketches = self._sketch_from_faces(pairs)
+        if len(sketches) != 1:                    # nothing left, or no longer one plane
             return None
-        entry["source_faces"] = [int(fi) for _, fi in sketches[0].get("_source_faces", ())]
-        return sketches[0]
+        sketch = sketches[0]
+        used = [(p["_body"], int(fi)) for p, fi in sketch.get("_source_faces", ())]
+        sketch["parent"] = parent
+        sketch["_source_faces"] = used
+        entry["source_faces"] = [fi for body, fi in used if body is parent]
+        entry["source_face_info"] = [MainWindow._face_info(mesh, fi) for fi in entry["source_faces"]]
+        meshes = dict((id(body), body_mesh) for body, body_mesh in extra_meshes)
+        if entry.get("extra_sources"):
+            entry["extra_sources"] = [
+                {"entry": body, "face": fi, "info": MainWindow._face_info(meshes[id(body)], fi)}
+                for body, fi in used if body is not parent]
+        return sketch
+
+    @staticmethod
+    def _same_mesh(a, b):
+        va, vb = np.asarray(a[0], float), np.asarray(b[0], float)
+        ta, tb = np.asarray(a[1]), np.asarray(b[1])
+        return va.shape == vb.shape and ta.shape == tb.shape and np.array_equal(ta, tb) and \
+            bool(np.allclose(va, vb, atol=1e-7))
+
+    def _rebuild_face_extrusions(self, passes=3):
+        """Extrusions made directly from faces of a body follow that body: when its faces changed
+        (a new height, a moved sketch, a cut, a fillet …) the profile is taken from the source
+        faces again and the extrusion is rebuilt with its own settings. If the faces are gone,
+        the extrusion keeps its last shape. Repeats while rebuilt extrusions change bodies."""
+        if getattr(self, "_rebuilding_face_extrusions", False):
+            return
+        self._rebuilding_face_extrusions = True
+        try:
+            for _ in range(passes):
+                changed = []
+                for ext in list(self.state["objects"]):
+                    parent = ext.get("parent")
+                    if ext.get("type") != "extrusion" or ext.get("preview") or "base" not in ext or \
+                            parent is None or parent.get("type") not in ("extrusion", "imported") or \
+                            ext is getattr(self, "_ext_edit", None):
+                        continue
+                    mesh = self._face_extrusion_parent_mesh(ext)
+                    if mesh is None:
+                        continue
+                    sources = [mesh] + [self._body_source_mesh(source.get("entry"), ext.get("cut"))
+                                        for source in ext.get("extra_sources") or []]
+                    target = ext.get("target") or {}
+                    params = (ext.get("height", 20.0), ext.get("direction", "one"),
+                              bool(ext.get("through")), bool(ext.get("cut")),
+                              bool(ext.get("to_surface")), repr(ext.get("ring")),
+                              repr(ext.get("draft")), id(target.get("entry")),
+                              target.get("face"), repr(target.get("plane")))
+                    previous = ext.get("_face_source")
+                    flat = tuple(part for source in sources
+                                 for part in (source if source is not None else (None,)))
+                    if previous is not None and previous[1] == params and \
+                            len(previous[0]) == len(flat) and \
+                            all(x is y for x, y in zip(previous[0], flat)):
+                        continue                  # the source faces did not change
+                    ext["_face_source"] = (flat, params)
+                    try:
+                        sketch = self._face_extrusion_sketch(ext, mesh)
+                        if sketch is None:
+                            _dbg(f"{ext.get('name')}: its source faces are gone, shape kept")
+                            continue
+                        res = self._build_extrusion(sketch, ext.get("height", 20.0),
+                                                    ext.get("direction", "one"),
+                                                    ext.get("through", False), ext.get("cut", False),
+                                                    ext.get("to_surface", False), exclude=ext,
+                                                    target=ext.get("target"), ring=ext.get("ring"))
+                    except (ValueError, ArithmeticError, IndexError, KeyError) as ex:
+                        _dbg(f"{ext.get('name')}: rebuild from its faces failed ({ex})")
+                        continue
+                    if res is None or MainWindow._same_mesh(res, ext["base"]):
+                        continue
+                    old_faces = ext.get("faces")
+                    self._set_solid(ext, res)
+                    try:
+                        self._regenerate_tree(ext, previous_faces=old_faces)
+                    except (ValueError, ArithmeticError) as ex:
+                        _dbg(f"{ext.get('name')}: rebuilding what depends on it failed ({ex})")
+                    changed.append(ext)
+                if not changed:
+                    break
+                self._apply_cuts()
+        finally:
+            self._rebuilding_face_extrusions = False
 
     def _sketch_from_faces(self, faces):
         """Create virtual sketch entries from selected planar faces for direct extrusion.
@@ -33943,9 +34862,17 @@ class MainWindow(QMainWindow):
             loops = sk.profile_loop_edges()
             _dbg(f"  group {group_idx}: {len(g_faces)} faces, {len(boundary_edges)} boundary edges, {len(loops) if loops else 0} loops")
             if loops:
+                infos = []
+                for entry, fi in g_faces:
+                    try:
+                        infos.append(MainWindow._face_info(
+                            (entry["solid"][0], entry["solid"][1], entry["faces"]), fi))
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        infos = None
+                        break
                 results.append({"type": "sketch", "name": f"Surface extrusion", "sketch": sk,
                                 "parent": first_entry, "visible": False, "_surface_extrusion": True,
-                                "_source_faces": g_faces})
+                                "_source_faces": g_faces, "_source_face_info": infos})
         
         return results
 
@@ -34571,17 +35498,28 @@ class MainWindow(QMainWindow):
             # the faces the feature trimmed get their real outline (rounded / chamfered corners)
             mesh = (mesh[0], mesh[1], refresh_face_boundaries(mesh[0], mesh[1], mesh[2]))
             fo.pop("_error", None)
-            if item is not None:
-                try: item.setToolTip(0, "")
-                except RuntimeError: pass
+            self._set_item_tooltip(item, "")
         except Exception as ex:
             fo["_error"] = str(ex)
             _dbg(f"feature '{fo.get('name')}' not applied: {ex}")
             self._st(f"'{fo.get('name')}' could not be applied: {ex}")
-            if item is not None:
-                try: item.setToolTip(0, f"Not applied: {ex}")
-                except RuntimeError: pass
+            self._set_item_tooltip(item, f"Not applied: {ex}")
         return mesh
+
+    def _set_item_tooltip(self, item, text):
+        """Tooltip of an Objects explorer item without emitting itemChanged (that signal is
+        the visibility checkbox; a tooltip set while bodies are rebuilt must not trigger it)."""
+        tree = getattr(self, "obj_tree", None)
+        if item is None or tree is None:
+            return
+        blocked = tree.blockSignals(True)
+        try:
+            if item.toolTip(0) != text:
+                item.setToolTip(0, text)
+        except RuntimeError:                      # (item already deleted with the tree)
+            pass
+        finally:
+            tree.blockSignals(blocked)
 
     def _section_entries(self, body):
         """The active (ticked) Cut Surfaces that cut this extrusion, in creation order: its own
@@ -34752,6 +35690,9 @@ class MainWindow(QMainWindow):
         # faces created by cuts only exist now; sketches on them may need their face re-found
         if hasattr(self, "_rebind_face_sketches") and not getattr(self, "_rebinding_faces", False):
             self._rebind_face_sketches()
+        # extrusions made directly from faces of a body are rebuilt when those faces changed
+        if hasattr(self, "_rebuild_face_extrusions"):
+            self._rebuild_face_extrusions()
         if progress is not None:
             progress(100)
 
@@ -35159,8 +36100,18 @@ class MainWindow(QMainWindow):
             if sketch.get("_surface_extrusion") and sketch.get("parent"):
                 existing["parent"] = sketch["parent"]
                 # the faces it was extruded from: editing rebuilds its profile from them
-                existing["source_faces"] = [int(fi) for entry_, fi in sketch.get("_source_faces", ())
-                                            if entry_ is sketch["parent"]]
+                all_pairs = list(zip(sketch.get("_source_faces", ()),
+                                     sketch.get("_source_face_info") or
+                                     [None] * len(sketch.get("_source_faces", ()))))
+                pairs = [(int(fi), info) for (entry_, fi), info in all_pairs
+                         if entry_ is sketch["parent"]]
+                existing["source_faces"] = [fi for fi, _ in pairs]
+                if pairs and all(info is not None for _, info in pairs):
+                    existing["source_face_info"] = [info for _, info in pairs]
+                # coplanar faces of other bodies selected with them belong to the profile too
+                existing["extra_sources"] = [{"entry": entry_, "face": int(fi), "info": info}
+                                             for (entry_, fi), info in all_pairs
+                                             if entry_ is not sketch["parent"]]
                 if existing.get("solid") and existing.get("faces"):
                     existing["base"] = (existing["solid"][0], existing["solid"][1], existing["faces"])
             else:
@@ -35917,7 +36868,7 @@ class MainWindow(QMainWindow):
         if not self._maybe_save(): return
         self._reset_session()
         self._assembly=assembly_new()
-        self._assembly_file=None
+        self._assembly_file=None; self._assembly_entry=None
         self.state["objects"]=[]; self.state["selected"]=None
         Sketch._ctr[0]=0
         self._file=None; self._rebuild_tree(); self._dirty=False; self._update_title()
@@ -36012,8 +36963,9 @@ class MainWindow(QMainWindow):
             self._update_operation_progress(65, "Preparing project scene...")
             self._reset_session()
             self._assembly=assembly
-            self._assembly_file=None
+            self._assembly_file=None; self._assembly_entry=None
             self.state["objects"]=objs; self.state["selected"]=None
+            self._adopt_project_assembly()
             self._sync_sketch_counter()
             self._file=path
             self._update_operation_progress(65, "Applying cuts and features...")
@@ -36122,6 +37074,14 @@ class MainWindow(QMainWindow):
                     raise ValueError(f"invalid drawing settings for {od['name']}: {ex}") from ex
                 e = {"type": "technical_drawing", "name": od["name"], "parent": par,
                      "options": options, "visible": od.get("visible", True), "tree_item": None}
+            elif od["type"] == "assembly":
+                try:
+                    assembly_from_data(od.get("assembly"))      # (only checks it can be read)
+                except (TypeError, ValueError, KeyError) as ex:
+                    raise ValueError(f"invalid assembly {od['name']}: {ex}") from ex
+                e = {"type": "assembly", "name": od["name"], "parent": par,
+                     "assembly_data": od.get("assembly"), "visible": od.get("visible", True),
+                     "tree_item": None}
             elif od["type"] == "sketch":
                 e={"type":"sketch","name":od["name"],"sketch":sketch_from_dict(od["sketch"]),
                    "tree_item":None,"parent":par,"face":od.get("face"),
@@ -36216,6 +37176,11 @@ class MainWindow(QMainWindow):
                     self._set_solid(e, (verts, tris, faces))
                     if od.get("source_faces"):
                         e["source_faces"] = [int(fi) for fi in od["source_faces"]]
+                        infos = od.get("source_face_info")
+                        if isinstance(infos, list) and len(infos) == len(e["source_faces"]):
+                            e["source_face_info"] = [dict(info) for info in infos]
+                    if od.get("extra_sources"):
+                        e["_extra_sources_data"] = list(od["extra_sources"])   # resolved below
                 elif par is not None and par.get("type") in ("extrusion", "imported"):
                     # Old file: surface extrusion without mesh data, skip it
                     print(f"Warning: skipping {od['name']} - surface extrusion without saved mesh")
@@ -36246,6 +37211,13 @@ class MainWindow(QMainWindow):
                     "entry": objs[source_index],
                     "visible": bool(source.get("visible", True)),
                 })
+            extra_sources = entry.pop("_extra_sources_data", None)
+            if extra_sources:                     # face extrusion: faces of other bodies too
+                entry["extra_sources"] = [
+                    {"entry": objs[source["obj"]], "face": int(source.get("face", 0)),
+                     "info": dict(source["info"]) if source.get("info") else None}
+                    for source in extra_sources
+                    if isinstance(source.get("obj"), int) and 0 <= source["obj"] < len(objs)]
         return objs
 
     def _project_data(self, progress=None):
@@ -36278,6 +37250,8 @@ class MainWindow(QMainWindow):
                 d["size"]=float(o.get("size", 100.0))
             elif o["type"]=="technical_drawing":
                 d["options"] = self._drawing_options_for_storage(o.get("options", {}))
+            elif o["type"]=="assembly":
+                d["assembly"] = o.get("assembly_data")
             elif o["type"]=="imported":
                 d["vertices"]=o["mesh_vertices"]; d["triangles"]=o["triangles"]
                 d["position"]=o.get("position", [0, 0, 0])
@@ -36326,6 +37300,21 @@ class MainWindow(QMainWindow):
                                              "faces": _mesh_face_records(base[2], base[1])}
                     if o.get("source_faces"):
                         d["source_faces"] = [int(fi) for fi in o["source_faces"]]
+                        if o.get("source_face_info") and \
+                                len(o["source_face_info"]) == len(o["source_faces"]):
+                            d["source_face_info"] = [
+                                {"normal": [float(x) for x in info["normal"]],
+                                 "centre": [float(x) for x in info["centre"]],
+                                 "area": float(info["area"])} for info in o["source_face_info"]]
+                    extra = [{"obj": index[id(source["entry"])], "face": int(source["face"]),
+                              "info": {"normal": [float(x) for x in source["info"]["normal"]],
+                                       "centre": [float(x) for x in source["info"]["centre"]],
+                                       "area": float(source["info"]["area"])}
+                              if source.get("info") else None}
+                             for source in o.get("extra_sources") or []
+                             if source.get("entry") is not None and id(source["entry"]) in index]
+                    if extra:
+                        d["extra_sources"] = extra
             out.append(d)
             if progress is not None and object_count:
                 progress(70 * (object_index + 1) // object_count)
@@ -36338,7 +37327,10 @@ class MainWindow(QMainWindow):
             self._update_operation_progress(0, "Preparing project data...")
             project_data = self._project_data(self._update_operation_progress)
             self._update_operation_progress(70, "Preparing assembly data...")
-            assembly_data = assembly_to_data(self._assembly)
+            # an assembly kept in an "Assembly" entry is saved with that entry; only an
+            # assembly without one is stored for the whole project (as before)
+            assembly_data = assembly_to_data(self._assembly) \
+                if self._bound_assembly_entry() is None else None
             if assembly_data is not None:
                 project_data["assembly"] = assembly_data
             self._update_operation_progress(75, "Writing project file...")
@@ -36448,8 +37440,9 @@ class MainWindow(QMainWindow):
         if not roots:
             QMessageBox.information(
                 self, "Export",
-                "Choose an extrusion first — select it in the Objects explorer or in the 3-D "
-                "view (Ctrl+click for several) — and then select Export.")
+                "Choose an extrusion first — select it in the Objects explorer (Ctrl+click for "
+                "several) or in the 3-D view (Shift+click a surface, Ctrl+Shift+click for "
+                "several) — and then select Export.")
             self._st("Export: choose an extrusion first")
             return None
         ents = []
@@ -36494,7 +37487,94 @@ class MainWindow(QMainWindow):
             stored["graphics"] = graphics
         return stored
 
+    # ── assemblies kept in the project ("Assembly" entries of the Objects explorer) ──
+    def _bound_assembly_entry(self):
+        """The "Assembly" entry the open assembly is kept in, or None. After undo / redo the
+        entries are new objects: the entry is found again by its name."""
+        entry = self._assembly_entry
+        if entry is None:
+            return None
+        objects = self.state["objects"]
+        if any(obj is entry for obj in objects):
+            return entry
+        entry = next((obj for obj in objects if obj.get("type") == "assembly" and
+                      obj.get("name") == entry.get("name")), None)
+        self._assembly_entry = entry
+        return entry
+
+    def _create_assembly_entry(self, parent):
+        """An "Assembly N" entry under `parent` (the first project object imported into the
+        assembly) that keeps the open assembly; it opens by double-click / Edit."""
+        taken = {obj.get("name") for obj in self.state["objects"] if obj.get("type") == "assembly"}
+        name = next(f"Assembly {number}" for number in range(1, len(taken) + 2)
+                    if f"Assembly {number}" not in taken)
+        entry = {"type": "assembly", "name": name, "parent": parent, "visible": True,
+                 "tree_item": None, "assembly_data": assembly_to_data(self._assembly, keep_empty=True)}
+        self.state["objects"].append(entry)
+        self._assembly_entry = entry
+        self._rebuild_tree_widget_only()
+        self._mark_dirty()
+        return entry
+
+    def _adopt_project_assembly(self):
+        """An older project stored one assembly for the whole project: when it holds parts of
+        the project, it becomes an "Assembly" entry under the first of them (the project is
+        not marked changed; the next save writes it as an entry)."""
+        objects = self.state["objects"]
+        root = next((found for component in self._assembly["components"]
+                     if component.get("kind") == "project"
+                     for found in [assembly_find_source(component.get("source_name"), objects)]
+                     if found is not None), None)
+        if root is None:
+            return None
+        taken = {obj.get("name") for obj in objects if obj.get("type") == "assembly"}
+        name = next(f"Assembly {number}" for number in range(1, len(taken) + 2)
+                    if f"Assembly {number}" not in taken)
+        entry = {"type": "assembly", "name": name, "parent": root, "visible": True,
+                 "tree_item": None, "assembly_data": assembly_to_data(self._assembly, keep_empty=True)}
+        objects.append(entry)
+        self._assembly_entry = entry
+        return entry
+
+    def _store_assembly_in_entry(self, entry):
+        entry["assembly_data"] = assembly_to_data(self._assembly, keep_empty=True)
+        self._mark_dirty()
+        if self.state.get("selected") is entry:
+            self._update_info()
+
+    def _open_assembly_entry(self, entry):
+        """Double-click / Edit on an "Assembly" entry: show it in the Assembly window."""
+        if self._busy():
+            return
+        dialog = self._assembly_dialog
+        if dialog is not None and self._bound_assembly_entry() is entry:
+            dialog.show(); dialog.raise_(); dialog.activateWindow()
+            return
+        if dialog is not None and not dialog._confirm_close():   # unsaved other assembly
+            return
+        try:
+            data = assembly_from_data(entry.get("assembly_data"))
+        except (ValueError, KeyError, TypeError) as ex:
+            QMessageBox.critical(self, "Assembly", f"{entry['name']} cannot be opened:\n{ex}")
+            return
+        self._assembly_entry = entry
+        self._assembly_file = None
+        if dialog is None:
+            self._assembly.clear(); self._assembly.update(data)
+            self._open_assembly()
+        else:
+            dialog.load_assembly(data, f"Opened {entry['name']}")
+            dialog.show(); dialog.raise_(); dialog.activateWindow()
+        self._st(f"Opened {entry['name']} in the Assembly window")
+
     def _open_assembly(self):
+        # the toolbar / menu with nothing open yet: show the project's (last) Assembly entry
+        if self._assembly_dialog is None and not self._assembly["components"] and \
+                self._bound_assembly_entry() is None and self._assembly_file is None:
+            stored = [obj for obj in self.state["objects"] if obj.get("type") == "assembly"]
+            if stored:
+                self._open_assembly_entry(stored[-1])
+                return
         dialog = self._assembly_dialog
         if dialog is None:
             dialog = AssemblyDialog(self)
@@ -36702,4 +37782,5 @@ if __name__=="__main__":
     install_crash_logging()
     app=QApplication(sys.argv); app.setStyle("Fusion"); _apply_dark_theme(app)
     install_dark_title_bars(app)      # dark Windows title bar on every window and dialog
+    install_decimal_point_keys(app)   # comma typed in a decimal field -> dot
     win=MainWindow(); win.show(); sys.exit(app.exec_())

@@ -336,6 +336,10 @@ Key implementation notes:
     highlighting, planar-face sketches, and datum surfaces tangent to curved faces.
     Generated chamfer/fillet faces retain their feature entry's runtime identity so selection
     highlights that individual operation, never all operations of the same type.
+  - Chamfer / fillet edges run on along edges that continue tangentially (expand_tangent_chains);
+    sliver edges shorter than MICRO_EDGE do not stop that (weld_micro_chains). Where a fillet
+    runs round a corner about as tight as its radius or tighter, the section ends are pulled
+    into the pivot point of the rolling ball (_unfold_fillet_sections) instead of folding over.
   - SketchSystem: unknowns = vertex x/y + circle radii; DOF = unknowns − rank(Jacobian).
   - circ.radius always stores the true radius. CDimension.dim_mode ("diameter"/"radius")
     selects what the value means; extrusion reads circ.radius directly.
@@ -387,7 +391,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "2.0b"
+APP_VERSION = "2.1b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -4685,6 +4689,816 @@ def make_rack_sketch(name, parameters, frame=None):
     sketch.points_free.append(centerpoint)
     return sketch
 
+# ── timing-belt pulleys ──────────────────────────────────────────────────────────────────
+# pitch, pitch-line offset (OD = z·p/π - 2·offset), groove depth and width at the outside
+# diameter, groove form ("round": curvilinear GT2 / HTD, "trapezoid": T-series, 40°)
+BELT_PROFILES = {
+    "GT2_2mm": {"label": "GT2 2 mm", "pitch": 2.0, "offset": 0.254, "depth": 0.764, "width": 1.494, "form": "round"},
+    "GT2_3mm": {"label": "GT2 3 mm", "pitch": 3.0, "offset": 0.381, "depth": 1.169, "width": 2.310, "form": "round"},
+    "HTD_3M":  {"label": "HTD 3M", "pitch": 3.0, "offset": 0.381, "depth": 1.289, "width": 2.270, "form": "round"},
+    "HTD_5M":  {"label": "HTD 5M", "pitch": 5.0, "offset": 0.5715, "depth": 2.199, "width": 3.781, "form": "round"},
+    "T5":      {"label": "T5", "pitch": 5.0, "offset": 0.425, "depth": 1.190, "width": 3.264, "form": "trapezoid"},
+}
+
+
+def _mech_arc(center, radius, a0, a1, segments):
+    return [(center[0] + radius * math.cos(a0 + (a1 - a0) * k / segments),
+             center[1] + radius * math.sin(a0 + (a1 - a0) * k / segments)) for k in range(segments + 1)]
+
+
+def _belt_groove_profile(profile, clearance):
+    """Groove widened by `clearance` (mm, total); cross-section as (x, depth) points from the left edge at the outside diameter
+    (depth 0) to the right edge; x is measured along the circumference from the groove centre."""
+    depth = profile["depth"]
+    half = profile["width"] / 2.0 + clearance / 2.0
+    if profile["form"] == "round":
+        # circular groove through both edges (depth 0) and the floor (x = 0, depth = depth);
+        # centre at depth c, angle psi measured from the floor direction
+        c = (depth * depth - half * half) / (2.0 * depth)
+        radius = depth - c
+        start, stop = math.atan2(-half, -c), math.atan2(half, -c)
+        return [(radius * math.sin(start + (stop - start) * k / 16),
+                 c + radius * math.cos(start + (stop - start) * k / 16)) for k in range(17)]
+    flank = math.radians(20.0)                           # T-series: 40° included groove angle
+    bottom = half - depth * math.tan(flank)
+    if bottom <= 0.05 * half:
+        raise ValueError("The trapezoid groove is too narrow for its depth.")
+    return [(-half, 0.0), (-bottom, depth), (bottom, depth), (half, 0.0)]
+
+
+def pulley_outline(profile_key, teeth, clearance=0.0):
+    profile = BELT_PROFILES[profile_key]
+    pitch = profile["pitch"]
+    if teeth < 8:
+        raise ValueError("A timing pulley needs at least 8 teeth.")
+    outside_radius = teeth * pitch / math.pi / 2.0 - profile["offset"]
+    groove = _belt_groove_profile(profile, clearance)
+    span = (groove[-1][0] - groove[0][0]) / outside_radius
+    if span >= 0.9 * 2.0 * math.pi / teeth:
+        raise ValueError("Too few teeth for this belt profile (grooves would overlap).")
+    if outside_radius - max(d for _, d in groove) <= 0.5:
+        raise ValueError("The pulley is too small for this belt profile.")
+    points = []
+    for k in range(teeth):
+        centre = 2.0 * math.pi * (k + 0.5) / teeth
+        for x, depth in groove:
+            angle = centre + x / outside_radius
+            radius = outside_radius - depth
+            points.append((radius * math.cos(angle), radius * math.sin(angle)))
+        # land (tooth top) up to the next groove, sampled on the outside circle
+        land_from = centre + span / 2.0
+        land_to = 2.0 * math.pi * (k + 1.5) / teeth - span / 2.0
+        steps = max(1, int(math.ceil((land_to - land_from) / math.radians(6.0))))
+        for s in range(1, steps):
+            angle = land_from + (land_to - land_from) * s / steps
+            points.append((outside_radius * math.cos(angle), outside_radius * math.sin(angle)))
+    return points, {"outside_diameter": 2.0 * outside_radius,
+                    "pitch_diameter": teeth * pitch / math.pi,
+                    "root_radius": outside_radius - max(d for _, d in groove)}
+
+
+# ── roller-chain sprockets (ISO 606 tooth form) ──────────────────────────────────────────
+CHAIN_SIZES = {
+    "04C": ("04C / ANSI 25", 6.35, 3.30, 3.10),
+    "06C": ("06C / ANSI 35", 9.525, 5.08, 4.68),
+    "08A": ("08A / ANSI 40", 12.70, 7.92, 7.85),
+    "10A": ("10A / ANSI 50", 15.875, 10.16, 9.40),
+    "12A": ("12A / ANSI 60", 19.05, 11.91, 12.57),
+    "05B": ("05B", 8.00, 5.00, 3.00),
+    "06B": ("06B", 9.525, 6.35, 5.72),
+    "08B": ("08B", 12.70, 8.51, 7.75),
+    "10B": ("10B", 15.875, 10.16, 9.65),
+    "12B": ("12B", 19.05, 12.07, 11.68),
+    "081": ("Bicycle 1/2 × 1/8 in", 12.70, 7.75, 3.30),
+    "BIKE332": ("Bicycle 1/2 × 3/32 in", 12.70, 7.75, 2.38),
+}
+
+
+def sprocket_geometry(chain_key, teeth):
+    _, pitch, roller, inner_width = CHAIN_SIZES[chain_key]
+    z = int(teeth)
+    if z < 6:
+        raise ValueError("A sprocket needs at least 6 teeth.")
+    pitch_d = pitch / math.sin(math.pi / z)
+    tip_d = min(pitch * (0.6 + 1.0 / math.tan(math.pi / z)), pitch_d + 1.25 * pitch - roller)
+    seat_r = 0.505 * roller + 0.069 * roller ** (1.0 / 3.0)      # ISO 606 r_i (max)
+    seat_angle = math.radians(130.0 - 90.0 / z)                   # between α_min and α_max
+    flank_r = (0.12 * roller * (z + 2) + 0.008 * roller * (z * z + 180)) / 2.0   # mid r_e
+    width = (0.93 if pitch <= 12.7 else 0.95) * inner_width      # tooth width b_f1
+    return {"pitch": pitch, "roller": roller, "pitch_diameter": pitch_d, "outside_diameter": tip_d,
+            "seat_radius": seat_r, "seat_angle": seat_angle, "flank_radius": flank_r,
+            "tooth_width": width, "root_diameter": pitch_d - 2.0 * seat_r}
+
+
+def _mech_circle_intersections(c0, r0, c1, r1):
+    dx, dy = c1[0] - c0[0], c1[1] - c0[1]
+    d = math.hypot(dx, dy)
+    if d < 1e-12 or d > r0 + r1 or d < abs(r0 - r1):
+        return []
+    a = (r0 * r0 - r1 * r1 + d * d) / (2 * d)
+    h = math.sqrt(max(r0 * r0 - a * a, 0.0))
+    mx, my = c0[0] + a * dx / d, c0[1] + a * dy / d
+    return [(mx + h * dy / d, my - h * dx / d), (mx - h * dy / d, my + h * dx / d)]
+
+
+def _mech_polar(p):
+    return math.atan2(p[1], p[0])
+
+
+def sprocket_outline(chain_key, teeth):
+    g = sprocket_geometry(chain_key, teeth)
+    z = int(teeth)
+    R, Ra = g["pitch_diameter"] / 2.0, g["outside_diameter"] / 2.0
+    ri, re, alpha = g["seat_radius"], g["flank_radius"], g["seat_angle"]
+    # per gap: roller seat centre c, and for its low / high side (by polar angle) the seat
+    # end e, the seat angle a about c and the flank centre f (flank tangent to the seat)
+    gaps = []
+    for k in range(z):
+        theta = 2.0 * math.pi * k / z
+        c = (R * math.cos(theta), R * math.sin(theta))
+        inward = theta + math.pi
+        sides = []
+        for sign in (-1.0, 1.0):
+            a = inward + sign * alpha / 2.0
+            e = (c[0] + ri * math.cos(a), c[1] + ri * math.sin(a))
+            f = (c[0] + (ri + re) * math.cos(a), c[1] + (ri + re) * math.sin(a))
+            sides.append({"a": a, "e": e, "f": f})
+        sides.sort(key=lambda s: (_mech_polar(s["e"]) - theta + math.pi) % (2 * math.pi) - math.pi)
+        gaps.append({"c": c, "low": sides[0], "high": sides[1]})
+
+    def tip_point(side):
+        hits = _mech_circle_intersections(side["f"], re, (0.0, 0.0), Ra)
+        if not hits:
+            raise ValueError("The sprocket tooth flank does not reach the tip circle.")
+        return min(hits, key=lambda p: math.dist(p, side["e"]))
+
+    # each tooth ends at the tip circle, or pointed where its two flanks meet below it
+    for k in range(z):
+        high, low = gaps[k]["high"], gaps[(k + 1) % z]["low"]
+        ph, pl = tip_point(high), tip_point(low)
+        span = (_mech_polar(pl) - _mech_polar(ph)) % (2 * math.pi)
+        if span > math.pi:                                   # the flanks cross first
+            hits = _mech_circle_intersections(high["f"], re, low["f"], re)
+            if not hits:
+                raise ValueError("Sprocket teeth cannot be formed; use more teeth.")
+            mid = ((ph[0] + pl[0]) / 2.0, (ph[1] + pl[1]) / 2.0)
+            ph = pl = min(hits, key=lambda p: math.dist(p, mid))
+        high["tip"], low["tip"] = ph, pl
+
+    def flank(side):
+        f, e, tip = side["f"], side["e"], side["tip"]
+        a0 = math.atan2(e[1] - f[1], e[0] - f[0])
+        a1 = math.atan2(tip[1] - f[1], tip[0] - f[0])
+        while a1 - a0 > math.pi: a1 -= 2 * math.pi
+        while a1 - a0 < -math.pi: a1 += 2 * math.pi
+        return _mech_arc(f, re, a0, a1, 8)                           # seat end -> tip
+
+    points = []
+    for k in range(z):
+        gap = gaps[k]
+        low, high = flank(gap["low"]), flank(gap["high"])
+        seat = _mech_arc(gap["c"], ri, gap["low"]["a"], gap["high"]["a"], 12)
+        points.extend(low[::-1][:-1] + seat + high[1:])
+        start, stop = _mech_polar(gap["high"]["tip"]), _mech_polar(gaps[(k + 1) % z]["low"]["tip"])
+        sweep = (stop - start) % (2 * math.pi)
+        if sweep > 1e-9 and sweep < math.pi:                   # land on the tip circle
+            steps = max(1, int(math.ceil(sweep / math.radians(4.0))))
+            points.extend((Ra * math.cos(start + sweep * s / steps), Ra * math.sin(start + sweep * s / steps))
+                          for s in range(1, steps))
+    # a pointed tooth: its tip point appears twice in a row
+    cleaned = [p for i, p in enumerate(points) if math.dist(p, points[i - 1]) > 1e-9]
+    return cleaned, g
+
+
+# ── ratchet wheel and pawl ───────────────────────────────────────────────────────────────
+def ratchet_points(teeth, outside_diameter, depth, undercut=5.0):
+    """Sawtooth wheel turning freely counter-clockwise; each locking face at angle 2πk/z,
+    leaning `undercut` degrees into its tooth gap (the gap lies clockwise of the face)."""
+    z = int(teeth)
+    ra = outside_diameter / 2.0
+    rf = ra - depth
+    if z < 6 or depth <= 0 or rf <= 0.3 * ra:
+        raise ValueError("Ratchet tooth count, diameter or depth is invalid.")
+    gamma = math.radians(undercut)
+    pts, roots, tips = [], [], []
+    for k in range(z):
+        phi = 2.0 * math.pi * k / z
+        root = (rf * math.cos(phi), rf * math.sin(phi))
+        # face direction: radial turned clockwise by the undercut angle
+        d = (math.cos(phi - gamma), math.sin(phi - gamma))
+        b = root[0] * d[0] + root[1] * d[1]
+        s = -b + math.sqrt(b * b - (rf * rf - ra * ra))
+        tip = (root[0] + s * d[0], root[1] + s * d[1])
+        lean = (_mech_polar(tip) - phi + math.pi) % (2 * math.pi) - math.pi
+        if lean < -0.45 * 2 * math.pi / z:
+            raise ValueError("The undercut is too large for this tooth pitch.")
+        pts += [root, tip]
+        roots.append(root); tips.append(tip)
+    return pts, roots, tips
+
+
+def _mech_seg_cross(p1, p2, q1, q2):
+    def orient(a, b, c): return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    d1, d2 = orient(q1, q2, p1), orient(q1, q2, p2)
+    d3, d4 = orient(p1, p2, q1), orient(p1, p2, q2)
+    return (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0)
+
+
+def _mech_inside(p, poly):
+    x, y, inside = p[0], p[1], False
+    for i in range(len(poly)):
+        x1, y1 = poly[i]; x2, y2 = poly[i - 1]
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _mech_polygons_overlap(a, b):
+    if any(_mech_inside(p, b) for p in a) or any(_mech_inside(p, a) for p in b):
+        return True
+    return any(_mech_seg_cross(a[i - 1], a[i], b[j - 1], b[j]) for i in range(len(a)) for j in range(len(b)))
+
+
+def _mech_offset_point(p, toward, distance):
+    d = math.dist(p, toward)
+    return (p[0] + (toward[0] - p[0]) * distance / d, p[1] + (toward[1] - p[1]) * distance / d)
+
+
+def _mech_convex_hull(points):
+    pts = sorted(set(points))
+    def half(seq):
+        out = []
+        for p in seq:
+            while len(out) >= 2 and (out[-1][0] - out[-2][0]) * (p[1] - out[-2][1]) - \
+                    (out[-1][1] - out[-2][1]) * (p[0] - out[-2][0]) <= 0:
+                out.pop()
+            out.append(p)
+        return out
+    lower, upper = half(pts), half(pts[::-1])
+    return lower[:-1] + upper[:-1]
+
+
+def pawl_outline(teeth, outside_diameter, depth, undercut, pivot_bore, clearance=0.2):
+    """Pawl seated in the gap of the face at angle 0, pivoting outside the wheel on the
+    face normal. Returns (outline in wheel coordinates, pivot, hub radius)."""
+    wheel, roots, tips = ratchet_points(teeth, outside_diameter, depth, undercut)
+    z = int(teeth)
+    ra, rf = outside_diameter / 2.0, outside_diameter / 2.0 - depth
+    root, tip, prev_tip = roots[0], tips[0], tips[-1]
+    gap_mid = ((root[0] + prev_tip[0]) / 2.0, (root[1] + prev_tip[1]) / 2.0)
+    # wedge: corner at the face root, up the face, back along the slope (with clearance)
+    corner = _mech_offset_point(root, gap_mid, clearance * 1.5)
+    # face normal pointing into the gap (away from the tooth the face belongs to)
+    fx, fy = tip[0] - root[0], tip[1] - root[1]
+    fl = math.hypot(fx, fy)
+    face_n = (fy / fl, -fx / fl)
+    if face_n[0] * (gap_mid[0] - root[0]) + face_n[1] * (gap_mid[1] - root[1]) < 0:
+        face_n = (-face_n[0], -face_n[1])
+    face_top = (root[0] + fx * 0.8 + clearance * face_n[0], root[1] + fy * 0.8 + clearance * face_n[1])
+    # the arm runs parallel to the back slope of the gap (root -> previous tip), offset by the
+    # clearance, so it passes over the previous tooth; the pivot lies beyond that tooth
+    ux, uy = prev_tip[0] - root[0], prev_tip[1] - root[1]
+    ul = math.hypot(ux, uy)
+    ux, uy = ux / ul, uy / ul
+    slope_n = (-uy, ux) if (-uy * root[0] + ux * root[1]) > 0 else (uy, -ux)   # away from the hub
+    slope = (root[0] + 0.35 * ul * ux + clearance * slope_n[0],
+             root[1] + 0.35 * ul * uy + clearance * slope_n[1])
+    # wedge corner: where the face and slope lines, both offset by the clearance, meet
+    p1 = (root[0] + clearance * face_n[0], root[1] + clearance * face_n[1])
+    p2 = (root[0] + clearance * slope_n[0], root[1] + clearance * slope_n[1])
+    det = (fx / fl) * (-uy) - (fy / fl) * (-ux)
+    if abs(det) > 1e-12:
+        s = ((p2[0] - p1[0]) * (-uy) - (p2[1] - p1[1]) * (-ux)) / det
+        corner = (p1[0] + s * fx / fl, p1[1] + s * fy / fl)
+    hub = pivot_bore / 2.0 + max(1.5, 0.5 * pivot_bore)
+    def distance_to(poly, p):
+        best = float("inf")
+        for i in range(len(poly)):
+            (ax, ay), (bx, by) = poly[i - 1], poly[i]
+            dx, dy = bx - ax, by - ay
+            t = max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / (dx * dx + dy * dy or 1e-30)))
+            best = min(best, math.hypot(p[0] - ax - t * dx, p[1] - ay - t * dy))
+        return best
+
+    def clear(outline):
+        """No overlap with the wheel, and every other tooth tip keeps the clearance."""
+        if _mech_polygons_overlap(outline, wheel):
+            return False
+        # the previous tip sits exactly one clearance below the arm by construction
+        return all(distance_to(outline, t) >= 0.9 * clearance for t in tips[1:])
+    for extra in [0.0] + [0.05 * ra * k for k in range(1, 60)]:
+        along = hub * 1.5 + extra
+        pivot = (prev_tip[0] + along * ux + (hub + clearance) * slope_n[0],
+                 prev_tip[1] + along * uy + (hub + clearance) * slope_n[1])
+        circle =[(pivot[0] + hub * math.cos(2 * math.pi * k / 32),
+                   pivot[1] + hub * math.sin(2 * math.pi * k / 32)) for k in range(32)]
+        outline = _mech_convex_hull([corner, face_top, slope] + circle)
+        # keep counter-clockwise
+        if sum(outline[i - 1][0] * outline[i][1] - outline[i][0] * outline[i - 1][1]
+               for i in range(len(outline))) < 0:
+            outline = outline[::-1]
+        if clear(outline):
+            return outline, pivot, hub
+    raise ValueError("No collision-free pawl position found; change depth or undercut.")
+
+
+# ── Geneva drive ─────────────────────────────────────────────────────────────────────────
+def geneva_geometry(slots, center_distance, pin_diameter, clearance=0.2):
+    n, C = int(slots), float(center_distance)
+    if not 3 <= n <= 18:
+        raise ValueError("A Geneva wheel needs 3 to 18 slots.")
+    a, b = C * math.sin(math.pi / n), C * math.cos(math.pi / n)
+    w = pin_diameter + clearance
+    wheel_r = math.sqrt(b * b + (w / 2.0) ** 2)
+    lock_r = a - pin_diameter                       # driver locking disc
+    slot_end = C - a                                # innermost pin centre position
+    if lock_r <= 0.2 * a or slot_end - w / 2.0 <= 0:
+        raise ValueError("Pin too large for this centre distance and slot count.")
+    if slot_end * math.sin(math.pi / n) <= w / 2.0 + 0.5:
+        raise ValueError("The slots meet at the centre; increase the centre distance.")
+    return {"slots": n, "center_distance": C, "crank_radius": a, "wheel_radius": wheel_r,
+            "slot_width": w, "slot_end": slot_end, "lock_radius": lock_r,
+            "lock_arc_radius": lock_r + clearance, "pin_diameter": pin_diameter,
+            "clearance": clearance, "plate_radius": a + pin_diameter / 2.0 + max(2.0, 0.4 * pin_diameter)}
+
+
+def geneva_wheel_outline(g):
+    n, C, Rw, w = g["slots"], g["center_distance"], g["wheel_radius"], g["slot_width"]
+    RL = g["lock_arc_radius"]
+    cos_b = (C * C + Rw * Rw - RL * RL) / (2.0 * C * Rw)
+    if not -1.0 < cos_b < 1.0:
+        raise ValueError("The locking arc does not meet the wheel rim.")
+    beta = math.acos(cos_b)
+    delta = math.asin((w / 2.0) / Rw)
+    if beta >= math.pi / n - delta - math.radians(0.5):
+        raise ValueError("The locking arcs reach into the slots; reduce the pin diameter.")
+    pts = []
+    for k in range(n):
+        bis = 2.0 * math.pi * k / n                      # locking arc faces this direction
+        lc = (C * math.cos(bis), C * math.sin(bis))
+        a0 = math.atan2(Rw * math.sin(bis - beta) - lc[1], Rw * math.cos(bis - beta) - lc[0])
+        a1 = math.atan2(Rw * math.sin(bis + beta) - lc[1], Rw * math.cos(bis + beta) - lc[0])
+        # through the side facing the wheel centre (angle bis + pi), clockwise around lc
+        while a1 > a0: a1 -= 2 * math.pi
+        pts += _mech_arc(lc, RL, a0, a1, 24)
+        # horn up to the slot, then the slot
+        sigma = bis + math.pi / n
+        e, t = (math.cos(sigma), math.sin(sigma)), (-math.sin(sigma), math.cos(sigma))
+        rim = math.sqrt(Rw * Rw - (w / 2.0) ** 2)
+        horn_from, horn_to = bis + beta, sigma - delta
+        pts += [(Rw * math.cos(horn_from + (horn_to - horn_from) * s / 4),
+                 Rw * math.sin(horn_from + (horn_to - horn_from) * s / 4)) for s in range(1, 4)]
+        lower_rim = (rim * e[0] - w / 2 * t[0], rim * e[1] - w / 2 * t[1])
+        inner = g["slot_end"]
+        lower_in = (inner * e[0] - w / 2 * t[0], inner * e[1] - w / 2 * t[1])
+        pts += [lower_rim, lower_in]
+        start = math.atan2(-t[1], -t[0])
+        pts += _mech_arc((inner * e[0], inner * e[1]), w / 2.0, start, start - math.pi, 12)[1:-1]
+        upper_in = (inner * e[0] + w / 2 * t[0], inner * e[1] + w / 2 * t[1])
+        upper_rim = (rim * e[0] + w / 2 * t[0], rim * e[1] + w / 2 * t[1])
+        pts += [upper_in, upper_rim]
+        nxt = bis + 2.0 * math.pi / n - beta
+        pts += [(Rw * math.cos(sigma + delta + (nxt - sigma - delta) * s / 4),
+                 Rw * math.sin(sigma + delta + (nxt - sigma - delta) * s / 4)) for s in range(1, 4)]
+    return pts
+
+
+def geneva_driver_outline(g):
+    """Driver in its own frame (centre at the origin, wheel at -X): locking disc with the
+    relief cut on the pin side (+X), and the pin. Returns (disc outline, pin centre)."""
+    C, a, rl = g["center_distance"], g["crank_radius"], g["lock_radius"]
+    relief_c, relief_r = (C, 0.0), g["wheel_radius"] + g["clearance"]
+    hits = _mech_circle_intersections((0.0, 0.0), rl, relief_c, relief_r)
+    if len(hits) < 2:
+        raise ValueError("The driver relief cut does not cross the locking disc.")
+    upper = max(hits, key=lambda p: p[1])
+    a_up = math.atan2(upper[1], upper[0])
+    disc = _mech_arc((0.0, 0.0), rl, a_up, 2 * math.pi - a_up, 72)        # long way, away from +X
+    r0 = math.atan2(-upper[1] - relief_c[1], upper[0] - relief_c[0])
+    r1 = math.atan2(upper[1] - relief_c[1], upper[0] - relief_c[0])
+    while r1 > r0: r1 -= 2 * math.pi                                   # concave, clockwise
+    relief = _mech_arc(relief_c, relief_r, r0, r1, 24)[1:-1]
+    return disc + relief, (a, 0.0)
+
+
+# ── sketches and solids of the mechanism parts (gear generator types) ────────────────────
+MECHANISM_KINDS = ("pulley", "sprocket", "ratchet", "geneva", "worm_wheel")
+
+
+def _polygon_sketch(name, frame, outline, circles=()):
+    """Sketch of one closed polyline plus circles ((cx, cy), r); a locked centre point."""
+    sketch = Sketch("XY", name=name, frame=frame)
+    vertices = [Vertex(x, y) for x, y in outline]
+    sketch.vertices.extend(vertices)
+    sketch.segments.extend(Segment(vertices[i], vertices[(i + 1) % len(vertices)])
+                           for i in range(len(vertices)))
+    for (cx, cy), radius in circles:
+        sketch.circles.append(Circle(Vertex(cx, cy), radius))
+    centerpoint = Vertex(0.0, 0.0, locked=True)
+    sketch.vertices.append(centerpoint)
+    sketch.points_free.append(centerpoint)
+    return sketch
+
+
+def _bore_circles(bore, limit_radius, what):
+    bore = float(bore or 0.0)
+    if not math.isfinite(bore) or bore < 0:
+        raise ValueError("Bore diameter must be zero or positive.")
+    if bore and bore / 2.0 >= limit_radius - 0.3:
+        raise ValueError(f"Bore diameter must be smaller than {2.0 * (limit_radius - 0.3):.2f} mm "
+                         f"({what}).")
+    return [((0.0, 0.0), bore / 2.0)] if bore else []
+
+
+def make_pulley_sketch(name, parameters, frame=None):
+    outline, info = pulley_outline(parameters["belt_profile"], int(parameters["teeth"]),
+                                   float(parameters.get("clearance", 0.2)))
+    return _polygon_sketch(name, frame, outline, _bore_circles(
+        parameters.get("bore_diameter", 0.0), info["root_radius"], "groove root"))
+
+
+def make_sprocket_sketch(name, parameters, frame=None):
+    outline, geometry = sprocket_outline(parameters["chain"], int(parameters["teeth"]))
+    return _polygon_sketch(name, frame, outline, _bore_circles(
+        parameters.get("bore_diameter", 0.0), geometry["root_diameter"] / 2.0, "root diameter"))
+
+
+def make_ratchet_sketch(name, parameters, frame=None):
+    depth = float(parameters["ratchet_depth"])
+    outline, _, _ = ratchet_points(int(parameters["teeth"]), float(parameters["outside_diameter"]),
+                                   depth, float(parameters.get("ratchet_undercut", 5.0)))
+    return _polygon_sketch(name, frame, outline, _bore_circles(
+        parameters.get("bore_diameter", 0.0),
+        float(parameters["outside_diameter"]) / 2.0 - depth, "tooth root"))
+
+
+def ratchet_pawl(parameters):
+    """(outline relative to the pivot, pivot in wheel coordinates, hub radius)."""
+    outline, pivot, hub = pawl_outline(
+        int(parameters["teeth"]), float(parameters["wheel_diameter"]),
+        float(parameters["ratchet_depth"]), float(parameters.get("ratchet_undercut", 5.0)),
+        float(parameters.get("bore_diameter", 3.0)), float(parameters.get("clearance", 0.2)))
+    return [(x - pivot[0], y - pivot[1]) for x, y in outline], pivot, hub
+
+
+def make_pawl_sketch(name, parameters, frame=None):
+    outline, _, hub = ratchet_pawl(parameters)
+    return _polygon_sketch(name, frame, outline, _bore_circles(
+        parameters.get("bore_diameter", 0.0), hub, "pawl hub"))
+
+
+def _geneva(parameters):
+    return geneva_geometry(int(parameters["slots"]), float(parameters["center_distance"]),
+                           float(parameters["pin_diameter"]), float(parameters.get("clearance", 0.2)))
+
+
+def make_geneva_wheel_sketch(name, parameters, frame=None):
+    geometry = _geneva(parameters)
+    return _polygon_sketch(name, frame, geneva_wheel_outline(geometry), _bore_circles(
+        parameters.get("bore_diameter", 0.0),
+        geometry["slot_end"] - geometry["slot_width"] / 2.0, "slot ends"))
+
+
+def make_geneva_driver_sketch(name, parameters, frame=None):
+    """Locking disc with its relief cut and the drive pin (an island); the crank plate that
+    carries the pin is added below the profile plane by gear_extrusion."""
+    geometry = _geneva(parameters)
+    disc, pin = geneva_driver_outline(geometry)
+    limit = min(geometry["lock_radius"],
+                geometry["center_distance"] - geometry["wheel_radius"] - geometry["clearance"])
+    circles = _bore_circles(parameters.get("bore_diameter", 0.0), limit, "locking disc")
+    circles.append((pin, geometry["pin_diameter"] / 2.0))
+    return _polygon_sketch(name, frame, disc, circles)
+
+
+def _disc_layer(frame, z, height, radius, bore):
+    """Prism of a disc (with an optional bore) on the profile frame, from z to z + height."""
+    def loop(r):
+        pts = circle_pts(0.0, 0.0, r)
+        return [{"kind": "circle", "pts": pts + [pts[0]], "center": (0.0, 0.0), "radius": r}]
+    loops = [loop(radius)] + ([loop(bore / 2.0)] if bore else [])
+    return extrude_profile(loops, height, frame, z)
+
+
+def _stacked(main, frame, layers):
+    """Union of the main prism and disc layers (z, height, radius, bore) touching it."""
+    tools = [_disc_layer(frame, *layer) for layer in layers if layer[1] > 1e-6 and layer[2] > 0]
+    if not tools:
+        return main
+    result = csg_subtract(main, tools, label="", union=True)
+    if not _mesh_is_closed(result[1]):
+        raise ValueError("The layered body could not be joined into one solid.")
+    return result
+
+
+def pulley_layers(parameters, z0, h):
+    """Flanges (both ends) and hub (below the bottom flange) of a timing pulley."""
+    bore = float(parameters.get("bore_diameter", 0.0))
+    outside = float(parameters["outside_diameter"])
+    layers, bottom = [], z0
+    if parameters.get("flanges"):
+        thickness = float(parameters.get("flange_thickness", 1.0))
+        radius = outside / 2.0 + float(parameters.get("flange_height", 1.5))
+        layers += [(z0 - thickness, thickness, radius, bore), (z0 + h, thickness, radius, bore)]
+        bottom = z0 - thickness
+    hub_d, hub_l = float(parameters.get("hub_diameter", 0.0)), float(parameters.get("hub_length", 0.0))
+    if hub_d > 0 and hub_l > 0:
+        if hub_d / 2.0 <= bore / 2.0 + 0.5:
+            raise ValueError("The hub diameter must be larger than the bore.")
+        layers.append((bottom - hub_l, hub_l, hub_d / 2.0, bore))
+    return layers
+
+
+# ── worm drive: ZA worm (straight-sided axial profile) and a hob-generated, throated wheel ──
+def worm_geometry(module, wheel_teeth, starts, worm_diameter, pressure_angle=20.0, backlash=0.0):
+    """Dimensions of a 90° worm drive (axial module = wheel transverse module)."""
+    m, z2, z1, d1 = float(module), int(wheel_teeth), int(starts), float(worm_diameter)
+    alpha = math.radians(float(pressure_angle))
+    if not math.isfinite(m) or m <= 0:
+        raise ValueError("The module must be a finite positive number.")
+    if not 1 <= z1 <= 4:
+        raise ValueError("A worm has 1 to 4 starts.")
+    if z2 < 12:
+        raise ValueError("A worm wheel needs at least 12 teeth.")
+    if not 10.0 <= float(pressure_angle) <= 30.0:
+        raise ValueError("The worm pressure angle must be between 10° and 30°.")
+    if not 5.0 * m <= d1 <= 40.0 * m:
+        raise ValueError(f"The worm pitch diameter must lie between {5 * m:g} and {40 * m:g} mm "
+                         "(5 to 40 × module).")
+    pitch = math.pi * m
+    lead = z1 * pitch
+    r1, r2 = d1 / 2.0, m * z2 / 2.0
+    tan_a = math.tan(alpha)
+    worm_half = (pitch / 2.0 - backlash * m) / 2.0          # half thread thickness at r1
+    hob_half = (pitch / 2.0 + backlash * m) / 2.0           # the generating hob: wheel backlash
+    if worm_half - m * tan_a < 0.05 * m:
+        raise ValueError("The worm thread becomes pointed; reduce the pressure angle or backlash.")
+    if pitch / 2.0 - (hob_half + 1.25 * m * tan_a) < 0.05 * m:
+        raise ValueError("The wheel teeth become pointed; reduce the pressure angle or backlash.")
+    throat = (m * z2 + 2.0 * m) / 2.0
+    outer = throat + {1: 1.0, 2: 0.75, 3: 0.75}.get(z1, 0.5) * m
+    return {"module": m, "wheel_teeth": z2, "starts": z1, "pitch": pitch, "lead": lead,
+            "r1": r1, "r2": r2, "center_distance": r1 + r2, "tan_alpha": tan_a,
+            "lead_angle": math.atan(lead / (2.0 * math.pi * r1)),
+            "worm_tip": r1 + m, "worm_root": r1 - 1.25 * m, "worm_half": worm_half,
+            "hob_tip": r1 + 1.25 * m, "hob_half": hob_half, "throat_radius": r1 - m,
+            "wheel_throat": throat, "wheel_outer": outer, "wheel_root": r2 - 1.25 * m}
+
+
+def worm_default_length(module, wheel_teeth, starts):
+    """Usual worm face length (DIN 3975 guide values)."""
+    m, z2 = float(module), int(wheel_teeth)
+    return (11.0 + 0.06 * z2) * m if starts <= 2 else (12.5 + 0.09 * z2) * m
+
+
+def worm_default_width(module, worm_diameter, starts):
+    """Usual wheel face width: 0.75 (≤ 3 starts) or 0.67 × the worm tip diameter."""
+    return (0.75 if starts <= 3 else 0.67) * (float(worm_diameter) + 2.0 * float(module))
+
+
+def _hand_sign(hand):
+    return -1.0 if str(hand).lower().startswith("l") else 1.0
+
+
+def _worm_axial_radius(g, xc):
+    """Worm thread radius at the centred axial position xc (|xc| <= pitch/2)."""
+    t, half = g["tan_alpha"], g["worm_half"]
+    w_tip, w_root = half - g["module"] * t, half + 1.25 * g["module"] * t
+    x = abs(xc)
+    if x <= w_tip:
+        return g["worm_tip"]
+    if x >= w_root:
+        return g["worm_root"]
+    return g["r1"] - (x - half) / t
+
+
+def _worm_columns(g, length, hand, x_offset, columns=96):
+    """Angular columns [(z, r, angle)] of the worm surface from z = 0 to length. Along a
+    column the axial profile is piecewise linear, so its corners are exact vertices."""
+    m, pitch, lead = g["module"], g["pitch"], g["lead"]
+    t, half = g["tan_alpha"], g["worm_half"]
+    corners = (half - m * t, half + 1.25 * m * t)
+    sign = _hand_sign(hand)
+    out = []
+    for j in range(columns):
+        angle = 2.0 * math.pi * j / columns
+        shift = sign * lead * angle / (2.0 * math.pi) - x_offset
+        def radius(z):
+            xc = (z - shift + pitch / 2.0) % pitch - pitch / 2.0
+            return _worm_axial_radius(g, xc)
+        marks = set()
+        first = math.floor((0.0 - shift) / pitch) - 1
+        for k in range(first, first + int(length / pitch) + 4):
+            for w in corners:
+                for z in (shift + k * pitch - w, shift + k * pitch + w):
+                    if 1e-6 < z < length - 1e-6:
+                        marks.add(round(z, 9))
+        column = [(0.0, radius(0.0), angle)]
+        column += [(z, radius(z), angle) for z in sorted(marks)]
+        column.append((length, radius(length), angle))
+        out.append(column)
+    return out
+
+
+@lru_cache(maxsize=16)
+def _worm_wheel_grid(module, wheel_teeth, starts, worm_diameter, pressure_angle, backlash,
+                     width, hand, per_tooth=32):
+    """Hob-generated worm wheel as a polar grid: returns (z rows from 0 to width, angles and
+    radii, both rows × columns). In every slice across the face width the hob section (exact
+    helicoid section in that plane) rolls along the pitch circle; the wheel keeps the material
+    the hob never reaches. Columns twist with the tooth helix, so few slices suffice."""
+    g = worm_geometry(module, wheel_teeth, starts, worm_diameter, pressure_angle, backlash)
+    m, z2 = g["module"], g["wheel_teeth"]
+    a, r1, r2 = g["center_distance"], g["r1"], g["r2"]
+    pitch, lead, t = g["pitch"], g["lead"], g["tan_alpha"]
+    sign = _hand_sign(hand)
+    hob_tip, hob_half, hob_root = g["hob_tip"], g["hob_half"], g["worm_root"]
+    if not 0.0 < width <= 1.7 * g["worm_tip"]:
+        raise ValueError(f"The wheel width must be at most {1.7 * g['worm_tip']:.2f} mm "
+                         "(0.85 × the worm tip diameter).")
+    kappa = sign * math.tan(g["lead_angle"]) / r2              # tooth helix twist per mm
+    slices = max(13, min(41, int(math.ceil(width / (0.45 * m))) + 1))
+    hs = np.linspace(-width / 2.0, width / 2.0, slices)
+    base = np.arange(per_tooth) * (2.0 * math.pi / z2) / per_tooth
+    angles, radii = [], []
+    for h in hs:
+        tip = min(g["wheel_outer"], a - math.sqrt(max(g["throat_radius"] ** 2 - h * h, 0.0)))
+        psi = base + kappa * h
+        lo_r = a - hob_tip - 0.01 * m
+        reach = math.sqrt(max(tip * tip - (a - hob_tip) ** 2, 0.0))
+        span = math.asin(min(1.0, reach / tip)) + 0.05
+        steps = int(math.ceil(2.0 * span * r2 / (0.05 * m))) + 1     # ≤ 0.05·m roll per step
+        delta = np.linspace(-span, span, steps)[None, :]
+        sin_d, cos_d = np.sin(delta), np.cos(delta)
+
+        def cut(radius):
+            xw, yw = -radius[:, None] * sin_d, radius[:, None] * cos_d
+            du = yw - a
+            rho = np.hypot(du, h)
+            xt = xw - sign * lead * np.arctan2(h, du) / (2.0 * math.pi) + \
+                 r2 * (math.pi / 2.0 - psi[:, None] + delta)
+            xc = np.abs((xt + pitch / 2.0) % pitch - pitch / 2.0)
+            inside = (rho <= hob_tip) & ((rho < hob_root) | (xc <= hob_half + (r1 - rho) * t))
+            return inside.any(axis=1)
+
+        lo = np.full(per_tooth, lo_r)
+        hi = np.full(per_tooth, tip)
+        solid = ~cut(hi)
+        for _ in range(16):                                      # ≈ 1e-4 mm
+            mid = (lo + hi) / 2.0
+            c = cut(mid)
+            hi = np.where(c, mid, hi)
+            lo = np.where(c, lo, mid)
+        r = np.where(solid, tip, lo)
+        angles.append(np.concatenate([psi + k * 2.0 * math.pi / z2 for k in range(z2)]))
+        radii.append(np.tile(r, z2))
+    return hs + width / 2.0, np.asarray(angles), np.asarray(radii)
+
+
+def _polar_columns_solid(frame, columns, bore=0.0, label="part"):
+    """Closed solid around the frame's w axis from angular columns [(z, r, angle), …] in
+    counter-clockwise order, every column running from the same bottom z to the same top z.
+    Neighbouring columns are zipped by z; the end faces are star-shaped (optional bore)."""
+    O, u, v, w = (np.asarray(axis, float) for axis in frame)
+    flip = float(np.dot(np.cross(u, v), w)) < 0
+    verts, tris = [], []
+    ids = []
+    for column in columns:
+        col = []
+        for z, r, angle in column:
+            col.append(len(verts))
+            verts.append(tuple(float(c) for c in O + r * (math.cos(angle) * u + math.sin(angle) * v) + z * w))
+        ids.append(col)
+    def add(a, b, c, bucket):
+        bucket.append(len(tris))
+        tris.append((a, c, b) if flip else (a, b, c))
+    side = []
+    n = len(columns)
+    for j in range(n):
+        left, right = columns[j], columns[(j + 1) % n]
+        li, ri = ids[j], ids[(j + 1) % n]
+        i = k = 0
+        while i < len(left) - 1 or k < len(right) - 1:
+            if i == len(left) - 1 or (k < len(right) - 1 and right[k + 1][0] < left[i + 1][0]):
+                add(li[i], ri[k], ri[k + 1], side); k += 1
+            else:
+                add(li[i], ri[k], li[i + 1], side); i += 1
+    z_bottom, z_top = columns[0][0][0], columns[0][-1][0]
+    ring_bottom = [col[0] for col in ids]
+    ring_top = [col[-1] for col in ids]
+    def flat(column, end):
+        _, r, angle = column[end]
+        return (r * math.cos(angle), r * math.sin(angle))
+    outer_bottom = [flat(c, 0) for c in columns]
+    outer_top = [flat(c, -1) for c in columns]
+    faces, bore_ids = [], []
+    hole = []
+    if bore > 0:
+        if bore / 2.0 >= min(min(c[0][1], c[-1][1]) for c in columns) - 0.3:
+            raise ValueError(f"The bore is too large for this {label}.")
+        count = max(24, curve_segments(bore / 2.0))
+        hole_angles = [2.0 * math.pi * k / count for k in range(count)]
+        bottom_hole = [len(verts) + k for k in range(count)]
+        verts += [tuple(float(c) for c in O + bore / 2.0 * (math.cos(t) * u + math.sin(t) * v) + z_bottom * w)
+                  for t in hole_angles]
+        top_hole = [len(verts) + k for k in range(count)]
+        verts += [tuple(float(c) for c in O + bore / 2.0 * (math.cos(t) * u + math.sin(t) * v) + z_top * w)
+                  for t in hole_angles]
+        for k in range(count):
+            k1 = (k + 1) % count
+            add(bottom_hole[k], top_hole[k1], bottom_hole[k1], bore_ids)
+            add(bottom_hole[k], top_hole[k], top_hole[k1], bore_ids)
+        hole = [(bore / 2.0 * math.cos(t), bore / 2.0 * math.sin(t)) for t in hole_angles]
+    def cap(outer, ring, hole_ring, top):
+        holes = [hole[::-1]] if hole else []
+        cap_tris, points = triangulate_with_holes(outer, holes)
+        lookup = {}
+        for k, p in enumerate(outer):
+            lookup.setdefault((p[0], p[1]), ring[k])
+        for k, p in enumerate(holes[0] if holes else []):
+            lookup.setdefault((p[0], p[1]), hole_ring[::-1][k])
+        bucket = []
+        for a, b, c in cap_tris:
+            ia, ib, ic = (lookup[(points[x][0], points[x][1])] for x in (a, b, c))
+            if len({ia, ib, ic}) < 3:
+                continue
+            add(ia, ib, ic, bucket) if top else add(ia, ic, ib, bucket)
+        return bucket
+    bottom_ids = cap(outer_bottom, ring_bottom, bottom_hole if hole else [], False)
+    top_ids = cap(outer_top, ring_top, top_hole if hole else [], True)
+    uu = _unit(u)
+    for kind, bucket, z, normal, outline in (("bottom", bottom_ids, z_bottom, -w, outer_bottom),
+                                             ("top", top_ids, z_top, w, outer_top)):
+        normal = _unit(normal)
+        boundary = [("line", O + p[0] * u + p[1] * v + z * w, O + q[0] * u + q[1] * v + z * w)
+                    for p, q in zip(outline, outline[1:] + outline[:1])]
+        if hole:
+            boundary.append(("circle", O + z * w, bore / 2.0))
+        faces.append({"kind": kind, "tris": bucket, "planar": True,
+                      "frame": (O + z * w, uu, np.cross(normal, uu), normal), "boundary": boundary})
+    faces.append({"kind": "side", "tris": side, "planar": False})
+    if bore_ids:
+        faces.append({"kind": "bore", "tris": bore_ids, "planar": False})
+    if not _mesh_is_closed(tris):
+        raise ValueError(f"The {label} surface could not be closed.")
+    return verts, tris, faces
+
+
+def worm_wheel_columns(parameters):
+    g_args = (float(parameters["module"]), int(parameters["teeth"]), int(parameters["starts"]),
+              float(parameters["worm_diameter"]), float(parameters.get("pressure_angle", 20.0)),
+              float(parameters.get("backlash", 0.0)), float(parameters["thickness"]),
+              str(parameters.get("hand", "right")))
+    zs, angles, radii = _worm_wheel_grid(*g_args)
+    return [[(float(zs[k]), float(radii[k, j]), float(angles[k, j])) for k in range(len(zs))]
+            for j in range(angles.shape[1])]
+
+
+def worm_columns(parameters, length=None):
+    """Worm columns over `length` (default: its stored length); the thread phase is fixed by
+    the stored length, whose middle lies over the wheel centre."""
+    g = worm_geometry(parameters["module"], parameters["wheel_teeth"], parameters["starts"],
+                      parameters["worm_diameter"], parameters.get("pressure_angle", 20.0),
+                      parameters.get("backlash", 0.0))
+    stored = float(parameters["worm_length"])
+    return _worm_columns(g, float(length or stored), parameters.get("hand", "right"), -stored / 2.0)
+
+
+def worm_wheel_solid(parameters, frame, z0=0.0):
+    columns = worm_wheel_columns(parameters)
+    if z0:
+        columns = [[(z + z0, r, a) for z, r, a in col] for col in columns]
+    return _polar_columns_solid(frame, columns, float(parameters.get("bore_diameter", 0.0)),
+                                "worm wheel")
+
+
+def worm_solid(parameters, frame, z0=0.0, length=None):
+    columns = worm_columns(parameters, length)
+    if z0:
+        columns = [[(z + z0, r, a) for z, r, a in col] for col in columns]
+    return _polar_columns_solid(frame, columns, float(parameters.get("bore_diameter", 0.0)), "worm")
+
+
+def make_worm_wheel_sketch(name, parameters, frame=None):
+    """Bottom face outline of the worm wheel (the solid itself is lofted through slices)."""
+    columns = worm_wheel_columns(parameters)
+    outline = [(c[0][1] * math.cos(c[0][2]), c[0][1] * math.sin(c[0][2])) for c in columns]
+    g = worm_geometry(parameters["module"], parameters["teeth"], parameters["starts"],
+                      parameters["worm_diameter"], parameters.get("pressure_angle", 20.0))
+    return _polygon_sketch(name, frame, outline, _bore_circles(
+        parameters.get("bore_diameter", 0.0), g["wheel_root"] - 0.1 * g["module"], "wheel root"))
+
+
+def make_worm_sketch(name, parameters, frame=None):
+    """End face outline of the worm (its cross-section at the start of the thread)."""
+    columns = worm_columns(parameters)
+    outline = [(c[0][1] * math.cos(c[0][2]), c[0][1] * math.sin(c[0][2])) for c in columns]
+    g = worm_geometry(parameters["module"], parameters["wheel_teeth"], parameters["starts"],
+                      parameters["worm_diameter"], parameters.get("pressure_angle", 20.0))
+    return _polygon_sketch(name, frame, outline, _bore_circles(
+        parameters.get("bore_diameter", 0.0), g["worm_root"], "worm root"))
+
+
 def matching_gear_parameters(parameters, ratio, bore_diameter=0.0, profile_shift=0.0,
                              shaft_angle=90.0):
     """Parameters of the mate at mate/primary tooth ratio: a spur gear (pinion of a rack or
@@ -5404,6 +6218,17 @@ def gear_extrusion(loops, h, frame, parameters, z0=0.0):
     the cone apex (bevel), twisted (helical, herringbone, helical ring gear), sheared
     (helical rack), or a plain prism."""
     kind = parameters.get("kind", "spur")
+    if kind == "worm_wheel":
+        return worm_wheel_solid(parameters, frame, z0)
+    if kind == "worm":
+        return worm_solid(parameters, frame, z0, h)
+    if kind == "pulley":
+        return _stacked(extrude_profile(loops, h, frame, z0), frame, pulley_layers(parameters, z0, h))
+    if kind == "geneva_driver":
+        plate = float(parameters.get("plate_thickness", 3.0))
+        return _stacked(extrude_profile(loops, h, frame, z0), frame,
+                        [(z0 - plate, plate, float(parameters["plate_radius"]),
+                          float(parameters.get("bore_diameter", 0.0)))])
     if kind == "bevel":
         return bevel_gear_extrusion(loops, h, frame, parameters["module"], parameters["teeth"],
                                     parameters.get("bevel_angle", 45.0), z0,
@@ -6522,6 +7347,46 @@ def _chain_data(key, path, segs, V, N, C):
     return {"faces": key, "P": P, "closed": closed, "convex": convex > 0, "frames": frames,
             "mid": mid, "length": tot}
 
+MICRO_EDGE = 1e-3      # mm: an edge chain this short is a sliver a boolean left between two edges
+
+def weld_micro_chains(chains, tol=MICRO_EDGE):
+    """Open edge chains shorter than tol (slivers a boolean leaves where two edges meet, e.g. a
+    0.0004 mm step between a straight edge and a rounded corner) would end the tangent
+    continuation of a chamfer / fillet there and leave a notch. They are left out and the
+    chains at their far end start at their near end instead (moved by less than tol). Chains
+    that are not touched stay the same objects."""
+    micro = [c for c in chains if not c["closed"] and float(c.get("length", np.inf)) < tol]
+    if not micro:
+        return chains
+    key = lambda p: tuple(np.round(np.asarray(p, float), 7))
+    parent, points = {}, {}
+    def root(k):
+        while parent.get(k, k) != k:
+            k = parent[k]
+        return k
+    for c in micro:
+        a, b = key(c["P"][0]), key(c["P"][-1])
+        points.setdefault(a, np.asarray(c["P"][0], float))
+        points.setdefault(b, np.asarray(c["P"][-1], float))
+        ra, rb = root(a), root(b)
+        if ra != rb:
+            parent[rb] = ra
+    micro_ids = {id(c) for c in micro}
+    out = []
+    for c in chains:
+        if id(c) in micro_ids:
+            continue
+        if c["closed"]:
+            out.append(c); continue
+        P = c["P"]; moved = None
+        for index in (0, -1):
+            k = key(P[index])
+            if k in points and root(k) != k:
+                if moved is None: moved = np.array(P, float)
+                moved[index] = points[root(k)]
+        out.append(c if moved is None else dict(c, P=moved))
+    return out
+
 def chain_corners(chains):
     """Corner vertices (open chain ends): [(point, [chain indices])]."""
     out = {}
@@ -6671,6 +7536,123 @@ def _simplify_closed_chain(chain, tol=1e-8):
     P = points[keep]
     return dict(chain, P=np.vstack((P, P[0])), frames=[chain["frames"][i] for i in keep])
 
+def _segment_pairs_closest(A0, A1, B0, B1):
+    """Closest points of the segment pairs (A0[i], A1[i]) / (B0[i], B1[i]) → (pa, pb, dist)."""
+    d1 = A1 - A0; d2 = B1 - B0; w = A0 - B0
+    a = np.einsum("ij,ij->i", d1, d1); e = np.einsum("ij,ij->i", d2, d2)
+    b = np.einsum("ij,ij->i", d1, d2); c = np.einsum("ij,ij->i", d1, w)
+    f = np.einsum("ij,ij->i", d2, w)
+    safe = lambda x: np.where(np.abs(x) > 1e-18, x, 1.0)
+    denom = a*e - b*b
+    s = np.where(denom > 1e-18, np.clip((b*f - c*e)/safe(denom), 0.0, 1.0), 0.0)
+    t = np.where(e > 1e-18, (b*s + f)/safe(e), 0.0)
+    s = np.where(t < 0, np.where(a > 1e-18, np.clip(-c/safe(a), 0.0, 1.0), 0.0),
+                 np.where(t > 1, np.where(a > 1e-18, np.clip((b - c)/safe(a), 0.0, 1.0), 0.0), s))
+    t = np.clip(t, 0.0, 1.0)
+    pa = A0 + d1*s[:, None]; pb = B0 + d2*t[:, None]
+    return pa, pb, np.linalg.norm(pa - pb, axis=1)
+
+def _pivot_folds(P, T, closed, r):
+    """{section index: point} for the sections where the line T (the edge P offset into one
+    face by the fillet width) runs backwards against the edge. That happens where the edge
+    bends about as tight as the fillet radius or tighter (a small rounded corner): the swept
+    fillet would fold over itself there. Every folding section gets the point where the line
+    crosses itself (the rolling ball pivots there) - or, if its two sides do not meet, the
+    middle of the fold."""
+    m = len(P)
+    nseg = m if closed else m - 1
+    if nseg < 2:
+        return {}
+    nxt = (np.arange(nseg) + 1) % m
+    dP = P[nxt] - P[:nseg]; dT = T[nxt] - T[:nseg]
+    lengths = np.linalg.norm(dP, axis=1)
+    fold = np.einsum("ij,ij->i", dT, dP) < -1e-9*lengths**2
+    if not fold.any() or (closed and fold.all()):
+        return {}
+    # Positions along the chain. A closed chain is walked from a non-folding segment and its
+    # positions wrap around, so a corner near that start still sees both of its sides.
+    start = int(np.nonzero(~fold)[0][0]) if closed else 0
+    seg = lambda pos: (start + np.asarray(pos)) % nseg                  # segment at a position
+    sec = lambda pos: int((start + pos) % m) if closed else int(pos)    # section it starts at
+    gap_ok = lambda first, last: last - first < 4 and \
+        float(lengths[seg(np.arange(first, last))].sum()) <= 0.25*r
+    clusters = []
+    for pos in (p for p in range(nseg) if fold[seg(p)]):
+        if clusters and gap_ok(clusters[-1][1] + 1, pos):  # folds a short stretch apart: one
+            clusters[-1][1] = pos
+        else:
+            clusters.append([pos, pos])
+    if closed and len(clusters) > 1 and gap_ok(clusters[-1][1] + 1, clusters[0][0] + nseg):
+        clusters = clusters[1:-1] + [[clusters[-1][0], clusters[0][1] + nseg]]   # across the start
+    reach = 3.0*r
+    out = {}
+    for a, b in clusters:
+        X, trim = None, None
+        low = b - nseg + 1 if closed else 0        # the sides must not run into the fold itself
+        high = a + nseg - 1 if closed else nseg - 1
+        before = []; acc = 0.0
+        pos = a - 1
+        while pos >= low and acc <= reach and len(before) < 96:
+            before.append(pos); acc += float(lengths[seg(pos)]); pos -= 1
+        after = []; acc = 0.0
+        pos = b + 1
+        while pos <= high and acc <= reach and len(after) < 96:
+            after.append(pos); acc += float(lengths[seg(pos)]); pos += 1
+        if before and after:
+            I = np.repeat(before, len(after)); K = np.tile(after, len(before))
+            si, sk = seg(I), seg(K)
+            pa, pb, dist = _segment_pairs_closest(T[si], T[nxt[si]], T[sk], T[nxt[sk]])
+            best = int(np.argmin(dist))
+            if dist[best] <= 0.05*r + 1e-9:          # the two sides cross: pivot there
+                X = (pa[best] + pb[best])/2
+                trim = range(int(I[best]) + 1, int(K[best]) + 1)
+            else:                                    # sides too short: meet their extensions
+                i, k = int(seg(a - 1)), int(seg(b + 1))
+                da, db = _unit(dT[i]), _unit(dT[k])
+                A0, B0 = T[nxt[i]], T[k]
+                w = A0 - B0; bb = float(da @ db); den = 1.0 - bb*bb
+                if den > 1e-6:
+                    s = (bb*float(db @ w) - float(da @ w))/den
+                    u = (float(db @ w) - bb*float(da @ w))/den
+                    pa1, pb1 = A0 + s*da, B0 + u*db
+                    if s >= 0 and u <= 0 and np.linalg.norm(pa1 - pb1) <= 0.05*r + 1e-9 and \
+                            np.linalg.norm(pa1 - A0) <= reach and np.linalg.norm(pb1 - B0) <= reach:
+                        X = (pa1 + pb1)/2
+                        trim = range(a, b + 2)
+        if X is None:                                # at an open end or no crossing: the middle
+            trim = range(a if before else 0, b + 2 if after else nseg + 1)
+            X = np.mean([T[sec(pos)] for pos in trim], axis=0)
+        for pos in trim:
+            out[sec(pos)] = X
+    return out
+
+def _unfold_fillet_sections(P, secs, closed, r):
+    """Where an edge bends about as tight as the fillet radius or tighter (a small rounded
+    corner), the lines where the fillet meets its two faces run backwards and the swept fillet
+    folds over itself: a fan of creases and stray vertices. The rolling ball cannot follow the
+    corner there, it pivots: the folding part of such a line is pulled together into one point
+    (_pivot_folds) and the sections there are bent smoothly onto it, like _snap_section does."""
+    m = len(secs)
+    if m < 3:
+        return secs
+    P = np.asarray(P, float)[:m]
+    shifts = np.zeros((m, 2, 3))
+    for end in (0, 1):
+        T = np.array([np.asarray(s[0][0 if end == 0 else -1], float) for s in secs])
+        for j, X in _pivot_folds(P, T, closed, r).items():
+            shifts[j, end] = X - T[j]
+    if not shifts.any():
+        return secs
+    out = []
+    for j, sec in enumerate(secs):
+        if not shifts[j].any():
+            out.append(sec); continue
+        pts, d1, d2, L, b = sec
+        n = len(pts) - 1
+        out.append(([np.asarray(p, float) + (1 - i/n)*shifts[j, 0] + (i/n)*shifts[j, 1]
+                     for i, p in enumerate(pts)], d1, d2, L, b))
+    return out
+
 def edge_cutter(chain, feat, probe, filler=False, surface=None):
     """Closed tool body removing the chamfer / fillet material along one convex edge chain.
     filler: the body is added to the part instead — True for an inner (concave) chain,
@@ -6707,6 +7689,8 @@ def edge_cutter(chain, feat, probe, filler=False, surface=None):
                 secs.append((pts, d1, d2, L, b))
     if surface is not None:
         secs = [_snap_section(sec, chain["frames"][j], filler, surface) for j, sec in enumerate(secs)]
+    if feat["type"] == "fillet" and not filler:      # corners tighter than the fillet: pivot
+        secs = _unfold_fillet_sections(P, secs, closed, float(feat.get("radius", 2.0)))
     if feat["type"] == "chamfer" and not filler:
         for j in range(m if closed else m - 1):
             nxt = (j + 1) % m
@@ -7167,6 +8151,7 @@ def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
     if feat["type"] == "thread": return apply_thread_feature(mesh, feat), []
     verts, tris, faces = mesh
     if chains is None: chains = mesh_edge_chains(verts, tris, faces)
+    chains = weld_micro_chains(chains)       # a sliver edge must not end the tangent chain
     matched, refs = [], []
     for ref in feat.get("edges", []):
         c = match_edge_ref(ref, chains)
@@ -27270,6 +28255,11 @@ class MainWindow(QMainWindow):
              feature_fields, feature_width),
             (self._gear_form,
              (self.cb_gear_type, self.sp_gear_outside, self.sp_gear_teeth, self.sp_gear_rack_length,
+              self.sp_worm_starts, self.sp_worm_diameter, self.cb_worm_hand, self.sp_worm_length,
+              self.cb_pulley_profile, self.cb_sprocket_chain, self.sp_geneva_slots,
+              self.sp_geneva_distance, self.sp_geneva_pin, self.sp_geneva_plate, self.sp_ratchet_depth,
+              self.sp_ratchet_undercut, self.sp_pulley_flange_height, self.sp_pulley_flange_thickness,
+              self.sp_pulley_hub_diameter, self.sp_pulley_hub_length, self.sp_mech_clearance,
               self.sp_planet_teeth, self.sp_planet_count, self.sp_planetary_rim,
               self.sp_planetary_sun_diameter, self.sp_planetary_planet_diameter,
               self.sp_planetary_ring_diameter, self.sp_planetary_sun_bore,
@@ -28217,6 +29207,11 @@ class MainWindow(QMainWindow):
         self.cb_gear_type.addItem("Helical gear", "helical")
         self.cb_gear_type.addItem("Herringbone gear", "herringbone")
         self.cb_gear_type.addItem("Rack", "rack")
+        self.cb_gear_type.addItem("Timing pulley", "pulley")
+        self.cb_gear_type.addItem("Chain sprocket", "sprocket")
+        self.cb_gear_type.addItem("Ratchet wheel", "ratchet")
+        self.cb_gear_type.addItem("Geneva drive", "geneva")
+        self.cb_gear_type.addItem("Worm + worm wheel", "worm_wheel")
         self.cb_gear_type.setToolTip(
             "Spur, internal ring, planetary, straight bevel, helical or herringbone gear, or rack.")
         self.sp_gear_outside=QDoubleSpinBox(); self.sp_gear_outside.setRange(0.1,100000.0)
@@ -28286,6 +29281,76 @@ class MainWindow(QMainWindow):
             "Overall rack length; the teeth that fit are centred and the rest is a flat land at "
             "both ends. Changing the tooth count sets the length to whole teeth. You can also "
             "drag the arrow at the rack's end in the 3-D view")
+        # timing pulley / chain sprocket / ratchet / Geneva drive
+        def mech_spin(low, high, value, decimals=2, suffix=" mm", step=None, tip=None):
+            spin = QDoubleSpinBox(); spin.setRange(low, high); spin.setDecimals(decimals)
+            spin.setValue(value); spin.setLocale(QLocale.c()); spin.setKeyboardTracking(False)
+            if suffix: spin.setSuffix(suffix)
+            if step: spin.setSingleStep(step)
+            if tip: spin.setToolTip(tip)
+            return spin
+        self.lbl_pulley_profile=QLabel("Belt profile:")
+        self.cb_pulley_profile=QComboBox()
+        for key, profile in BELT_PROFILES.items():
+            self.cb_pulley_profile.addItem(profile["label"], key)
+        self.cb_pulley_profile.setToolTip(
+            "Belt tooth profile. Groove depth/width follow common printable-pulley data; the "
+            "outside diameter is the pitch diameter minus the belt's pitch-line offset")
+        self.chk_pulley_flanges=QCheckBox("Flanges")
+        self.chk_pulley_flanges.setChecked(True)
+        self.lbl_pulley_flange_height=QLabel("Flange height:")
+        self.sp_pulley_flange_height=mech_spin(0.2, 50.0, 1.5, step=0.25,
+            tip="How far the flanges stand above the pulley's outside diameter")
+        self.lbl_pulley_flange_thickness=QLabel("Flange thickness:")
+        self.sp_pulley_flange_thickness=mech_spin(0.2, 20.0, 1.0, step=0.1)
+        self.lbl_pulley_hub_diameter=QLabel("Hub diameter:")
+        self.sp_pulley_hub_diameter=mech_spin(0.0, 1000.0, 0.0, step=1.0,
+            tip="0 = no hub. The hub sits below the bottom flange")
+        self.lbl_pulley_hub_length=QLabel("Hub length:")
+        self.sp_pulley_hub_length=mech_spin(0.5, 200.0, 6.0, step=0.5)
+        self.lbl_sprocket_chain=QLabel("Chain:")
+        self.cb_sprocket_chain=QComboBox()
+        for key, (label, pitch, roller, width) in CHAIN_SIZES.items():
+            self.cb_sprocket_chain.addItem(f"{label} · p {pitch:g}", key)
+        self.cb_sprocket_chain.setCurrentIndex(self.cb_sprocket_chain.findData("08B"))
+        self.cb_sprocket_chain.setToolTip(
+            "Roller chain (ISO 606). Choosing a chain sets the thickness to its tooth width")
+        self.lbl_ratchet_depth=QLabel("Tooth depth:")
+        self.sp_ratchet_depth=mech_spin(0.2, 200.0, 4.0, step=0.25)
+        self.lbl_ratchet_undercut=QLabel("Locking face undercut:")
+        self.sp_ratchet_undercut=mech_spin(0.0, 20.0, 5.0, decimals=1, suffix="°", step=1.0,
+            tip="Leans the locking face into the tooth gap so the load pulls the pawl in")
+        self.lbl_geneva_slots=QLabel("Slots:")
+        self.sp_geneva_slots=QSpinBox(); self.sp_geneva_slots.setRange(3, 18)
+        self.sp_geneva_slots.setValue(4)
+        self.sp_geneva_slots.setToolTip("Slot count = index steps per wheel turn")
+        self.lbl_geneva_distance=QLabel("Center distance:")
+        self.sp_geneva_distance=mech_spin(5.0, 10000.0, 50.0, step=1.0,
+            tip="Wheel axis to driver axis")
+        self.lbl_geneva_pin=QLabel("Pin diameter:")
+        self.sp_geneva_pin=mech_spin(0.5, 200.0, 5.0, step=0.5)
+        self.lbl_geneva_plate=QLabel("Crank plate thickness:")
+        self.sp_geneva_plate=mech_spin(0.5, 100.0, 3.0, step=0.5,
+            tip="The plate below the wheel plane that carries the pin")
+        self.lbl_worm_starts=QLabel("Worm starts:")
+        self.sp_worm_starts=QSpinBox(); self.sp_worm_starts.setRange(1, 4); self.sp_worm_starts.setValue(1)
+        self.sp_worm_starts.setToolTip("Thread starts of the worm; ratio = wheel teeth / starts")
+        self.lbl_worm_diameter=QLabel("Worm pitch diameter:")
+        self.sp_worm_diameter=mech_spin(1.0, 2000.0, 20.0, step=0.5,
+            tip="Worm pitch diameter d1 (usually 8–16 × module). A smaller worm has a steeper "
+                "thread (more efficient); below about 5° lead angle the drive is usually "
+                "self-locking. Changing the module scales it")
+        self.lbl_worm_hand=QLabel("Thread hand:")
+        self.cb_worm_hand=QComboBox()
+        self.cb_worm_hand.addItem("Right-hand", "right")
+        self.cb_worm_hand.addItem("Left-hand", "left")
+        self.lbl_worm_length=QLabel("Worm length:")
+        self.sp_worm_length=mech_spin(1.0, 5000.0, 35.0, step=1.0,
+            tip="Threaded length of the worm, centred over the wheel")
+        self.lbl_mech_clearance=QLabel("Clearance:")
+        self.sp_mech_clearance=mech_spin(0.0, 2.0, 0.2, decimals=3, step=0.05,
+            tip="Pulley: extra groove width. Ratchet: pawl clearance. Geneva: pin and locking "
+                "clearance")
         self.lbl_gear_module=QLabel("Rack module:")
         self.lbl_bevel_angle=QLabel("Bevel cone angle:")
         self.sp_bevel_angle=QDoubleSpinBox(); self.sp_bevel_angle.setRange(1.0,75.0)
@@ -28375,7 +29440,8 @@ class MainWindow(QMainWindow):
             "the finished bodies keep their own transparency setting")
         for checkbox in (self.chk_planetary_fix_sun, self.chk_planetary_fix_ring,
                          self.chk_planetary_fix_carrier, self.chk_gear_round_tips,
-                         self.chk_gear_mate, self.chk_gear_transparent):
+                         self.chk_gear_mate, self.chk_gear_transparent,
+                         self.chk_pulley_flanges):
             _style_checkbox_like_explorer(checkbox)
         self.lbl_gear_ratio=QLabel("Mate ratio (mate / primary):")
         self.sp_gear_ratio=PlanetaryRatioSpinBox(); self.sp_gear_ratio.setRange(0.1,10.0)
@@ -28413,6 +29479,27 @@ class MainWindow(QMainWindow):
         gear_form.addRow(self.lbl_gear_outside, self.sp_gear_outside)
         gear_form.addRow(self.lbl_gear_teeth, self.sp_gear_teeth)
         gear_form.addRow(self.lbl_gear_rack_length, self.sp_gear_rack_length)
+        for label, field in ((self.lbl_worm_starts, self.sp_worm_starts),
+                             (self.lbl_worm_diameter, self.sp_worm_diameter),
+                             (self.lbl_worm_hand, self.cb_worm_hand),
+                             (self.lbl_worm_length, self.sp_worm_length)):
+            gear_form.addRow(label, field)
+        for label, field in ((self.lbl_pulley_profile, self.cb_pulley_profile),
+                             (self.lbl_sprocket_chain, self.cb_sprocket_chain),
+                             (self.lbl_geneva_slots, self.sp_geneva_slots),
+                             (self.lbl_geneva_distance, self.sp_geneva_distance),
+                             (self.lbl_geneva_pin, self.sp_geneva_pin),
+                             (self.lbl_geneva_plate, self.sp_geneva_plate),
+                             (self.lbl_ratchet_depth, self.sp_ratchet_depth),
+                             (self.lbl_ratchet_undercut, self.sp_ratchet_undercut)):
+            gear_form.addRow(label, field)
+        gear_form.addRow(self.chk_pulley_flanges)
+        for label, field in ((self.lbl_pulley_flange_height, self.sp_pulley_flange_height),
+                             (self.lbl_pulley_flange_thickness, self.sp_pulley_flange_thickness),
+                             (self.lbl_pulley_hub_diameter, self.sp_pulley_hub_diameter),
+                             (self.lbl_pulley_hub_length, self.sp_pulley_hub_length),
+                             (self.lbl_mech_clearance, self.sp_mech_clearance)):
+            gear_form.addRow(label, field)
         gear_form.addRow(self.lbl_planet_teeth, self.sp_planet_teeth)
         gear_form.addRow(self.lbl_planet_count, self.sp_planet_count)
         self.w_planetary_fixed=QWidget()
@@ -28605,6 +29692,19 @@ class MainWindow(QMainWindow):
         self.sp_gear_teeth.valueChanged.connect(self._rack_teeth_changed)
         self.sp_gear_module.valueChanged.connect(self._rack_module_changed)
         self.chk_gear_transparent.toggled.connect(self._gear_transparency_changed)
+        for spin in (self.sp_pulley_flange_height, self.sp_pulley_flange_thickness,
+                     self.sp_pulley_hub_diameter, self.sp_pulley_hub_length, self.sp_ratchet_depth,
+                     self.sp_ratchet_undercut, self.sp_geneva_slots, self.sp_geneva_distance,
+                     self.sp_geneva_pin, self.sp_geneva_plate, self.sp_mech_clearance):
+            spin.valueChanged.connect(self._queue_gear_preview)
+        self.chk_pulley_flanges.toggled.connect(self._mechanism_options_changed)
+        self.cb_pulley_profile.currentIndexChanged.connect(self._queue_gear_preview)
+        self.cb_sprocket_chain.currentIndexChanged.connect(self._sprocket_chain_changed)
+        for widget in (self.sp_worm_starts, self.sp_worm_diameter, self.sp_worm_length):
+            widget.valueChanged.connect(self._queue_gear_preview)
+        self.cb_worm_hand.currentIndexChanged.connect(self._queue_gear_preview)
+        self._worm_last_module = self.sp_gear_module.value()
+        self.sp_gear_module.valueChanged.connect(self._worm_module_changed)
         self.sp_gear_mate_shift.valueChanged.connect(self._gear_ratio_changed)
         self.sp_bevel_shaft.valueChanged.connect(self._gear_ratio_changed)
         self.sp_gear_ratio.valueChanged.connect(self._gear_ratio_changed)
@@ -30197,6 +31297,20 @@ class MainWindow(QMainWindow):
                 widget.blockSignals(True)
                 widget.setValue(value)
                 widget.blockSignals(False)
+        if kind != previous_kind and kind == "worm_wheel":
+            module, starts = self.sp_gear_module.value(), self.sp_worm_starts.value()
+            self._set_quietly(self.sp_worm_diameter, round(10.0 * module, 2))
+            self._set_quietly(self.sp_worm_length, round(worm_default_length(
+                module, max(12, self.sp_gear_teeth.value()), starts), 1))
+            self._set_quietly(self.sp_gear_thickness, round(worm_default_width(
+                module, 10.0 * module, starts), 1))
+            self._worm_last_module = module
+        if kind != previous_kind and kind == "pulley":
+            self._set_quietly(self.sp_gear_thickness, {"GT2_2mm": 7.0, "GT2_3mm": 10.0, "HTD_3M": 10.0,
+                "HTD_5M": 16.0, "T5": 11.0}.get(self.cb_pulley_profile.currentData(), 7.0))
+        elif kind != previous_kind and kind == "sprocket":
+            self._set_quietly(self.sp_gear_thickness, round(sprocket_geometry(
+                self.cb_sprocket_chain.currentData(), max(6, self.sp_gear_teeth.value()))["tooth_width"], 2))
         if kind == "rack" and previous_kind != "rack":
             self._set_quietly(self.sp_gear_rack_length,
                               self.sp_gear_teeth.value() * math.pi * self.sp_gear_module.value())
@@ -30281,6 +31395,7 @@ class MainWindow(QMainWindow):
         elif self._gear_preview is not None:
             self._queue_gear_preview()
         self._gear_mate_changed(self.chk_gear_mate.isChecked())
+        self._apply_mechanism_visibility()
         if self._dock_gear.isVisible():
             self._fit_dock_to_content(self._dock_gear)
 
@@ -30315,6 +31430,7 @@ class MainWindow(QMainWindow):
                                   self._gear_preview.get("matched_edit") is not None)))
         # a bevel pair's cone angles follow from its ratio and shaft angle
         self.sp_bevel_angle.setEnabled(not checked or kind != "bevel")
+        self._apply_mechanism_visibility()
         if checked:
             self._update_gear_ratio_limits()
             self._gear_ratio_changed()
@@ -30395,6 +31511,333 @@ class MainWindow(QMainWindow):
     def _rack_module_changed(self, *_):
         if self.cb_gear_type.currentData() == "rack":
             self._rack_length_changed(self.sp_gear_rack_length.value())
+
+    # ── timing pulley / chain sprocket / ratchet / Geneva drive ──────────────────────────
+    def _mechanism_widgets(self):
+        """(widgets, kinds that show them) of the mechanism-specific rows."""
+        return (
+            ((self.lbl_pulley_profile, self.cb_pulley_profile, self.chk_pulley_flanges,
+              self.lbl_pulley_hub_diameter, self.sp_pulley_hub_diameter,
+              self.lbl_pulley_hub_length, self.sp_pulley_hub_length), ("pulley",)),
+            ((self.lbl_pulley_flange_height, self.sp_pulley_flange_height,
+              self.lbl_pulley_flange_thickness, self.sp_pulley_flange_thickness), ("pulley_flanges",)),
+            ((self.lbl_sprocket_chain, self.cb_sprocket_chain), ("sprocket",)),
+            ((self.lbl_ratchet_depth, self.sp_ratchet_depth,
+              self.lbl_ratchet_undercut, self.sp_ratchet_undercut), ("ratchet",)),
+            ((self.lbl_geneva_slots, self.sp_geneva_slots, self.lbl_geneva_distance,
+              self.sp_geneva_distance, self.lbl_geneva_pin, self.sp_geneva_pin,
+              self.lbl_geneva_plate, self.sp_geneva_plate), ("geneva",)),
+            ((self.lbl_mech_clearance, self.sp_mech_clearance), ("pulley", "ratchet", "geneva")),
+            ((self.lbl_worm_starts, self.sp_worm_starts, self.lbl_worm_diameter, self.sp_worm_diameter,
+              self.lbl_worm_hand, self.cb_worm_hand, self.lbl_worm_length, self.sp_worm_length),
+             ("worm_wheel",)),
+        )
+
+    def _apply_mechanism_visibility(self):
+        """Show the rows of a pulley / sprocket / ratchet / Geneva drive and hide the gear-only
+        rows (runs after the gear visibility logic of the type and mate handlers)."""
+        kind = self.cb_gear_type.currentData()
+        mechanism = kind in MECHANISM_KINDS
+        active = {kind} | ({"pulley_flanges"} if kind == "pulley" and
+                           self.chk_pulley_flanges.isChecked() else set())
+        for widgets, kinds in self._mechanism_widgets():
+            for widget in widgets:
+                widget.setVisible(bool(active & set(kinds)))
+        def form_label(field):        # CompactFormLayout is a grid: label in column 0
+            index = self._gear_form.indexOf(field)
+            if index < 0:
+                return None
+            item = self._gear_form.itemAtPosition(self._gear_form.getItemPosition(index)[0], 0)
+            return item.widget() if item is not None else None
+        pressure_label = form_label(self.sp_gear_pressure)
+        thickness_label = form_label(self.sp_gear_thickness)
+        if thickness_label is not None:
+            thickness_label.setText({"pulley": "Belt width (toothed):", "sprocket": "Tooth width:",
+                                     "worm_wheel": "Wheel width:"}.get(kind, "Thickness:"))
+        self.chk_gear_mate.setText("Create pawl" if kind == "ratchet" else "Create matching mate")
+        self.lbl_gear_mate_bore.setText({"ratchet": "Pawl pivot bore:", "geneva": "Driver bore:",
+                                         "worm_wheel": "Worm bore:"}.get(kind, "Mate bore diameter:"))
+        self.lbl_gear_bore.setText("Wheel bore:" if kind in ("geneva", "worm_wheel") else "Bore diameter:")
+        if not mechanism:
+            # rows only this pass hides; the gear handlers manage all the others
+            for widget in (pressure_label, self.sp_gear_pressure, self.lbl_gear_teeth, self.sp_gear_teeth):
+                if widget is not None:
+                    widget.setVisible(True)
+            return
+        for widget in (self.lbl_gear_module, self.sp_gear_module, self.lbl_gear_rack_length,
+                       self.sp_gear_rack_length, self.lbl_bevel_angle, self.sp_bevel_angle,
+                       self.lbl_gear_trace, self.cb_gear_trace, self.lbl_gear_helix_angle,
+                       self.sp_gear_helix_angle, self.lbl_gear_shift, self.sp_gear_shift,
+                       self.lbl_gear_backlash, self.sp_gear_backlash, self.chk_gear_round_tips,
+                       self.lbl_gear_tooth_radius, self.sp_gear_tooth_radius, self.sp_gear_pressure,
+                       self.lbl_gear_ratio, self.sp_gear_ratio, self.lbl_gear_mate_outside,
+                       self.sp_gear_mate_outside, self.lbl_gear_mate_shift, self.sp_gear_mate_shift,
+                       self.lbl_bevel_shaft, self.sp_bevel_shaft, self.lbl_bevel_mate_x,
+                       self.sp_bevel_mate_x, self.lbl_bevel_mate_z, self.sp_bevel_mate_z,
+                       self.lbl_gear_pair_distance, self.sp_gear_pair_distance):
+            widget.setVisible(False)
+        if pressure_label is not None:
+            pressure_label.setVisible(False)
+        self.lbl_gear_outside.setVisible(kind == "ratchet")
+        self.sp_gear_outside.setVisible(kind == "ratchet")
+        self.lbl_gear_outside.setText("Outside diameter:")
+        self.lbl_gear_teeth.setVisible(kind != "geneva")
+        self.sp_gear_teeth.setVisible(kind != "geneva")
+        self.lbl_gear_teeth.setText("Wheel teeth:" if kind == "worm_wheel" else "Tooth count:")
+        self.sp_gear_teeth.setRange(*{"pulley": (8, 200), "sprocket": (6, 150),
+                                      "worm_wheel": (12, 200)}.get(kind, (6, 200)))
+        self.chk_gear_mate.setVisible(kind == "ratchet")
+        if kind == "worm_wheel":       # the worm drive keeps the gear rows it uses
+            self.lbl_gear_module.setText("Module:")
+            for widget in (self.lbl_gear_module, self.sp_gear_module, self.lbl_gear_backlash,
+                           self.sp_gear_backlash, pressure_label, self.sp_gear_pressure):
+                if widget is not None:
+                    widget.setVisible(True)
+        show_mate_bore = kind in ("geneva", "worm_wheel") or \
+                         (kind == "ratchet" and self.chk_gear_mate.isChecked())
+        self.lbl_gear_mate_bore.setVisible(show_mate_bore)
+        self.sp_gear_mate_bore.setVisible(show_mate_bore)
+        self.lbl_gear_bore.setVisible(True)
+        self.sp_gear_bore.setVisible(True)
+
+    def _mechanism_options_changed(self, *_):
+        self._apply_mechanism_visibility()
+        if self._dock_gear.isVisible():
+            self._fit_dock_to_content(self._dock_gear)
+        self._queue_gear_preview()
+
+    def _sprocket_chain_changed(self, *_):
+        """A new chain sets the thickness to its ISO 606 tooth width."""
+        if self.cb_gear_type.currentData() == "sprocket":
+            self.sp_gear_thickness.setValue(round(sprocket_geometry(
+                self.cb_sprocket_chain.currentData(), max(6, self.sp_gear_teeth.value()))["tooth_width"], 2))
+        self._queue_gear_preview()
+
+    def _mechanism_parameters(self, kind, teeth):
+        parameters = {
+            "kind": kind, "teeth": teeth, "thickness": self.sp_gear_thickness.value(),
+            "bore_diameter": self.sp_gear_bore.value(), "pressure_angle": self.sp_gear_pressure.value(),
+            "backlash": 0.0, "profile_shift": 0.0, "clearance": self.sp_mech_clearance.value(),
+        }
+        if kind == "pulley":
+            profile = self.cb_pulley_profile.currentData()
+            belt = BELT_PROFILES[profile]
+            parameters.update(
+                belt_profile=profile, flanges=self.chk_pulley_flanges.isChecked(),
+                flange_height=self.sp_pulley_flange_height.value(),
+                flange_thickness=self.sp_pulley_flange_thickness.value(),
+                hub_diameter=self.sp_pulley_hub_diameter.value(),
+                hub_length=self.sp_pulley_hub_length.value(),
+                outside_diameter=teeth * belt["pitch"] / math.pi - 2.0 * belt["offset"])
+        elif kind == "sprocket":
+            chain = self.cb_sprocket_chain.currentData()
+            parameters.update(chain=chain,
+                              outside_diameter=sprocket_geometry(chain, teeth)["outside_diameter"])
+        elif kind == "worm_wheel":
+            parameters.update(module=self.sp_gear_module.value(), starts=self.sp_worm_starts.value(),
+                              worm_diameter=self.sp_worm_diameter.value(),
+                              hand=self.cb_worm_hand.currentData(),
+                              worm_length=self.sp_worm_length.value(),
+                              backlash=self.sp_gear_backlash.value())
+            g = worm_geometry(parameters["module"], teeth, parameters["starts"],
+                              parameters["worm_diameter"], parameters["pressure_angle"],
+                              parameters["backlash"])
+            parameters["outside_diameter"] = 2.0 * g["wheel_outer"]
+        elif kind == "ratchet":
+            parameters.update(outside_diameter=self.sp_gear_outside.value(),
+                              ratchet_depth=self.sp_ratchet_depth.value(),
+                              ratchet_undercut=self.sp_ratchet_undercut.value())
+        else:
+            slots = self.sp_geneva_slots.value()
+            parameters.update(teeth=slots, slots=slots, center_distance=self.sp_geneva_distance.value(),
+                              pin_diameter=self.sp_geneva_pin.value(),
+                              plate_thickness=self.sp_geneva_plate.value())
+            parameters["outside_diameter"] = 2.0 * _geneva(parameters)["wheel_radius"]
+        return parameters
+
+    def _mechanism_companion(self, parameters):
+        """(parameters, local frame) of the pawl of a ratchet or the driver of a Geneva wheel."""
+        kind = parameters["kind"]
+        axes = (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0]))
+        common = {"teeth": parameters["teeth"], "pressure_angle": parameters["pressure_angle"],
+                  "thickness": parameters["thickness"], "clearance": parameters["clearance"],
+                  "bore_diameter": self.sp_gear_mate_bore.value(), "backlash": 0.0,
+                  "profile_shift": 0.0}
+        if kind == "worm_wheel":
+            g = worm_geometry(parameters["module"], parameters["teeth"], parameters["starts"],
+                              parameters["worm_diameter"], parameters["pressure_angle"],
+                              parameters["backlash"])
+            length = parameters["worm_length"]
+            worm = dict(common, kind="worm", label="Worm", module=parameters["module"],
+                        wheel_teeth=parameters["teeth"], starts=parameters["starts"],
+                        worm_diameter=parameters["worm_diameter"], hand=parameters["hand"],
+                        worm_length=length, thickness=length, backlash=parameters["backlash"],
+                        outside_diameter=2.0 * g["worm_tip"])
+            origin = np.array([-length / 2.0, g["center_distance"], parameters["thickness"] / 2.0])
+            return worm, (origin, axes[1], axes[2], axes[0])
+        if kind == "ratchet":
+            pawl = dict(common, kind="pawl", label="Pawl",
+                        wheel_diameter=parameters["outside_diameter"],
+                        ratchet_depth=parameters["ratchet_depth"],
+                        ratchet_undercut=parameters["ratchet_undercut"])
+            _, pivot, hub = ratchet_pawl(pawl)
+            pawl["outside_diameter"] = 2.0 * hub
+            return pawl, (np.array([pivot[0], pivot[1], 0.0]),) + axes
+        geometry = _geneva(parameters)
+        driver = dict(common, kind="geneva_driver", label="Geneva driver",
+                      slots=parameters["slots"], center_distance=parameters["center_distance"],
+                      pin_diameter=parameters["pin_diameter"],
+                      plate_thickness=parameters["plate_thickness"],
+                      plate_radius=geometry["plate_radius"],
+                      outside_diameter=2.0 * geometry["plate_radius"])
+        return driver, (np.array([parameters["center_distance"], 0.0, 0.0]),) + axes
+
+    def _update_mechanism_preview(self, preview, parameters, thickness):
+        for component in preview.get("planetary_components", []):
+            self.state["objects"][:] = [entry for entry in self.state["objects"]
+                                         if entry is not component["sketch"]
+                                         and entry is not component["entry"]]
+        preview["planetary_components"] = []
+        kind = parameters["kind"]
+        maker = {"pulley": make_pulley_sketch, "sprocket": make_sprocket_sketch,
+                 "ratchet": make_ratchet_sketch, "geneva": make_geneva_wheel_sketch,
+                 "worm_wheel": make_worm_wheel_sketch}[kind]
+        sketch = maker(preview["sketch"]["name"], parameters, frame=preview["sketch"]["sketch"].frame)
+        mesh = gear_extrusion(sketch.profile_loop_edges(), thickness, sketch.frame, parameters)
+        wants_companion = (kind in ("geneva", "worm_wheel") or
+                           (kind == "ratchet" and self.chk_gear_mate.isChecked())) \
+            and (preview["source"] is None or preview.get("matched_edit") is not None)
+        companion = companion_sketch = companion_mesh = None
+        if wants_companion:
+            companion, frame = self._mechanism_companion(parameters)
+            if preview.get("matched_edit") is not None:
+                rotation = _import_rotation_matrix(preview["gear_rotation"])
+                position = np.asarray(preview["gear_position"], float)
+                frame = (position + rotation @ frame[0], rotation @ frame[1],
+                         rotation @ frame[2], rotation @ frame[3])
+            if preview["mate"] is None:
+                mate_sketch_entry = {
+                    "type": "sketch", "name": f"{companion['label']} profile",
+                    "sketch": Sketch("XY", name=f"{companion['label']} profile"),
+                    "tree_item": None, "parent": None, "face": None,
+                    "visible": False, "opacity": 1.0, "preview": True}
+                mate_entry = {
+                    "type": "extrusion", "name": f"{companion['label']} preview",
+                    "parent": mate_sketch_entry, "height": thickness,
+                    "opacity": self._gear_preview_opacity(), "direction": "one", "cut": False,
+                    "through": False, "to_surface": False, "ring": None,
+                    "color": (0.95, 0.65, 0.25), "material": DEFAULT_MATERIAL, "visible": True,
+                    "preview": True}
+                self.state["objects"].extend((mate_sketch_entry, mate_entry))
+                preview["mate_sketch"], preview["mate"] = mate_sketch_entry, mate_entry
+            companion_maker = {"ratchet": make_pawl_sketch, "geneva": make_geneva_driver_sketch,
+                               "worm_wheel": make_worm_sketch}[kind]
+            companion_sketch = companion_maker(preview["mate_sketch"]["name"], companion, frame=frame)
+            companion_mesh = gear_extrusion(companion_sketch.profile_loop_edges(), companion["thickness"],
+                                            companion_sketch.frame, companion)
+        preview["sketch"]["sketch"] = sketch
+        preview["gear"]["height"] = thickness
+        self._set_solid(preview["gear"], mesh)
+        preview["parameters"] = parameters
+        if companion is not None:
+            preview["mate_sketch"]["sketch"] = companion_sketch
+            preview["mate"]["height"] = companion["thickness"]
+            self._set_solid(preview["mate"], companion_mesh)
+            preview["mate_parameters"] = companion
+        elif preview["mate"] is not None:
+            mate_sketch_entry, mate_entry = preview["mate_sketch"], preview["mate"]
+            self.state["objects"][:] = [entry for entry in self.state["objects"]
+                                         if entry is not mate_sketch_entry and entry is not mate_entry]
+            preview["mate_sketch"], preview["mate"], preview["mate_parameters"] = None, None, None
+        self.lbl_gear_info.setText({
+            "pulley": "Live timing pulley preview. Groove shapes follow common printable-pulley "
+                      "data; print a test piece for your belt.",
+            "sprocket": "Live sprocket preview · ISO 606 tooth form.",
+            "ratchet": "Live ratchet preview" + (" with pawl (it needs a spring to stay engaged)."
+                                                 if companion is not None else "."),
+            "geneva": "Live Geneva drive preview · the driver's crank plate lies below the wheel "
+                      "plane and carries the pin.",
+            "worm_wheel": "Live worm drive preview · the wheel is generated by the worm as a hob "
+                          "(throated rim, helical teeth).",
+        }[kind])
+        self.btn_gear_ok.setEnabled(True)
+        self.view3d.update()
+
+    def _mechanism_summary(self):
+        kind = self.cb_gear_type.currentData()
+        try:
+            parameters = self._mechanism_parameters(kind, self.sp_gear_teeth.value())
+            if kind == "pulley":
+                belt = BELT_PROFILES[parameters["belt_profile"]]
+                return (f"Pitch Ø {self.sp_gear_teeth.value() * belt['pitch'] / math.pi:.2f} mm · "
+                        f"outside Ø {parameters['outside_diameter']:.2f} mm · belt pitch {belt['pitch']:g} mm")
+            if kind == "sprocket":
+                g = sprocket_geometry(parameters["chain"], parameters["teeth"])
+                return (f"Pitch Ø {g['pitch_diameter']:.2f} mm · tip Ø {g['outside_diameter']:.2f} mm · "
+                        f"root Ø {g['root_diameter']:.2f} mm · ISO tooth width {g['tooth_width']:.2f} mm")
+            if kind == "worm_wheel":
+                g = worm_geometry(parameters["module"], parameters["teeth"], parameters["starts"],
+                                  parameters["worm_diameter"], parameters["pressure_angle"])
+                gamma = math.degrees(g["lead_angle"])
+                lock = " · usually self-locking" if gamma < 5.0 else ""
+                return (f"Ratio {parameters['teeth'] / parameters['starts']:g}:1 · centre distance "
+                        f"{g['center_distance']:.2f} mm · lead angle {gamma:.2f}°{lock}\n"
+                        f"Wheel: pitch Ø {2 * g['r2']:.2f}, throat Ø {2 * g['wheel_throat']:.2f}, "
+                        f"outside Ø {2 * g['wheel_outer']:.2f} mm · worm tip Ø {2 * g['worm_tip']:.2f}, "
+                        f"root Ø {2 * g['worm_root']:.2f} mm")
+            if kind == "ratchet":
+                outside = parameters["outside_diameter"]
+                return (f"Root Ø {outside - 2.0 * parameters['ratchet_depth']:.2f} mm · tooth pitch "
+                        f"{math.pi * outside / parameters['teeth']:.2f} mm · free turning: counter-clockwise")
+            g = _geneva(parameters)
+            n = parameters["slots"]
+            return (f"Wheel Ø {2 * g['wheel_radius']:.2f} mm · crank radius {g['crank_radius']:.2f} mm · "
+                    f"locking disc Ø {2 * g['lock_radius']:.2f} mm\n{360.0 / n:g}° per driver turn; the "
+                    f"wheel moves during {180.0 - 360.0 / n:g}° of it and rests for {180.0 + 360.0 / n:g}°")
+        except (ValueError, ArithmeticError, KeyError) as ex:
+            return str(ex)
+
+    def _load_mechanism_controls(self, parameters):
+        """Editor: put a stored pulley / sprocket / ratchet / Geneva wheel into the controls."""
+        combos = ((self.cb_pulley_profile, parameters.get("belt_profile")),
+                  (self.cb_sprocket_chain, parameters.get("chain")),
+                  (self.cb_worm_hand, parameters.get("hand")))
+        for combo, value in combos:
+            if value is not None and combo.findData(value) >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(combo.findData(value))
+                combo.blockSignals(False)
+        self.chk_pulley_flanges.blockSignals(True)
+        self.chk_pulley_flanges.setChecked(bool(parameters.get("flanges", True)))
+        self.chk_pulley_flanges.blockSignals(False)
+        for widget, key in ((self.sp_pulley_flange_height, "flange_height"),
+                            (self.sp_pulley_flange_thickness, "flange_thickness"),
+                            (self.sp_pulley_hub_diameter, "hub_diameter"),
+                            (self.sp_pulley_hub_length, "hub_length"),
+                            (self.sp_ratchet_depth, "ratchet_depth"),
+                            (self.sp_ratchet_undercut, "ratchet_undercut"),
+                            (self.sp_geneva_slots, "slots"),
+                            (self.sp_geneva_distance, "center_distance"),
+                            (self.sp_geneva_pin, "pin_diameter"),
+                            (self.sp_geneva_plate, "plate_thickness"),
+                            (self.sp_mech_clearance, "clearance"),
+                            (self.sp_worm_starts, "starts"),
+                            (self.sp_worm_diameter, "worm_diameter"),
+                            (self.sp_worm_length, "worm_length")):
+            if key in parameters:
+                self._set_quietly(widget, parameters[key])
+        self._worm_last_module = self.sp_gear_module.value()
+        self._apply_mechanism_visibility()
+
+    def _worm_module_changed(self, module):
+        """Worm drive: a new module scales the worm diameter, worm length and wheel width."""
+        previous, self._worm_last_module = self._worm_last_module, module
+        if self.cb_gear_type.currentData() != "worm_wheel" or previous <= 0 or module == previous:
+            return
+        factor = module / previous
+        for widget in (self.sp_worm_diameter, self.sp_worm_length, self.sp_gear_thickness):
+            self._set_quietly(widget, round(widget.value() * factor, 3))
+        self._queue_gear_preview()
 
     def _gear_preview_opacity(self):
         return 0.82 if self.chk_gear_transparent.isChecked() else 1.0
@@ -30589,6 +32032,10 @@ class MainWindow(QMainWindow):
         self.sp_gear_ratio.blockSignals(False)
 
     def _gear_ratio_changed(self, *_):
+        if self.cb_gear_type.currentData() in MECHANISM_KINDS:
+            if self._gear_preview is not None:
+                self._queue_gear_preview()
+            return
         if self.cb_gear_type.currentData() == "planetary":
             if self._planetary_fixed_mode() is None:
                 return
@@ -30930,6 +32377,8 @@ class MainWindow(QMainWindow):
                 "planetary_helix_angle": self.sp_gear_helix_angle.value()
                                          if self.cb_gear_trace.currentData() != "straight" else 0.0,
             }
+        if kind in MECHANISM_KINDS:
+            return self._mechanism_parameters(kind, teeth)
         is_rack = kind == "rack"
         shift = self.sp_gear_shift.value() if kind in ("spur", "helical", "herringbone", "bevel") else 0.0
         outside = self.sp_gear_outside.value()
@@ -31015,6 +32464,9 @@ class MainWindow(QMainWindow):
             return self._open_planetary_editor(entry)
         if parameters.get("gear_pair_id") and not _pair_primary:
             return self._open_matched_gear_editor(entry)
+        if parameters.get("kind") in ("pawl", "geneva_driver", "worm"):
+            self._st("This part is generated with its wheel; the wheel it belongs to no longer exists")
+            return
         self.cb_gear_type.blockSignals(True)
         self.cb_gear_type.setCurrentIndex(self.cb_gear_type.findData(parameters.get("kind", "spur")))
         self.cb_gear_type.blockSignals(False)
@@ -31048,6 +32500,8 @@ class MainWindow(QMainWindow):
             widget.setValue(value)
             widget.blockSignals(False)
         self._gear_last_shift = self.sp_gear_shift.value()
+        if kind in MECHANISM_KINDS:
+            self._load_mechanism_controls(parameters)
         self.chk_gear_round_tips.setChecked(
             bool(parameters.get("round_tips", False)))
         self.chk_gear_mate.setChecked(False)
@@ -31232,7 +32686,9 @@ class MainWindow(QMainWindow):
         if self._gear_preview is None:
             return
         teeth = self.sp_gear_teeth.value()
-        if self.cb_gear_type.currentData() == "rack":
+        if self.cb_gear_type.currentData() in MECHANISM_KINDS:
+            self.lbl_gear_derived.setText(self._mechanism_summary())
+        elif self.cb_gear_type.currentData() == "rack":
             module = self.sp_gear_module.value()
             self.lbl_gear_derived.setText(
                 f"Rack length: {max(self.sp_gear_rack_length.value(), teeth * math.pi * module):.2f} mm · toothed {teeth * math.pi * module:.2f} mm · Pitch: {math.pi * module:.2f} mm")
@@ -31378,6 +32834,9 @@ class MainWindow(QMainWindow):
             parameters = self._gear_parameters_from_controls()
             if parameters["kind"] == "planetary":
                 self._update_planetary_preview(preview, parameters, thickness)
+                return
+            if parameters["kind"] in MECHANISM_KINDS:
+                self._update_mechanism_preview(preview, parameters, thickness)
                 return
             for component in preview.get("planetary_components", []):
                 self.state["objects"][:] = [entry for entry in self.state["objects"]
@@ -31590,10 +33049,15 @@ class MainWindow(QMainWindow):
             self._confirm_planetary_gear(preview)
             return
         kind_name = {"rack": "Rack", "internal": "Ring gear", "bevel": "Bevel gear",
-                     "herringbone": "Herringbone gear"}.get(
-            parameters["kind"], "Gear")
+                     "herringbone": "Herringbone gear", "pulley": "Pulley",
+                     "sprocket": "Sprocket", "ratchet": "Ratchet wheel",
+                     "geneva": "Geneva wheel", "worm_wheel": "Worm wheel"}.get(parameters["kind"], "Gear")
+        size = f"{parameters['teeth']}-slot" if parameters["kind"] == "geneva" else \
+               f"{parameters['teeth']}T"
+        if parameters["kind"] == "pulley":
+            size = f"{BELT_PROFILES[parameters['belt_profile']]['label']} {size}"
         gear_name = preview["source"]["name"] if preview["source"] is not None else \
-                    self._unique_name(f"{kind_name} {self.sp_gear_teeth.value()}T ")
+                    self._unique_name(f"{kind_name} {size} ")
         source = preview["source"]
         matched_pair_id = self._new_gear_pair_id() if source is None and preview["mate"] is not None else None
         temporary = (sketch_entry, gear_preview, preview["mate_sketch"], preview["mate"])
@@ -31618,12 +33082,14 @@ class MainWindow(QMainWindow):
                 mate_sketch, mate_entry = preview["mate_sketch"], preview["mate"]
                 mate_parameters = preview["mate_parameters"]
                 mate_kind_name = "Pinion" if parameters["kind"] in ("rack", "internal") else "Gear"
+                label = mate_parameters.get("label")        # pawl, Geneva driver
                 mate_sketch["preview"] = False
-                mate_sketch["name"] = self._unique_name(f"Matching {mate_kind_name.lower()} profile ")
+                mate_sketch["name"] = self._unique_name(
+                    f"{label} profile " if label else f"Matching {mate_kind_name.lower()} profile ")
                 mate_sketch["sketch"].name = mate_sketch["name"]
                 mate_entry["preview"] = False
                 mate_entry["name"] = self._unique_name(
-                    f"Matching {mate_kind_name} {mate_parameters['teeth']}T ")
+                    f"{label} " if label else f"Matching {mate_kind_name} {mate_parameters['teeth']}T ")
                 mate_entry["opacity"] = 1.0
                 mate_entry["gear_parameters"] = dict(
                     mate_parameters, gear_pair_id=matched_pair_id, gear_pair_role="mate")
@@ -31682,7 +33148,7 @@ class MainWindow(QMainWindow):
                          f"{parameters['module']:g} mm")
             else:
                 self._st(f"Generated {gear_name}: outside diameter "
-                         f"{self.sp_gear_outside.value():g} mm")
+                         f"{parameters['outside_diameter']:.2f} mm")
         else:
             self._st(f"Updated {gear_name}")
 

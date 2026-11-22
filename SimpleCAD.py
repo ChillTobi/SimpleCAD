@@ -282,7 +282,10 @@ Workflow:
      general boolean is only the fallback for open meshes.
   7. Explorer context menu / Edit menu: Edit (sketch → drawing mode, extrusion → extrude
      sidebar; dependent objects are rebuilt), Rename (F2), Delete (Del, asks Yes/No and also
-     removes dependent objects).
+     removes dependent objects). On a sketch, "Copy to face / surface…": click a flat face of
+     an extrusion, a surface or a base plane; a new sketch opens there with the sketch's own
+     geometry and the constraints among it (no reference geometry), centred on the picked
+     face / surface (on a base plane at its own coordinates), ready to adjust and accept.
   8. Undo / redo (Edit menu, toolbar, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z): inside a sketch every
      sketch step; in the 3-D view every project change (sketch accepted, extrusion, delete,
      rename, visibility, colour, edits). Snapshot based (JSON of the sketch / project).
@@ -8388,7 +8391,8 @@ class View3D(QGLWidget):
                       mw.sp_gear_thickness.value() / 2.0 * frame[3])
             handle_specs = [(anchor, _unit(frame[1]), mw.sp_gear_rack_length,
                              "Rack length", " mm", 2.0)]
-        elif mw._ext_pending is not None and not mw._dock_ext.isHidden():
+        elif mw._ext_pending is not None and not mw._dock_ext.isHidden() and \
+                mw._ext_pending.get("sketch") is not None:
             sketch = mw._ext_pending["sketch"]
             loops = sketch.profile_loop_edges()
             points = np.asarray([point for loop in loops for point in _flatten_loop(loop)[0]])
@@ -28740,6 +28744,8 @@ class MainWindow(QMainWindow):
             view.update()
 
     def _set_mode(self, mode, plane=None):
+        if mode == MODE_NORMAL:            # a pending "Copy to face / surface" was cancelled
+            self._sketch_copy_data = None
         self.state["mode"]=mode
         self.view3d.set_mode(mode, plane)
         in_sk=(mode==MODE_SKETCH)
@@ -28800,6 +28806,51 @@ class MainWindow(QMainWindow):
                 self.view3d._bridge_mode:
             self._st("Finish or cancel the current sketch / extrusion / bridge first"); return True
         return False
+
+    def _copy_target_centre(self, sk):
+        """Sketch coordinates a copied sketch is centred on: the centre of the face outline of
+        a face sketch, (0, 0) = the centre of a surface, None on a base plane."""
+        parent = getattr(self, "_sketch_parent", None)
+        if not parent:
+            return None
+        if parent[0].get("type") == "surface":
+            return 0.0, 0.0
+        xs, ys = [], []
+        for segment in sk.segments:
+            if segment.reference and hasattr(segment, "reference_boundary"):
+                xs += [segment.v0.x, segment.v1.x]; ys += [segment.v0.y, segment.v1.y]
+        for circle in sk.circles:
+            if circle.reference and hasattr(circle, "reference_boundary"):
+                xs += [circle.center.x - circle.radius, circle.center.x + circle.radius]
+                ys += [circle.center.y - circle.radius, circle.center.y + circle.radius]
+        for arc in sk.arcs:
+            if arc.reference and hasattr(arc, "reference_boundary"):
+                for x, y in arc.tess():
+                    xs.append(x); ys.append(y)
+        if not xs:
+            return None
+        return (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+
+    def _copy_sketch_to(self, entry):
+        """Copy a sketch onto another face / surface / plane: its own geometry (no reference
+        geometry) and the constraints among it are taken along; then the target is picked like
+        for a new sketch, which opens with the copy at the same sketch coordinates."""
+        if self._busy(): return
+        source = entry.get("sketch")
+        if source is None:
+            return
+        data = source.extract(source.segments, source.circles, source.arcs,
+                              source.points_free, source.ellipses)
+        if data is None:
+            self._st(f"{entry['name']} has no own geometry to copy (reference geometry is not "
+                     "copied)")
+            return
+        self.state["selected"] = None
+        self._set_mode(MODE_SELPLANE)
+        self._sketch_copy_data = (data, entry["name"])     # used by _begin_sketch
+        self.view3d.setFocus()
+        self._st(f"Copy {entry['name']}: click the flat face of an extrusion, a surface or a "
+                 "plane (XY / XZ / YZ) to copy it onto | Esc / RMB: cancel")
 
     def _start_sketch(self):
         if self._busy(): return
@@ -31981,6 +32032,21 @@ class MainWindow(QMainWindow):
         for level, state in reference_levels(underlays).items():
             if level <= 0 and state["reference"]:
                 self._project_sketch_level(sk, state)
+        copy_data = getattr(self, "_sketch_copy_data", None)
+        self._sketch_copy_data = None
+        copied = None
+        if copy_data is not None:                 # "Copy to face / surface": insert the copy
+            data, source_name = copy_data
+            # centred on the picked face (its outline) or surface; on a base plane the copy
+            # keeps its coordinates
+            dx = dy = 0.0
+            target = self._copy_target_centre(sk)
+            if target is not None:
+                x0, y0, x1, y1 = Sketch.clip_bounds(data)
+                dx, dy = target[0] - (x0 + x1) / 2.0, target[1] - (y0 + y1) / 2.0
+            inserted = sk.insert(data, dx, dy)
+            copied = (sum(len(inserted[key]) for key in ("segments", "circles", "arcs", "points")),
+                      source_name, target is not None)
         self.state["active_sketch"]=sk
         self.state["sketch_view_state"]={
             "mode":DTOOL_SELECT,"draw_tool":"line","ctool":CTOOL_NONE,
@@ -32025,6 +32091,10 @@ class MainWindow(QMainWindow):
         self._st(f"Sketching on {where or sk.plane}{underlay_note} | LMB: place | "
                  f"RMB: deselect / abort action | Ctrl+Z / Ctrl+Y: undo / redo | "
                  f"Esc: clear / cancel sketch")
+        if copied is not None:
+            self._st(f"Copied {copied[0]} element(s) of {copied[1]} onto {where or sk.plane}"
+                     f"{' (centred on it)' if copied[2] else ''} — adjust them if needed, then "
+                     "accept the sketch")
 
     def _request_cancel_sketch(self):
         """Esc with nothing pending / RMB while picking a plane: cancel picking or the sketch."""
@@ -32526,6 +32596,11 @@ class MainWindow(QMainWindow):
         kids = entry_descendants(entry, objects)
         menu = QMenu(self)
         a_edit = menu.addAction("Edit…"); a_edit.setEnabled(True)
+        a_copy_to = None
+        if entry.get("type") == "sketch":
+            a_copy_to = menu.addAction("Copy to face / surface…")
+            a_copy_to.setToolTip("Copy this sketch's geometry onto a flat face of an extrusion, "
+                                 "a surface or a base plane")
         a_export = menu.addAction("Export Drawing…")
         a_export.setEnabled(entry.get("type") == "technical_drawing")
         a_ren  = menu.addAction("Rename…\tF2")
@@ -32541,6 +32616,7 @@ class MainWindow(QMainWindow):
         a_desel = menu.addAction("Deselect")
         act = menu.exec_(self.obj_tree.viewport().mapToGlobal(pos))
         if act is a_edit:     self._edit_entry_obj(entry)
+        elif act is not None and act is a_copy_to: self._copy_sketch_to(entry)
         elif act is a_export: self._export_technical_drawing(entry)
         elif act is a_ren:    self._rename_entry(entry)
         elif act is a_del:    self._delete_entry(entry)
@@ -32685,10 +32761,18 @@ class MainWindow(QMainWindow):
             self._sketch_parent = (par, entry.get("face")) if par is not None else None
             self._begin_sketch(entry["sketch"], f"editing {entry['name']}", name=entry["name"])
         elif entry["type"] == "extrusion":
+            pending = entry["parent"]
+            if pending is not None and pending.get("type") in ("extrusion", "imported"):
+                # an extrusion of faces of a body (no sketch): rebuild that face profile
+                pending = self._face_extrusion_sketch(entry)
+                if pending is None:
+                    self._st(f"{entry['name']} cannot be edited: the faces of "
+                             f"{entry['parent']['name']} it was extruded from are no longer found")
+                    return
             self._ext_edit = entry
             self._ext_backup = {k: entry.get(k) for k in
                                 ("height", "direction", "cut", "through", "to_surface", "target", "ring", "base", "solid", "faces")}
-            self._ext_pending = entry["parent"]
+            self._ext_pending = pending
             self.lbl_ext_title.setText(f"<b>Edit {entry['name']}</b>")
             self._set_ext_widgets(entry.get("height", 20.0), entry.get("direction", "one"),
                                   entry.get("cut", False), entry.get("through", False),
@@ -33721,6 +33805,66 @@ class MainWindow(QMainWindow):
         dock.show(); dock.raise_()
         self._fit_dock_to_content(dock)
 
+    def _face_extrusion_source_faces(self, entry):
+        """Indices of the parent-body faces a face extrusion was made from: the stored ones, or
+        (older projects) the planar faces of the parent that lie in the plane of one of the
+        extrusion's own planar faces and are covered by it (its start face)."""
+        parent = entry.get("parent") or {}
+        faces = parent.get("faces", [])
+        def usable(fi):
+            return isinstance(fi, int) and 0 <= fi < len(faces) and faces[fi].get("planar") \
+                and "frame" in faces[fi] and faces[fi].get("tris")
+        stored = entry.get("source_faces") or []
+        if stored and all(usable(fi) for fi in stored):
+            return list(stored)
+        base = entry.get("base")
+        if not base or not parent.get("solid"):
+            return []
+        ext_verts = np.asarray(base[0], float).reshape(-1, 3)
+        ext_tris = np.asarray(base[1], np.int64).reshape(-1, 3)
+        par_verts = np.asarray(parent["solid"][0], float).reshape(-1, 3)
+        par_tris = np.asarray(parent["solid"][1], np.int64).reshape(-1, 3)
+        found = []
+        for own in base[2]:
+            if not own.get("planar") or "frame" not in own or not own.get("tris"):
+                continue
+            origin, u, v, normal = (np.asarray(a, float) for a in own["frame"])
+            corners = ext_verts[ext_tris[np.asarray(own["tris"], np.int64)]]         # (m, 3, 3)
+            flat = np.stack([(corners - origin) @ u, (corners - origin) @ v], axis=-1)
+            for fi, face in enumerate(faces):
+                if fi in found or not usable(fi):
+                    continue
+                f_origin = np.asarray(face["frame"][0], float)
+                f_normal = np.asarray(face["frame"][3], float)
+                if abs(float(f_normal @ normal)) < 0.999 or \
+                        abs(float((f_origin - origin) @ normal)) > 1e-4:
+                    continue
+                centres = par_verts[par_tris[np.asarray(face["tris"], np.int64)]].mean(axis=1)
+                points = np.stack([(centres - origin) @ u, (centres - origin) @ v], axis=-1)
+                # a triangle centre of the parent face inside one of the extrusion's triangles
+                a, b, c = flat[:, 0][None], flat[:, 1][None], flat[:, 2][None]
+                p = points[:, None, :]
+                def side(p1, p2, q):
+                    return (p2[..., 0] - p1[..., 0]) * (q[..., 1] - p1[..., 1]) - \
+                           (p2[..., 1] - p1[..., 1]) * (q[..., 0] - p1[..., 0])
+                d1, d2, d3 = side(a, b, p), side(b, c, p), side(c, a, p)
+                inside = ((d1 >= -1e-9) & (d2 >= -1e-9) & (d3 >= -1e-9)) | \
+                         ((d1 <= 1e-9) & (d2 <= 1e-9) & (d3 <= 1e-9))
+                if inside.any():
+                    found.append(fi)
+        return found
+
+    def _face_extrusion_sketch(self, entry):
+        """The virtual sketch (as when it was created) of a face extrusion, or None."""
+        indices = self._face_extrusion_source_faces(entry)
+        if not indices:
+            return None
+        sketches = self._sketch_from_faces([(entry["parent"], fi) for fi in indices])
+        if not sketches:
+            return None
+        entry["source_faces"] = [int(fi) for _, fi in sketches[0].get("_source_faces", ())]
+        return sketches[0]
+
     def _sketch_from_faces(self, faces):
         """Create virtual sketch entries from selected planar faces for direct extrusion.
         Groups faces by coplanar planes and returns a list of sketches."""
@@ -34161,7 +34305,8 @@ class MainWindow(QMainWindow):
         the sweep direction. Optional rotation (deg, default 0) rotates
         the whole ring within the sketch plane about the profile bounding-box center.
         Returns (verts, tris, faces) or None."""
-        sk=sel["sketch"]
+        sk=sel.get("sketch")
+        if sk is None: return None           # (not a sketch: e.g. the body of a face extrusion)
         loops=sk.profile_loop_edges()
         if not loops: return None
         objs = objects if objects is not None else self.state["objects"]
@@ -35013,6 +35158,9 @@ class MainWindow(QMainWindow):
             # For surface extrusion, set parent to the source body
             if sketch.get("_surface_extrusion") and sketch.get("parent"):
                 existing["parent"] = sketch["parent"]
+                # the faces it was extruded from: editing rebuilds its profile from them
+                existing["source_faces"] = [int(fi) for entry_, fi in sketch.get("_source_faces", ())
+                                            if entry_ is sketch["parent"]]
                 if existing.get("solid") and existing.get("faces"):
                     existing["base"] = (existing["solid"][0], existing["solid"][1], existing["faces"])
             else:
@@ -36066,6 +36214,8 @@ class MainWindow(QMainWindow):
                     faces = sm.get("faces", [])
                     e["base"] = (verts, tris, faces)
                     self._set_solid(e, (verts, tris, faces))
+                    if od.get("source_faces"):
+                        e["source_faces"] = [int(fi) for fi in od["source_faces"]]
                 elif par is not None and par.get("type") in ("extrusion", "imported"):
                     # Old file: surface extrusion without mesh data, skip it
                     print(f"Warning: skipping {od['name']} - surface extrusion without saved mesh")
@@ -36174,6 +36324,8 @@ class MainWindow(QMainWindow):
                         d["surface_mesh"] = {"vertices": [list(v) for v in base[0]],
                                              "triangles": [list(t) for t in base[1]],
                                              "faces": _mesh_face_records(base[2], base[1])}
+                    if o.get("source_faces"):
+                        d["source_faces"] = [int(fi) for fi in o["source_faces"]]
             out.append(d)
             if progress is not None and object_count:
                 progress(70 * (object_index + 1) // object_count)

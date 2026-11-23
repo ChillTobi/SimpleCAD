@@ -38,7 +38,12 @@ PACKAGES = {
 }
 # optional add-ons: bundled when their file sits next to SimpleCAD.py (SimpleCAD loads them
 # with importlib, so PyInstaller has to be told about them)
-ADDONS = {"simplecad_thermal": {"scipy>=1.16": ("scipy", "Thermal add-on")}}
+ADDONS = {"simplecad_thermal": {
+    "scipy>=1.16": ("scipy", "Thermal add-on: sparse solvers"),
+    "gmsh>=4.15": ("gmsh", "Thermal add-on: tetrahedral meshing (also from STEP)"),
+    "pyamg>=5.4": ("pyamg", "Thermal add-on: multigrid preconditioner"),
+    "scikit-fem>=12.0": ("skfem", "Thermal add-on: FEM assembly"),
+}}
 for _addon, _packages in ADDONS.items():
     if (ROOT / f"{_addon}.py").exists():
         PACKAGES.update(_packages)
@@ -46,10 +51,19 @@ REQUIREMENTS = list(PACKAGES)
 # packages PyInstaller cannot trace on its own (compiled parts, imports made inside functions,
 # package data): everything of them goes into the executable
 COLLECT_ALL = ["cadquery", "OCP", "manifold3d", "ezdxf"]       # (qt_modern_style: --add-data)
-COLLECT_SUBMODULES = ["scipy"]            # scipy.sparse / spatial / ndimage are imported lazily
 # Help -> About reads the package versions from the package data: keep it in the executable
 COPY_METADATA = ["numpy", "PyOpenGL", "manifold3d", "ezdxf", "cadquery", "cadquery-ocp",
-                 "scipy", "qt-modern-style"]
+                 "qt-modern-style"]
+# what each add-on needs in the executable, used only when its file is there:
+#   hidden      imported by name (gmsh: its PyInstaller hook then adds the gmsh DLL)
+#   submodules  all submodules (scipy.sparse / spatial / ndimage are imported lazily; pyamg and
+#               skfem have compiled or lazily loaded parts)
+#   metadata    package data (pyamg reads its own version from it at import; About shows them)
+ADDON_BUNDLE = {"simplecad_thermal": {
+    "hidden": ["gmsh"],
+    "submodules": ["scipy", "pyamg", "skfem"],
+    "metadata": ["scipy", "gmsh", "pyamg", "scikit-fem"],
+}}
 
 
 def detect_platform(override: str | None) -> str:
@@ -124,12 +138,16 @@ def build_exe(os_name: str):
     for addon in ADDONS:
         if (ROOT / f"{addon}.py").exists():
             cmd += ["--hidden-import", addon]
+            bundle = ADDON_BUNDLE.get(addon, {})
+            for package in bundle.get("hidden", []):
+                cmd += ["--hidden-import", package]
+            for package in bundle.get("submodules", []):
+                cmd += ["--collect-submodules", package]
+            for package in bundle.get("metadata", []):
+                cmd += ["--copy-metadata", package]
             print(f"[exe] Bundling add-on {addon}")
     for package in COLLECT_ALL:
         cmd += ["--collect-all", package]
-    if (ROOT / "simplecad_thermal.py").exists():
-        for package in COLLECT_SUBMODULES:
-            cmd += ["--collect-submodules", package]
     for package in COPY_METADATA:
         cmd += ["--copy-metadata", package]
 

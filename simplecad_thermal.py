@@ -84,7 +84,7 @@ import ctypes
 import SimpleCAD as cad        # the running application (SimpleCAD.load_addon registers it)
 
 ADDON_TITLE = "Thermal"
-ADDON_VERSION = "2.3"          # add-on release, shown in SimpleCAD's Help → About
+ADDON_VERSION = "2.3b"          # add-on release, shown in SimpleCAD's Help → About
 THERMAL_FORMAT = "simplecad-thermal-study"
 THERMAL_EXTENSION = ".thml"
 THERMAL_DEFAULT_NAME = "Untitled"

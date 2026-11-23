@@ -365,8 +365,10 @@ Key implementation notes:
   - RMB in 3-D mode deselects; RMB in the tree opens Edit / Rename / Delete / visibility.
   - _rebuild_tree must be called after every change to state["objects"].
 
-Python 3.10, Windows. Packages: PyQt5 5.15, numpy 2.2, PyOpenGL 3.1. DXF sketch import uses ezdxf.
-STEP import/export also uses CadQuery/OCP; STL import has no extra dependency. UI styling uses qt-modern-style 2.0.1.
+Python 3.13, Windows (tested). Packages: PyQt5 5.15, numpy 2.3, PyOpenGL 3.1, manifold3d 3.5. DXF
+sketch import uses ezdxf. STEP import/export also uses CadQuery/OCP; STL import has no extra dependency.
+UI styling uses qt-modern-style 2.0.1. The Thermal add-on needs scipy. build.py lists every package;
+Help → About shows the versions actually in use.
 """
 import sys, os, json, copy, math, struct, datetime, traceback, tempfile, collections, ctypes
 import importlib, importlib.util
@@ -390,17 +392,17 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QByteArray, QBuffer, QMarginsF, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
                           QItemSelectionModel,
-                          QLocale, QEventLoop, QEvent, QObject, QtCriticalMsg, QtFatalMsg)
+                          QLocale, QEventLoop, QEvent, QObject, QtCriticalMsg, QtFatalMsg, QUrl)
 from PyQt5.QtGui import (QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath,
                          QTransform, QCursor, QPolygonF, QKeySequence, QPixmap, QIcon,
                          QPalette, QPdfWriter, QImage, QFontInfo, QPicture, QPageSize, QKeyEvent,
-                         QBrush)
+                         QBrush, QDesktopServices)
 from PyQt5.QtSvg import QSvgGenerator
 import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "2.1b"
+APP_VERSION = "2.2b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -30441,6 +30443,8 @@ class MainWindow(QMainWindow):
         tb_model_action.setIcon(standard_icon("SP_ToolBarHorizontalExtensionButton"))
         m.addAction(tb_model_action)
         m=mb.addMenu("&Help")
+        act(m, "&Documentation", self._open_documentation, icon=app_icon("documentation.png"),
+            tip="Open the SimpleCAD documentation (doc/SimpleCAD_Documentation.html)")
         act(m, "&About…", self._show_about, icon=app_icon("about.png"))
         self._refresh_recent_files_menu()
 
@@ -38720,6 +38724,56 @@ class MainWindow(QMainWindow):
                          f"<span style='color:#9aa3ad'>({html.escape(name)})</span>")
         return "<br>".join(lines) if lines else "none installed"
 
+    def _open_documentation(self):
+        """Help → Documentation: doc/SimpleCAD_Documentation.html in the default browser."""
+        path = os.path.join(_LOG_DIR, "doc", "SimpleCAD_Documentation.html")
+        if not os.path.isfile(path):
+            QMessageBox.information(self, "Documentation",
+                                    f"The documentation file was not found:\n{path}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            QMessageBox.warning(self, "Documentation", f"Could not open\n{path}")
+
+    # (import name, package name) - the libraries SimpleCAD runs on
+    LIBRARIES = (
+        ("numpy", "numpy"),
+        ("OpenGL", "PyOpenGL"),
+        ("manifold3d", "manifold3d"),
+        ("ezdxf", "ezdxf"),
+        ("cadquery", "cadquery"),
+        ("OCP", "cadquery-ocp"),
+        ("scipy", "scipy"),
+    )
+
+    @staticmethod
+    def _library_version(module_name, package):
+        """(version, loaded): the version of the imported module (`loaded`), else of the
+        installed package, else None. Heavy libraries are read from their package data and
+        not imported just for this dialog."""
+        module = sys.modules.get(module_name)
+        version = getattr(module, "__version__", None) if module is not None else None
+        if not version:
+            try:
+                import importlib.metadata as metadata
+                version = metadata.version(package)
+            except Exception:
+                version = None
+            if not version and module is not None:
+                version = "version unknown"
+        return (str(version) if version else None), module is not None
+
+    def _library_versions_html(self):
+        lines = []
+        for module_name, package in self.LIBRARIES:
+            version, _loaded = self._library_version(module_name, package)
+            if version is None:
+                text = "<span style='color:#ff6b6b'>not installed</span>" \
+                    if importlib.util.find_spec(module_name) is None else "installed"
+            else:
+                text = html.escape(version)
+            lines.append(f"<b>{html.escape(package)}:</b> {text}")
+        return "<br>".join(lines)
+
     def _show_about(self):
         gl_info = "<br>".join(html.escape(line) for line in _GL_INFO) \
             if _GL_INFO else "OpenGL context not initialized yet"
@@ -38735,6 +38789,7 @@ class MainWindow(QMainWindow):
             f"<b>Qt:</b> {html.escape(QT_VERSION_STR)} "
             f"(PyQt {html.escape(PYQT_VERSION_STR)})<br>"
             f"<b>qt-modern-style:</b> {html.escape(qt_modern_style.__version__)}</p>"
+            f"<p><b>Libraries:</b><br>{self._library_versions_html()}</p>"
             f"<p><b>Add-ons:</b><br>{self._addon_versions_html()}</p>"
             f"<p><b>OpenGL:</b><br><code>{gl_info}</code></p>"
             "<p><b>GNU license texts:</b><br>"

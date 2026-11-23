@@ -23,22 +23,33 @@ VENV = ROOT / ".venv"
 ICONS = ROOT / "icons"
 ENTRY = ROOT / "SimpleCAD.py"
 
-REQUIREMENTS = [
-    "pyinstaller",
-    "numpy",
-    "PyQt5",
-    "PyOpenGL",
-    "ezdxf",
-    "svgpathtools",
-    "qt_modern_style",
-    "manifold3d"
-]
+# pip requirement -> (import name, what it is used for). The minimum versions are the ones
+# SimpleCAD was tested with (Python 3.13); every package SimpleCAD imports must be listed.
+PACKAGES = {
+    "pyinstaller>=6.22": ("PyInstaller", "building the executable"),
+    "numpy>=2.3": ("numpy", "geometry and meshes"),
+    "PyQt5>=5.15.11": ("PyQt5", "user interface (QtWidgets, QtOpenGL, QtSvg, QtGui)"),
+    "PyOpenGL>=3.1.10": ("OpenGL", "3-D view"),
+    "manifold3d>=3.5": ("manifold3d", "solid booleans"),
+    "ezdxf>=1.4": ("ezdxf", "DXF import / export"),
+    "qt-modern-style>=2.0.1": ("qt_modern_style", "styling"),
+    "cadquery>=2.8": ("cadquery", "STEP import / export"),
+    "cadquery-ocp>=7.9": ("OCP", "STEP kernel used by cadquery"),
+}
 # optional add-ons: bundled when their file sits next to SimpleCAD.py (SimpleCAD loads them
 # with importlib, so PyInstaller has to be told about them)
-ADDONS = {"simplecad_thermal": ["scipy"]}
+ADDONS = {"simplecad_thermal": {"scipy>=1.16": ("scipy", "Thermal add-on")}}
 for _addon, _packages in ADDONS.items():
     if (ROOT / f"{_addon}.py").exists():
-        REQUIREMENTS += [p for p in _packages if p not in REQUIREMENTS]
+        PACKAGES.update(_packages)
+REQUIREMENTS = list(PACKAGES)
+# packages PyInstaller cannot trace on its own (compiled parts, imports made inside functions,
+# package data): everything of them goes into the executable
+COLLECT_ALL = ["cadquery", "OCP", "manifold3d", "ezdxf"]       # (qt_modern_style: --add-data)
+COLLECT_SUBMODULES = ["scipy"]            # scipy.sparse / spatial / ndimage are imported lazily
+# Help -> About reads the package versions from the package data: keep it in the executable
+COPY_METADATA = ["numpy", "PyOpenGL", "manifold3d", "ezdxf", "cadquery", "cadquery-ocp",
+                 "scipy", "qt-modern-style"]
 
 
 def detect_platform(override: str | None) -> str:
@@ -63,7 +74,30 @@ def create_venv(os_name: str):
     py = venv_python(os_name)
     run(str(py), "-m", "pip", "install", "--upgrade", "pip")
     run(str(py), "-m", "pip", "install", *REQUIREMENTS)
+    check_requirements(os_name)
     print("[venv] Done.")
+
+
+def check_requirements(os_name: str):
+    """Import every package in the venv and print the installed version; stop when one is
+    missing, so a build never starts with an incomplete environment."""
+    py = venv_python(os_name)
+    code = (
+        "import importlib, importlib.metadata as md, sys\n"
+        "bad = 0\n"
+        "for spec, mod, why in %r:\n"
+        "    pkg = spec.split('>')[0].split('=')[0].split('<')[0]\n"
+        "    try:\n"
+        "        importlib.import_module(mod)\n"
+        "        print(f'  ok   {pkg:<18} {md.version(pkg):<14} {why}')\n"
+        "    except Exception as ex:\n"
+        "        bad += 1; print(f'  FAIL {pkg:<18} {type(ex).__name__}: {ex}')\n"
+        "sys.exit(1 if bad else 0)\n"
+    ) % ([(spec, mod, why) for spec, (mod, why) in PACKAGES.items()],)
+    print("[venv] Checking the installed packages...")
+    result = subprocess.run([str(py), "-c", code])
+    if result.returncode:
+        sys.exit("[venv] A required package is missing or cannot be imported (see above).")
 
 
 def build_exe(os_name: str):
@@ -86,10 +120,18 @@ def build_exe(os_name: str):
         str(ENTRY),
     ]
 
+    check_requirements(os_name)       # nothing is built from an incomplete environment
     for addon in ADDONS:
         if (ROOT / f"{addon}.py").exists():
             cmd += ["--hidden-import", addon]
             print(f"[exe] Bundling add-on {addon}")
+    for package in COLLECT_ALL:
+        cmd += ["--collect-all", package]
+    if (ROOT / "simplecad_thermal.py").exists():
+        for package in COLLECT_SUBMODULES:
+            cmd += ["--collect-submodules", package]
+    for package in COPY_METADATA:
+        cmd += ["--copy-metadata", package]
 
     if qt_modern_style_path and qt_modern_style_path.exists():
         cmd += ["--add-data", f"{qt_modern_style_path}{sep}qt_modern_style"]

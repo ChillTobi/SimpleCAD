@@ -1,5 +1,7 @@
 """
-SimpleCAD Thermal — optional add-on: heat conduction (FEM) and airflow + heat (CHT).
+SimpleCAD Simulation (file simplecad_thermal.py) — optional add-on: heat conduction (FEM),
+airflow + heat (CHT) and, with simplecad_structural.py, Structural studies (linear static
+stress and natural frequencies of the parts; gmsh tetrahedra).
 
 SimpleCAD shows the "Thermal" toolbar button only while this file sits next to
 SimpleCAD.py (or is bundled into the executable). The window works like the Assembly window:
@@ -83,8 +85,8 @@ import ctypes
 
 import SimpleCAD as cad        # the running application (SimpleCAD.load_addon registers it)
 
-ADDON_TITLE = "Thermal"
-ADDON_VERSION = "2.3b"          # add-on release, shown in SimpleCAD's Help → About
+ADDON_TITLE = "Simulation"
+ADDON_VERSION = "2.4"           # add-on release, shown in SimpleCAD's Help → About
 THERMAL_FORMAT = "simplecad-thermal-study"
 THERMAL_EXTENSION = ".thml"
 THERMAL_DEFAULT_NAME = "Untitled"
@@ -149,6 +151,56 @@ MATERIAL_THERMAL = {
                        "note": "epoxy mould compound of IC packages (the die is modelled by the "
                                "package's θ values)"},
 }
+# Mechanical data for Structural studies (typical handbook values at room temperature):
+#   E        Young's modulus, GPa          nu      Poisson's ratio
+#   yield    yield strength in MPa (brittle materials: tensile strength)
+#   alpha    thermal expansion, µm/(m·K)   brittle  True: fails by fracture, no yielding
+# Laminates and wood are anisotropic; the values are in-plane / along the grain.
+MATERIAL_MECHANICAL = {
+    "Aluminium": {"E": 69.0, "nu": 0.33, "yield": 240.0, "alpha": 23.4,
+                  "mech_note": "6061-T6 / 6082-T6 (yield 240–275 MPa); soft alloys far lower"},
+    "Aluminium Black Anodized": {"E": 69.0, "nu": 0.33, "yield": 160.0, "alpha": 23.4,
+                                 "mech_note": "6063-T5 / T6 extrusion alloy"},
+    "Copper": {"E": 117.0, "nu": 0.34, "yield": 70.0, "alpha": 16.8,
+               "mech_note": "annealed; cold-worked copper 200–300 MPa"},
+    "Tin": {"E": 50.0, "nu": 0.36, "yield": 14.0, "alpha": 22.0, "mech_note": "creeps at room temperature"},
+    "Brass": {"E": 100.0, "nu": 0.34, "yield": 200.0, "alpha": 20.0, "mech_note": "CuZn37, half hard"},
+    "Bronze": {"E": 115.0, "nu": 0.34, "yield": 250.0, "alpha": 18.0, "mech_note": "CuSn8"},
+    "Steel": {"E": 210.0, "nu": 0.30, "yield": 235.0, "alpha": 12.0,
+              "mech_note": "structural steel S235; stainless 1.4301 ≈ 210 MPa, α 16 µm/m·K"},
+    "ABS": {"E": 2.2, "nu": 0.35, "yield": 40.0, "alpha": 90.0,
+            "mech_note": "moulded; 3D-printed parts are weaker, especially across the layers"},
+    "PLA": {"E": 3.5, "nu": 0.36, "yield": 55.0, "alpha": 68.0,
+            "mech_note": "moulded; 3D-printed parts are weaker, especially across the layers; creeps"},
+    "PET": {"E": 2.1, "nu": 0.38, "yield": 50.0, "alpha": 60.0,
+            "mech_note": "PET / PETG moulded; 3D-printed parts are weaker across the layers"},
+    "Micarta": {"E": 8.0, "nu": 0.30, "yield": 90.0, "alpha": 25.0, "brittle": True,
+                "mech_note": "phenolic laminate, in-plane"},
+    "G10": {"E": 18.0, "nu": 0.15, "yield": 280.0, "alpha": 12.0, "brittle": True,
+            "mech_note": "in-plane values; across the layers far weaker"},
+    "FR-4": {"E": 22.0, "nu": 0.15, "yield": 300.0, "alpha": 14.0, "brittle": True,
+             "mech_note": "in-plane values (α through the board ≈ 60 µm/m·K)"},
+    "GFK": {"E": 20.0, "nu": 0.25, "yield": 200.0, "alpha": 15.0, "brittle": True,
+            "mech_note": "glass-fibre mat laminate, in-plane"},
+    "CFK": {"E": 60.0, "nu": 0.30, "yield": 500.0, "alpha": 2.0, "brittle": True,
+            "mech_note": "quasi-isotropic lay-up, in-plane"},
+    "Wood (Oak)": {"E": 11.0, "nu": 0.30, "yield": 50.0, "alpha": 5.0, "brittle": True,
+                   "mech_note": "along the grain; across it about 1/10 of the stiffness and strength"},
+    "Wood (Pine)": {"E": 9.0, "nu": 0.30, "yield": 35.0, "alpha": 5.0, "brittle": True,
+                    "mech_note": "along the grain; across it about 1/10 of the stiffness and strength"},
+    "Wood (Beech)": {"E": 14.0, "nu": 0.30, "yield": 55.0, "alpha": 5.0, "brittle": True,
+                     "mech_note": "along the grain; across it about 1/10 of the stiffness and strength"},
+    "Wood (Birch)": {"E": 14.0, "nu": 0.30, "yield": 50.0, "alpha": 5.0, "brittle": True,
+                     "mech_note": "along the grain; across it about 1/10 of the stiffness and strength"},
+    "Wood (Walnut)": {"E": 11.0, "nu": 0.30, "yield": 45.0, "alpha": 5.0, "brittle": True,
+                      "mech_note": "along the grain; across it about 1/10 of the stiffness and strength"},
+    "Mould compound": {"E": 25.0, "nu": 0.25, "yield": 120.0, "alpha": 10.0, "brittle": True,
+                       "mech_note": "epoxy mould compound (flexural strength)"},
+}
+for _name, _data in MATERIAL_MECHANICAL.items():
+    MATERIAL_THERMAL[_name].update(_data)
+MECHANICAL_KEYS = ("E", "nu", "yield", "alpha", "brittle", "mech_note")
+
 AIR_CONDUCTIVITY = 0.026            # W/(m·K), still air at about 25 °C (air enclosed in a housing)
 AIR_DENSITY = 1.18                  # kg/m³
 AIR_HEAT_CAPACITY = 1005.0          # J/(kg·K)
@@ -224,6 +276,13 @@ def material_settings(data):
         material["k_plane"] = number("k_plane", material["k"], 1e-6)
     if data.get("max_c") not in (None, ""):
         material["max_c"] = number("max_c", 100.0, -273.0)
+    # mechanical data (Structural studies), optional: E in GPa, yield in MPa, α in µm/(m·K)
+    material["E"] = number("E", 0.0, 0.0) or None
+    material["nu"] = number("nu", 0.3, -0.99, 0.49)
+    material["yield"] = number("yield", 0.0, 0.0) or None
+    material["alpha"] = number("alpha", 0.0, -100.0, 1000.0)
+    material["brittle"] = bool(data.get("brittle", False))
+    material["mech_note"] = str(data.get("mech_note", "") or "")
     if material["k_table"]:
         material["k"] = float(table_value(material["k_table"], REFERENCE_C))
     if material["cp_table"]:
@@ -314,14 +373,30 @@ def material_summary(name, materials=None):
     parts.append(f"ε {props['emissivity']:g}")
     if props.get("max_c") is not None:
         parts.append(f"max {props['max_c']:g} °C")
+    mechanical = mechanical_text(props)
+    if mechanical:
+        parts.append(mechanical)
     if props.get("user"):
         parts.append("user material")
     return " · ".join(parts)
 
 
+def mechanical_text(props):
+    """'E 69 GPa, ν 0.33, yield 240 MPa, α 23.4 µm/m·K' or '' without elastic data."""
+    if not props or not props.get("E"):
+        return ""
+    text = f"E {props['E']:g} GPa, ν {props.get('nu', 0.3):g}"
+    if props.get("yield"):
+        text += f", {'strength' if props.get('brittle') else 'yield'} {props['yield']:g} MPa"
+    if props.get("alpha"):
+        text += f", α {props['alpha']:g} µm/m·K"
+    return text
+
+
 def material_note(name, materials=None):
-    props = material_properties(name, materials)
-    return (props or {}).get("note", "") or ""
+    props = material_properties(name, materials) or {}
+    notes = [props.get("note", "") or "", props.get("mech_note", "") or ""]
+    return "; ".join(note for note in notes if note)
 
 
 _LIBRARY_ERROR = load_material_library()
@@ -450,7 +525,21 @@ DEFAULT_SETTINGS = {
     "flow_max_cells": 250000,
     "flow_iterations": 800,
     "flow_step_iterations": 30,  # transient airflow: most iterations per time step
+    # structural (mode "structural", simplecad_structural.py)
+    "struct_analysis": "static",   # "static" (stresses) or "modal" (natural frequencies)
+    "struct_mesh_mm": 0.0,         # element size; 0 = automatic
+    "struct_max_elements": 30000,
+    "struct_order": 2,             # 2: quadratic tetrahedra (default), 1: linear
+    "struct_gravity": False,       # the parts' own weight, along -Z
+    "struct_thermal": "none",      # thermal expansion: "none", "uniform" or "conduction"
+    "struct_reference_c": 20.0,    # stress-free temperature
+    "struct_uniform_c": 70.0,      # temperature of all parts for "uniform"
+    "struct_modes": 6,             # natural frequencies to find
+    "struct_scale": 0.0,           # exaggeration of the deformed shape in the view; 0 = automatic
 }
+STRUCTURAL_ANALYSES = {"static": "Static (stress, deformation)", "modal": "Natural frequencies"}
+STRUCTURAL_THERMAL = {"none": "None", "uniform": "Uniform temperature",
+                      "conduction": "Temperatures of a Conduction run"}
 TIME_UNITS = {"s": 1.0, "min": 60.0, "h": 3600.0}
 MAX_FRAMES = 100               # transient: stored temperature fields for the time slider
 VOLUME_FRAME_BUDGET = 25_000_000   # node temperatures kept for section views (about 100 MB)
@@ -886,7 +975,23 @@ CONDITION_KINDS = {             # kind: (title, colour in the 3-D view)
     "insulated": ("Insulated", (0.8, 0.8, 0.8)),
     "coolant": ("Coolant channel", (0.1, 0.65, 1.0)),
     "bath": ("Liquid bath", (0.45, 0.45, 1.0)),
+    # Structural studies
+    "support_fixed": ("Fixed support", (1.0, 0.35, 0.3)),
+    "support_roller": ("Sliding support", (1.0, 0.62, 0.25)),
+    "support_pin": ("Pinned support", (0.9, 0.5, 1.0)),
+    "force": ("Force", (0.35, 0.95, 0.35)),
+    "pressure": ("Pressure", (0.3, 0.8, 1.0)),
+    "torque": ("Torque", (1.0, 0.9, 0.3)),
 }
+STRUCTURAL_KINDS = ("support_fixed", "support_roller", "support_pin", "force", "pressure", "torque")
+THERMAL_KINDS = tuple(kind for kind in CONDITION_KINDS if kind not in STRUCTURAL_KINDS)
+
+
+def condition_kinds(mode):
+    """The face condition kinds of a solver mode."""
+    return STRUCTURAL_KINDS if mode == "structural" else THERMAL_KINDS
+
+
 LIQUID_KINDS = ("coolant", "bath")
 LIQUID_MODELS = {"simple": "Correlations (fast)", "flow": "Liquid flow solved (Airflow mode)"}
 BATH_MODES = {"container": "Fills the container", "fixed": "Large volume, fixed temperature"}
@@ -908,6 +1013,18 @@ CONDITION_HINTS = {
                   "cooled side (h ≈ 20–100 W/m²K). Radiation stays as set for the environment.",
     "insulated": "No heat crosses these faces (no convection, no radiation), e.g. a face against "
                  "insulation or a mounting surface that hardly conducts.",
+    "support_fixed": "The faces cannot move at all: clamped, welded or bolted firmly to something "
+                     "rigid.",
+    "support_roller": "The faces cannot move along their normal but slide freely along the surface: "
+                      "resting on a smooth flat support, or a symmetry plane.",
+    "support_pin": "Pick the round face of a hole or a shaft: it may turn about its axis but not move "
+                   "sideways, like a part on a pin, bolt or in a bearing.",
+    "force": "A total force spread evenly over the faces, e.g. a weight hanging on them or a pull. "
+             "X, Y and Z are world directions (gravity points along −Z).",
+    "pressure": "Pushes on the faces along their normals (negative values pull). 1 bar = 0.1 MPa; "
+                "MPa = N/mm².",
+    "torque": "Turns the faces about their axis: a round face about its own axis, a flat face about "
+              "its normal through its centre (right-hand rule).",
 }
 
 
@@ -923,7 +1040,10 @@ def condition_new(kind, name):
             "pump_max_lpm": 4.0, "pump_max_kpa": 20.0, "pump_curve": [],
             "inlet_c": 25.0, "inlet_from": "", "reverse": False,
             "bath_mode": "container", "fill_auto": True, "fill_z": 0.0,   # bath
-            "bath_c": 25.0, "bath_start_auto": True, "evaporation": True}
+            "bath_c": 25.0, "bath_start_auto": True, "evaporation": True,
+            # structural: force (N, world axes), pressure (MPa), torque (N·m), pinned support
+            "fx": 0.0, "fy": 0.0, "fz": -100.0, "pressure_mpa": 0.1, "torque_nm": 1.0,
+            "torque_reverse": False, "pin_axial_free": False}
 
 
 def condition_settings(data):
@@ -934,7 +1054,8 @@ def condition_settings(data):
     condition = condition_new(kind, str(data.get("name", CONDITION_KINDS[kind][0])))
     condition["enabled"] = bool(data.get("enabled", True))
     for key in ("temperature_c", "power_w", "flux_w_m2", "h", "fluid_c", "flow_lpm",
-                "pump_max_lpm", "pump_max_kpa", "inlet_c", "fill_z", "bath_c"):
+                "pump_max_lpm", "pump_max_kpa", "inlet_c", "fill_z", "bath_c",
+                "fx", "fy", "fz", "pressure_mpa", "torque_nm"):
         if key in data:
             condition[key] = float(data[key])
     for key in ("flow_lpm", "pump_max_lpm", "pump_max_kpa"):
@@ -947,7 +1068,7 @@ def condition_settings(data):
     condition["inlet_from"] = str(data.get("inlet_from") or "")
     condition["bath_mode"] = "fixed" if data.get("bath_mode") == "fixed" else "container"
     for key, default in (("reverse", False), ("fill_auto", True), ("bath_start_auto", True),
-                         ("evaporation", True)):
+                         ("evaporation", True), ("torque_reverse", False), ("pin_axial_free", False)):
         condition[key] = bool(data.get(key, default))
     condition["flux_mode"] = "density" if data.get("flux_mode") == "density" else "total"
     condition["profile"] = profile_settings(data.get("profile"))
@@ -1108,14 +1229,15 @@ def study_contacts(study, jobs):
     return out
 
 
-def study_conditions(study, jobs):
+def study_conditions(study, jobs, kinds=None):
     """Face conditions for the solver: [{..condition values.., "targets": {job index: [face
-    indices]}}] for the enabled conditions, in order (later ones win on shared faces)."""
+    indices]}}] for the enabled conditions (of `kinds`), in order (later ones win on shared
+    faces)."""
     job_of = {job["key"]: index for index, job in enumerate(jobs)}
     component_index = {c["name"]: i for i, c in enumerate(study["components"])}
     out = []
     for condition in study.get("conditions", []):
-        if not condition.get("enabled", True):
+        if not condition.get("enabled", True) or (kinds is not None and condition["kind"] not in kinds):
             continue
         targets = collections.defaultdict(list)
         for ref in condition["faces"]:
@@ -1397,8 +1519,17 @@ def study_settings(data):
     if settings["convection"] not in ("natural", "forced", "fixed"):
         settings["convection"] = "natural"
     settings["air_speed"] = max(0.0, settings["air_speed"])
-    if settings["mode"] not in ("conduction", "airflow"):
+    if settings["mode"] not in ("conduction", "airflow", "structural"):
         settings["mode"] = "conduction"
+    if settings["struct_analysis"] not in STRUCTURAL_ANALYSES:
+        settings["struct_analysis"] = "static"
+    if settings["struct_thermal"] not in STRUCTURAL_THERMAL:
+        settings["struct_thermal"] = "none"
+    settings["struct_order"] = 1 if settings["struct_order"] == 1 else 2
+    settings["struct_mesh_mm"] = max(0.0, settings["struct_mesh_mm"])
+    settings["struct_max_elements"] = min(2_000_000, max(1000, settings["struct_max_elements"]))
+    settings["struct_modes"] = min(30, max(1, settings["struct_modes"]))
+    settings["struct_scale"] = max(0.0, settings["struct_scale"])
     settings["flow_sides"] = {side: kind if kind in SIDE_KINDS else "open"
                               for side, kind in settings["flow_sides"].items()}
     if settings["turbulence"] not in ("auto", "laminar", "mixing"):
@@ -8362,10 +8493,15 @@ def study_inputs(study):
     """(jobs, settings, conditions, contacts, flow items, notes) for a run of the study."""
     jobs = study_jobs(study)
     settings = copy.deepcopy(study["settings"])
-    conditions = study_conditions(study, jobs)
+    structural = settings["mode"] == "structural"
+    # a structural run gets the thermal conditions too (for the temperatures of a Conduction run)
+    conditions = study_conditions(study, jobs, None if structural else THERMAL_KINDS)
     contacts = study_contacts(study, jobs)
     flow_items = study_flow_items(study)
     notes = []
+    if structural:
+        flow_items = []
+        jobs = [job for job in jobs if not job.get("zone")]       # heat zones are no parts
     if flow_items and settings["mode"] != "airflow":
         notes.append("Fans and vents act in the Airflow + heat solver only; Conduction leaves "
                      "them out.")
@@ -8376,11 +8512,91 @@ def study_inputs(study):
 def solve_study(study, progress=None, cancelled=None):
     """Solve a study with the solver chosen in its settings."""
     jobs, settings, conditions, contacts, flow_items, notes = study_inputs(study)
-    if settings["mode"] == "airflow":
+    if settings["mode"] == "structural":
+        result = solve_structural_run(jobs, settings, progress, cancelled, conditions, contacts)
+    elif settings["mode"] == "airflow":
         result = solve_airflow(jobs, settings, progress, cancelled, conditions, contacts, flow_items)
     else:
         result = solve_thermal(jobs, settings, progress, cancelled, conditions, contacts)
     result["messages"] = notes + result["messages"]
+    return result
+
+
+_STRUCTURAL_MISSING = []
+
+
+def structural_missing_text():
+    """' ⚠ Needs …' when a package of Structural studies is missing, else ''."""
+    if not _STRUCTURAL_MISSING:
+        try:
+            import simplecad_structural as structural
+            _STRUCTURAL_MISSING.append(structural.missing_packages())
+        except Exception as ex:
+            _STRUCTURAL_MISSING.append([f"simplecad_structural.py ({ex})"])
+    missing = _STRUCTURAL_MISSING[0]
+    return "" if not missing else (" ⚠ Needs the Python package " + ", ".join(missing) +
+                                   " (pip install " + " ".join(m for m in missing if " " not in m) + ").")
+
+
+def structural_auto_size(study):
+    """Automatic element size (mm) of a Structural study, or None."""
+    jobs = [job for job in study_jobs(study) if not job.get("zone")]
+    if not jobs:
+        return None
+    try:
+        import simplecad_structural as structural
+        return structural.auto_element_size(jobs, study["settings"])[0]
+    except Exception:
+        return None
+
+
+def structural_estimate_text(study):
+    settings = study["settings"]
+    jobs = [job for job in study_jobs(study) if not job.get("zone")]
+    if not jobs:
+        return "No visible bodies yet."
+    size = settings["struct_mesh_mm"] or structural_auto_size(study) or 0.0
+    if size <= 0:
+        return ""
+    volume = sum(abs(_mesh_volume(job["V"], job["T"])) for job in jobs)
+    count = int(1.6 * volume * 6.0 * math.sqrt(2.0) / size ** 3 / 0.75)
+    missing = [job["name"] for job in jobs if not (job.get("props") or {}).get("E")]
+    text = (f"≈ {count:,} elements of {size:g} mm".replace(",", " ") +
+            (" (automatic)" if settings["struct_mesh_mm"] <= 0 else "") +
+            "; round faces get finer elements.")
+    if missing:
+        text += " ⚠ No mechanical data: " + ", ".join(missing[:3]) + ("…" if len(missing) > 3 else "")
+    return text
+
+
+def solve_structural_run(jobs, settings, progress=None, cancelled=None, conditions=(), contacts=()):
+    """A Structural study (simplecad_structural): stresses or natural frequencies; with thermal
+    expansion from a Conduction run, that steady run comes first and gives the temperatures."""
+    import simplecad_structural as structural
+    loads = [c for c in conditions if c["kind"] in STRUCTURAL_KINDS]
+    temperatures, notes, thermal = None, [], None
+    report = progress or (lambda _p, _t: None)
+    if settings["struct_analysis"] == "static" and settings["struct_thermal"] == "conduction":
+        heat_settings = dict(settings, mode="conduction", analysis="steady")
+        heat_conditions = [c for c in conditions if c["kind"] in THERMAL_KINDS]
+        thermal = solve_thermal(jobs, heat_settings, lambda p, t: report(int(0.4 * p),
+                                                                         "Temperatures: " + t),
+                                cancelled, heat_conditions, contacts)
+        frame = len(thermal["frame_times"]) - 1
+
+        def temperatures(points):
+            index, weights = result_point_weights(thermal, points)
+            return result_volume_values(thermal, frame, index, weights)
+        notes.append(f"Temperatures from a steady Conduction run of this study: "
+                     f"{thermal['t_min']:.1f} … {thermal['t_max']:.1f} °C "
+                     f"({thermal['power']:.3g} W of heat sources).")
+        stage = lambda p, t: report(40 + int(0.6 * p), t)
+    else:
+        stage = report
+    result = structural.solve_structural(jobs, settings, stage, cancelled, loads, temperatures)
+    result["messages"] = notes + result["messages"]
+    if thermal is not None:
+        result["thermal_range"] = (thermal["t_min"], thermal["t_max"])
     return result
 
 
@@ -8406,6 +8622,9 @@ def run_sweep(study, sweep, progress=None, cancelled=None):
     values = list(sweep["values"])
     if not values:
         raise ThermalError("The sweep has no values.")
+    if study["settings"]["mode"] == "structural":
+        raise ThermalError("Parameter sweeps work for Thermal studies so far (Conduction or "
+                           "Airflow solver).")
     runs = []
     budget = VOLUME_FRAME_BUDGET / max(len(values), 1)
     for number, value in enumerate(values):
@@ -8606,10 +8825,12 @@ def vtu_geometry(result):
     return points, connectivity, body, "cell"
 
 
-def write_vtu(path, points, connectivity, point_data=(), cell_data=(), comment=""):
-    """One VTK XML unstructured grid of hexahedra. point_data / cell_data: [(name, array (n,)
-    or (n, 3))]. Binary appended data, little endian, 64-bit block headers."""
+def write_vtu(path, points, connectivity, point_data=(), cell_data=(), comment="", cell_type=12):
+    """One VTK XML unstructured grid of hexahedra (or another `cell_type`: 10 linear, 24
+    quadratic tetrahedra). point_data / cell_data: [(name, array (n,) or (n, k))]. Binary
+    appended data, little endian, 64-bit block headers."""
     n_points, n_cells = len(points), len(connectivity)
+    per_cell = int(np.asarray(connectivity).shape[1]) if n_cells else 8
     index_type = np.int32 if n_points < 2 ** 31 - 1 and n_cells * 8 < 2 ** 31 - 1 else np.int64
     blocks, offset = [], 0
 
@@ -8642,8 +8863,9 @@ def write_vtu(path, points, connectivity, point_data=(), cell_data=(), comment="
     cell_section = section("CellData", list(cell_data))
     points_xml = array_xml("Points", np.asarray(points, np.float64).ravel(), 3)
     conn_xml = array_xml("connectivity", np.asarray(connectivity, index_type).ravel())
-    offsets_xml = array_xml("offsets", np.arange(8, 8 * n_cells + 1, 8, dtype=index_type))
-    types_xml = array_xml("types", np.full(n_cells, 12, np.uint8))       # VTK_HEXAHEDRON
+    offsets_xml = array_xml("offsets", np.arange(per_cell, per_cell * n_cells + 1, per_cell,
+                                                 dtype=index_type))
+    types_xml = array_xml("types", np.full(n_cells, cell_type, np.uint8))     # 12 = VTK_HEXAHEDRON
     comment = comment.replace("--", "- -")
     header = (
         '<?xml version="1.0"?>\n'
@@ -8740,6 +8962,37 @@ def temperature_colors(values, low, high):
     colors = np.array([stop[1] for stop in _COLOR_STOPS])
     return np.stack([np.interp(t, positions, colors[:, channel]) for channel in range(3)],
                     axis=1).astype(np.float32)
+
+
+STRUCT_FIELDS = {"vm": ("von Mises stress", "σv  [MPa]", " MPa"),
+                 "disp": ("Displacement", "|u|  [mm]", " mm"),
+                 "safety": ("Safety factor", "Safety", "")}
+
+
+def structural_values(result, item, field, mode=0):
+    """Values of a result surface item for the colours: von Mises MPa, displacement mm (a mode
+    shape: relative), or the safety factor (yield / von Mises; inf without stress)."""
+    disp = item["modes"][mode] if result["analysis"] == "modal" else item["disp"]
+    if field == "disp" or result["analysis"] == "modal":
+        return np.linalg.norm(disp, axis=1)
+    if field == "safety":
+        strength = item.get("yield")
+        if not strength:
+            return np.full(len(item["vm"]), np.inf)
+        return strength / np.maximum(item["vm"], 1e-12)
+    return item["vm"]
+
+
+def structural_point(result, point, mode=0):
+    """(von Mises MPa, displacement vector mm) at the result node nearest to a world point."""
+    tree = result.get("_node_tree")
+    volume = result["volume"]
+    if tree is None:
+        from scipy.spatial import cKDTree
+        tree = result["_node_tree"] = cKDTree(volume["points"])
+    _d, index = tree.query(np.asarray(point, float).reshape(3))
+    disp = volume["modes"][mode][index] if result["analysis"] == "modal" else volume["disp"][index]
+    return float(volume["vm"][index]), np.asarray(disp, float)
 
 
 class TemperatureLegend(QWidget):
@@ -9428,7 +9681,10 @@ class ThermalWorker(QThread):
 
     def run(self):
         try:
-            if self._settings.get("mode") == "airflow":
+            if self._settings.get("mode") == "structural":
+                result = solve_structural_run(self._jobs, self._settings, self._progress,
+                                              lambda: self._cancel, self._conditions, self._contacts)
+            elif self._settings.get("mode") == "airflow":
                 result = solve_airflow(self._jobs, self._settings, self._progress,
                                        lambda: self._cancel, self._conditions, self._contacts,
                                        self._flow_items)
@@ -10258,6 +10514,28 @@ class MaterialsDialog(QDialog):
         form.addRow("Max. service:", limit)
         self.ed_note = QLineEdit()
         form.addRow("Note:", self.ed_note)
+        self.chk_mech = QCheckBox("Mechanical data (Structural studies)")
+        form.addRow("", self.chk_mech)
+        self.sp_E = _spin(1e-4, 2000.0, " GPa", 1.0, decimals=4, width=170)
+        self.sp_E.setToolTip("Young's modulus")
+        form.addRow("E:", self.sp_E)
+        self.sp_nu = _spin(-0.99, 0.49, "", 0.01, decimals=3, width=170)
+        self.sp_nu.setToolTip("Poisson's ratio (metals ≈ 0.3, plastics ≈ 0.35–0.4)")
+        form.addRow("ν:", self.sp_nu)
+        self.sp_yield = _spin(0.0, 10000.0, " MPa", 5.0, decimals=1, width=170)
+        self.sp_yield.setToolTip("Yield strength (brittle materials: tensile strength); 0 = unknown, "
+                                 "no safety factor")
+        self.chk_brittle = QCheckBox("Brittle (strength, no yielding)")
+        strength = QWidget()
+        strength_layout = QHBoxLayout(strength)
+        strength_layout.setContentsMargins(0, 0, 0, 0)
+        strength_layout.addWidget(self.sp_yield)
+        strength_layout.addWidget(self.chk_brittle)
+        strength_layout.addStretch(1)
+        form.addRow("Yield:", strength)
+        self.sp_alpha = _spin(-100.0, 1000.0, " µm/m·K", 0.5, decimals=2, width=170)
+        self.sp_alpha.setToolTip("Thermal expansion coefficient")
+        form.addRow("α:", self.sp_alpha)
         right.addLayout(form)
         tables = QHBoxLayout()
         self.tbl_k = PropertyTable("k(T), optional", "k  [W/m·K]")
@@ -10278,9 +10556,9 @@ class MaterialsDialog(QDialog):
         self.btn_duplicate.clicked.connect(self._duplicate)
         self.btn_delete.clicked.connect(self._delete)
         for widget in (self.sp_k, self.sp_k_plane, self.sp_cp, self.sp_density, self.sp_emissivity,
-                       self.sp_max):
+                       self.sp_max, self.sp_E, self.sp_nu, self.sp_yield, self.sp_alpha):
             widget.valueChanged.connect(self._edited)
-        for widget in (self.chk_plane, self.chk_max):
+        for widget in (self.chk_plane, self.chk_max, self.chk_mech, self.chk_brittle):
             widget.toggled.connect(self._edited)
         self.ed_name.editingFinished.connect(self._rename)
         self.ed_note.textEdited.connect(self._edited)
@@ -10349,10 +10627,16 @@ class MaterialsDialog(QDialog):
             self.ed_note.setText(data.get("note", "") or "")
             self.tbl_k.set_points(data.get("k_table", []))
             self.tbl_cp.set_points(data.get("cp_table", []))
+            self.chk_mech.setChecked(bool(data.get("E")))
+            self.sp_E.setValue(data.get("E") or 1.0)
+            self.sp_nu.setValue(data.get("nu") if data.get("nu") is not None else 0.3)
+            self.sp_yield.setValue(data.get("yield") or 0.0)
+            self.chk_brittle.setChecked(bool(data.get("brittle")))
+            self.sp_alpha.setValue(data.get("alpha") or 0.0)
             read_only = kind == "builtin"
             for widget in (self.ed_name, self.sp_k, self.chk_plane, self.sp_k_plane, self.sp_cp,
                            self.sp_density, self.sp_emissivity, self.chk_max, self.sp_max,
-                           self.ed_note):
+                           self.ed_note, self.chk_mech):
                 widget.setEnabled(not read_only)
             self.tbl_k.set_read_only(read_only)
             self.tbl_cp.set_read_only(read_only)
@@ -10367,6 +10651,8 @@ class MaterialsDialog(QDialog):
             return
         self.sp_k_plane.setEnabled(kind == "user" and self.chk_plane.isChecked())
         self.sp_max.setEnabled(kind == "user" and self.chk_max.isChecked())
+        for widget in (self.sp_E, self.sp_nu, self.sp_yield, self.chk_brittle, self.sp_alpha):
+            widget.setEnabled(kind == "user" and self.chk_mech.isChecked())
         has_k_table = bool(self.tbl_k.points())
         has_cp_table = bool(self.tbl_cp.points())
         self.sp_k.setEnabled(kind == "user" and not has_k_table)
@@ -10398,7 +10684,11 @@ class MaterialsDialog(QDialog):
             "emissivity": self.sp_emissivity.value(),
             "max_c": self.sp_max.value() if self.chk_max.isChecked() else None,
             "note": self.ed_note.text(), "k_table": self.tbl_k.points(),
-            "cp_table": self.tbl_cp.points()})
+            "cp_table": self.tbl_cp.points(),
+            "E": self.sp_E.value() if self.chk_mech.isChecked() else None,
+            "nu": self.sp_nu.value(), "yield": self.sp_yield.value() or None,
+            "alpha": self.sp_alpha.value(), "brittle": self.chk_brittle.isChecked(),
+            "mech_note": (self._user.get(self._current[1], {}) if self._current else {}).get("mech_note", "")})
 
     def _edited(self, *_args):
         if self._loading or self._current is None or self._current[0] != "user":
@@ -10468,7 +10758,8 @@ class MaterialsDialog(QDialog):
         source = material_properties(name, {}) if kind == "builtin" else self._user[name]
         new = self._unique(f"{name} (copy)")
         data = {key: source.get(key) for key in ("k", "k_plane", "cp", "density", "emissivity",
-                                                 "max_c", "note", "k_table", "cp_table")}
+                                                 "max_c", "note", "k_table", "cp_table") +
+                MECHANICAL_KEYS}
         self._user[new] = material_settings(data)
         self._touched.add(new)
         self._fill_list(new)
@@ -11430,8 +11721,8 @@ class ThermalDialog(QDialog):
         self.act_heat.setMenu(self.heat_menu)
         self.condition_menu = QMenu("&Face Condition", self)
         self.condition_menu.setIcon(_icon("heat_convection.png"))
-        for kind, (title, _color) in CONDITION_KINDS.items():
-            self.condition_menu.addAction(f"{title}…", lambda k=kind: self._add_condition(k))
+        self.condition_menu.aboutToShow.connect(self._fill_condition_menu)
+        self._fill_condition_menu()
         self.act_condition = action(
             "heat_convection.png", "Face Condition",
             "Face Condition — fixed temperature, heat flux, own convection, insulation, a coolant "
@@ -11839,6 +12130,25 @@ class ThermalDialog(QDialog):
         self._condition_rows["bath"] += [self.chk_fill_auto, self.sp_fill_z, self._cap_fill_z,
                                          self.sp_bath_c, self._cap_bath_c, self.chk_bath_start_auto,
                                          self.chk_evaporation]
+        # structural: force, pressure, torque, pinned support
+        self.sp_force = [_spin(-1e9, 1e9, " N", 10.0, decimals=3) for _axis in range(3)]
+        self._condition_rows["force"] = []
+        for spin, axis in zip(self.sp_force, "XYZ"):
+            spin.setToolTip(f"Force along the world {axis} axis, spread over the faces")
+            self._condition_rows["force"] += [spin, put_row(spin, f"Force {axis}:")]
+        self.lbl_force = value_label()
+        self._condition_rows["force"] += [self.lbl_force, put_row(self.lbl_force, "Total:")]
+        self.sp_pressure = _spin(-1e5, 1e5, " MPa", 0.01, decimals=4)
+        self.sp_pressure.setToolTip("Positive pushes on the faces, negative pulls; 1 bar = 0.1 MPa")
+        self._condition_rows["pressure"] = [self.sp_pressure, put_row(self.sp_pressure, "Pressure:")]
+        self.sp_torque = _spin(-1e7, 1e7, " N·m", 0.1, decimals=3)
+        self.chk_torque_reverse = QCheckBox("Turn the other way round")
+        self._condition_rows["torque"] = [self.sp_torque, put_row(self.sp_torque, "Torque:")]
+        put_row(self.chk_torque_reverse, span=True)
+        self._condition_rows["torque"].append(self.chk_torque_reverse)
+        self.chk_pin_axial = QCheckBox("May also slide along its axis")
+        put_row(self.chk_pin_axial, span=True)
+        self._condition_rows["support_pin"] = [self.chk_pin_axial]
         self.lbl_condition_hint = _hint("")
         self.lbl_condition_hint.setFixedWidth(span_width)
         put_row(self.lbl_condition_hint, span=True)
@@ -11855,11 +12165,9 @@ class ThermalDialog(QDialog):
         self.btn_clear_faces.setFixedWidth(value_width)
         self.btn_clear_faces.clicked.connect(self._clear_condition_faces)
         put_row(self.btn_clear_faces, "")
-        pick_hint = _hint("Click faces to add them; click a chosen face again to remove it. "
-                          "Esc or the button ends picking. Faces without a condition exchange heat "
-                          "with the environment (Simulation panel).")
-        pick_hint.setFixedWidth(span_width)
-        put_row(pick_hint, span=True)
+        self.lbl_pick_hint = _hint("")
+        self.lbl_pick_hint.setFixedWidth(span_width)
+        put_row(self.lbl_pick_hint, span=True)
         finish()
         self.chk_condition_enabled.toggled.connect(self._on_condition_edited)
         self.cb_flux_mode.currentIndexChanged.connect(self._on_condition_edited)
@@ -11867,8 +12175,10 @@ class ThermalDialog(QDialog):
         for spin in (self.sp_condition_temperature, self.sp_condition_power, self.sp_condition_flux,
                      self.sp_condition_h, self.sp_condition_fluid, self.sp_flow_lpm,
                      self.sp_pump_max_lpm, self.sp_pump_max_kpa, self.sp_inlet_c, self.sp_fill_z,
-                     self.sp_bath_c):
+                     self.sp_bath_c, self.sp_pressure, self.sp_torque, *self.sp_force):
             spin.valueChanged.connect(self._on_condition_edited)
+        for check in (self.chk_torque_reverse, self.chk_pin_axial):
+            check.toggled.connect(self._on_condition_edited)
         for box in (self.cb_liquid_fluid, self.cb_bath_mode, self.cb_liquid_model, self.cb_flow_mode,
                     self.cb_inlet_from):
             box.currentIndexChanged.connect(self._on_condition_edited)
@@ -12087,10 +12397,12 @@ class ThermalDialog(QDialog):
         self.cb_mode = QComboBox()
         self.cb_mode.addItem("Conduction (FEM)", "conduction")
         self.cb_mode.addItem("Airflow + heat (CHT)", "airflow")
+        self.cb_mode.addItem("Structural (stress, frequencies)", "structural")
         self.cb_mode.setToolTip(
             "Conduction (FEM): heat conduction in the bodies; air cooling and radiation act on "
             "their surfaces (fast).\nAirflow + heat (CHT): the air around and inside the parts is "
-            "simulated as well, with buoyancy, fans and vents (minutes).")
+            "simulated as well, with buoyancy, fans and vents (minutes).\nStructural: stresses and "
+            "deformation under supports and loads, or the natural frequencies of the parts.")
         put(self.cb_mode, "Solver:")
         self.lbl_mode_hint = _hint("")
         put(self.lbl_mode_hint, span=True)
@@ -12100,7 +12412,7 @@ class ThermalDialog(QDialog):
         self.cb_analysis.setToolTip(
             "Steady state: the final temperatures after a long time.\n"
             "Transient: how the temperatures develop after the heat sources are switched on.")
-        put(self.cb_analysis, "Analysis:")
+        self._thermal_analysis_rows = [self.cb_analysis, put(self.cb_analysis, "Analysis:")]
         self._conduction_rows = []
         self.sp_duration = _spin(0.001, 1000000.0, "", 1.0, decimals=3, width=110)
         self.sp_duration.setToolTip("Simulated time after switching the heat sources on")
@@ -12130,10 +12442,75 @@ class ThermalDialog(QDialog):
         rows += [self.chk_initial_ambient, self.sp_initial, put(self.sp_initial, "Start at:")]
         put(self.lbl_time_constant, span=True)
         self._transient_rows = rows + [self.lbl_time_constant]   # shown for Transient only
-        put(_header("Environment"), span=True)
+        # structural studies
+        self._structural_rows = []
+        self.cb_struct_analysis = QComboBox()
+        for key, title in STRUCTURAL_ANALYSES.items():
+            self.cb_struct_analysis.addItem(title, key)
+        self.cb_struct_analysis.setToolTip(
+            "Static: stresses, deformation and safety factor under the supports and loads.\n"
+            "Natural frequencies: the lowest frequencies and mode shapes at which the parts "
+            "vibrate (loads are not needed).")
+        self._structural_rows += [self.cb_struct_analysis, put(self.cb_struct_analysis, "Analysis:")]
+        self.sp_struct_modes = QSpinBox()
+        self.sp_struct_modes.setRange(1, 30)
+        self.sp_struct_modes.setKeyboardTracking(False)
+        self.sp_struct_modes.setMinimumWidth(110)
+        self.sp_struct_modes.setToolTip("How many of the lowest natural frequencies to find")
+        self._struct_modal_rows = [self.sp_struct_modes, put(self.sp_struct_modes, "Frequencies:")]
+        self.chk_struct_gravity = QCheckBox("Gravity (the parts' own weight, along −Z)")
+        put(self.chk_struct_gravity, span=True)
+        self.cb_struct_thermal = QComboBox()
+        for key, title in STRUCTURAL_THERMAL.items():
+            self.cb_struct_thermal.addItem(title, key)
+        self.cb_struct_thermal.setToolTip(
+            "Thermal expansion: none; all parts at one temperature; or the temperatures of a "
+            "steady Conduction run of this study (its heat sources and thermal face conditions, "
+            "run first).")
+        self._struct_static_rows = [self.chk_struct_gravity, self.cb_struct_thermal,
+                                    put(self.cb_struct_thermal, "Thermal expansion:")]
+        self.sp_struct_uniform = _spin(-273.0, 3000.0, " °C", 5.0, decimals=1)
+        self._struct_uniform_rows = [self.sp_struct_uniform, put(self.sp_struct_uniform, "Parts at:")]
+        self.sp_struct_reference = _spin(-273.0, 3000.0, " °C", 1.0, decimals=1)
+        self.sp_struct_reference.setToolTip("Temperature at which the parts are free of thermal stress "
+                                            "(usually the assembly temperature)")
+        self._struct_thermal_rows = [self.sp_struct_reference,
+                                     put(self.sp_struct_reference, "Stress-free at:")]
+        self.chk_struct_auto = QCheckBox("Automatic element size")
+        put(self.chk_struct_auto, span=True)
+        self.sp_struct_size = _spin(0.01, 1000.0, " mm", 0.1, decimals=3)
+        self.sp_struct_size.setToolTip("Edge length of the tetrahedra; round faces get finer "
+                                       "elements automatically")
+        self.sp_struct_max = QSpinBox()
+        self.sp_struct_max.setRange(1000, 2000000)
+        self.sp_struct_max.setSingleStep(10000)
+        self.sp_struct_max.setKeyboardTracking(False)
+        self.sp_struct_max.setMinimumWidth(130)
+        self.sp_struct_max.setToolTip("Element budget of the automatic size (the run stops above "
+                                      "twice this number)")
+        self.cb_struct_order = QComboBox()
+        self.cb_struct_order.addItem("Quadratic (recommended)", 2)
+        self.cb_struct_order.addItem("Linear (fast, too stiff in bending)", 1)
+        self.lbl_struct_estimate = _hint("")
+        self._structural_rows += [_header("Mesh (tetrahedra)")]
+        put(self._structural_rows[-1], span=True)
+        self._structural_rows += [self.chk_struct_auto, self.sp_struct_size,
+                                  put(self.sp_struct_size, "Element size:"), self.sp_struct_max,
+                                  put(self.sp_struct_max, "Max elements:"), self.cb_struct_order,
+                                  put(self.cb_struct_order, "Elements:"), self.lbl_struct_estimate]
+        put(self.lbl_struct_estimate, span=True)
+        for widget in (self.cb_struct_analysis, self.cb_struct_thermal, self.cb_struct_order):
+            widget.currentIndexChanged.connect(self._on_settings_edited)
+        for widget in (self.sp_struct_modes, self.sp_struct_uniform, self.sp_struct_reference,
+                       self.sp_struct_size, self.sp_struct_max):
+            widget.valueChanged.connect(self._on_settings_edited)
+        for widget in (self.chk_struct_gravity, self.chk_struct_auto):
+            widget.toggled.connect(self._on_settings_edited)
+        self._environment_rows = [_header("Environment")]
+        put(self._environment_rows[0], span=True)
         self.sp_ambient = _spin(-100.0, 500.0, " °C", 1.0, decimals=1)
         self.sp_ambient.setToolTip("Temperature of the surrounding air and surfaces")
-        put(self.sp_ambient, "Ambient:")
+        self._environment_rows += [self.sp_ambient, put(self.sp_ambient, "Ambient:")]
         self.cb_convection = QComboBox()
         self.cb_convection.addItem("Natural convection (auto h)", "natural")
         self.cb_convection.addItem("Forced air (air speed)", "forced")
@@ -12154,6 +12531,7 @@ class ThermalDialog(QDialog):
         put(self.chk_radiation, span=True)
         self.lbl_environment_hint = _hint("")
         put(self.lbl_environment_hint, span=True)
+        self._environment_rows += [self.chk_radiation, self.lbl_environment_hint]
 
         # airflow domain (Airflow + heat only)
         self._airflow_rows = [_header("Air domain")]
@@ -12281,7 +12659,10 @@ class ThermalDialog(QDialog):
                                 self.sp_wall_temperature, self.cb_turbulence,
                                 self.chk_auto_flow_cell, self.sp_flow_cell, self.sp_flow_max_cells,
                                 self.sp_flow_iterations, self.sp_flow_step_iterations,
-                                *self.cb_sides.values())
+                                *self.cb_sides.values(), self.cb_struct_analysis,
+                                self.sp_struct_modes, self.chk_struct_gravity, self.cb_struct_thermal,
+                                self.sp_struct_uniform, self.sp_struct_reference, self.chk_struct_auto,
+                                self.sp_struct_size, self.sp_struct_max, self.cb_struct_order)
 
         results = QWidget()
         results_layout = QVBoxLayout(results)
@@ -12324,6 +12705,45 @@ class ThermalDialog(QDialog):
         self.plot.timeClicked.connect(self._on_plot_clicked)
         results_layout.addWidget(self.lbl_plot)
         results_layout.addWidget(self.plot)
+        self.w_struct_view = QWidget()
+        struct_grid = QGridLayout(self.w_struct_view)
+        struct_grid.setContentsMargins(0, 0, 0, 0)
+        self.cb_struct_field = QComboBox()
+        self.cb_struct_field.setToolTip("What the colours show")
+        self.cb_struct_mode = QComboBox()
+        self.cb_struct_mode.setToolTip("The natural frequency whose mode shape is shown")
+        self.lbl_struct_mode = QLabel("Frequency:")
+        self.chk_struct_deformed = QCheckBox("Deformed ×")
+        self.chk_struct_deformed.setChecked(True)
+        self.chk_struct_deformed.setToolTip("Show the deformed shape, exaggerated by this factor")
+        self.sp_struct_scale = _spin(0.0, 1e12, "", 1.0, decimals=2, width=110)
+        self.chk_struct_scale_auto = QCheckBox("auto")
+        self.chk_struct_scale_auto.setChecked(True)
+        self.btn_struct_animate = QPushButton("Animate")
+        self.btn_struct_animate.setCheckable(True)
+        self.btn_struct_animate.setToolTip("Move between the undeformed and the deformed shape (a "
+                                           "mode shape swings both ways)")
+        struct_grid.addWidget(QLabel("Shows:"), 0, 0)
+        struct_grid.addWidget(self.cb_struct_field, 0, 1, 1, 3)
+        struct_grid.addWidget(self.lbl_struct_mode, 1, 0)
+        struct_grid.addWidget(self.cb_struct_mode, 1, 1, 1, 3)
+        struct_grid.addWidget(self.chk_struct_deformed, 2, 0)
+        struct_grid.addWidget(self.sp_struct_scale, 2, 1)
+        struct_grid.addWidget(self.chk_struct_scale_auto, 2, 2)
+        struct_grid.addWidget(self.btn_struct_animate, 2, 3)
+        struct_grid.setColumnStretch(4, 1)
+        self.cb_struct_field.currentIndexChanged.connect(self._on_struct_view_edited)
+        self.cb_struct_mode.currentIndexChanged.connect(self._on_struct_view_edited)
+        self.chk_struct_deformed.toggled.connect(self._on_struct_view_edited)
+        self.chk_struct_scale_auto.toggled.connect(self._on_struct_view_edited)
+        self.sp_struct_scale.valueChanged.connect(self._on_struct_view_edited)
+        self.btn_struct_animate.toggled.connect(self._on_struct_animate)
+        self._struct_timer = QTimer(self)
+        self._struct_timer.setInterval(40)
+        self._struct_timer.timeout.connect(self._struct_animation_step)
+        self._struct_phase = 1.0
+        self.w_struct_view.hide()
+        results_layout.addWidget(self.w_struct_view)
         range_row = QHBoxLayout()
         self.chk_auto_range = QCheckBox("Auto colour range")
         self.chk_auto_range.setChecked(True)
@@ -12518,7 +12938,7 @@ class ThermalDialog(QDialog):
         entry = self._bound_entry()             # its entry in the Objects explorer, else the file
         name = entry["name"] if entry is not None else \
             os.path.basename(path) if path else THERMAL_DEFAULT_NAME
-        self.setWindowTitle(f"Thermal — {name}" + (" *" if self.has_unsaved_changes() else ""))
+        self.setWindowTitle(f"Simulation — {name}" + (" *" if self.has_unsaved_changes() else ""))
 
     def has_unsaved_changes(self):
         return state_key(study_state(self.study)) != state_key(self._window._thermal_saved)
@@ -12901,6 +13321,11 @@ class ThermalDialog(QDialog):
                     item.setCheckState(0, Qt.Checked if condition.get("enabled", True) else Qt.Unchecked)
                     item.setData(0, Qt.UserRole + 2, f"condition:{index}")
                     item.setForeground(0, QColor.fromRgbF(*CONDITION_KINDS[condition["kind"]][1]))
+                    if condition["kind"] not in condition_kinds(self.study["settings"]["mode"]):
+                        item.setForeground(0, QColor("#6b7380"))       # for the other study type
+                        item.setToolTip(0, self._condition_text(condition) + "\n(used in " + (
+                            "Structural" if condition["kind"] in STRUCTURAL_KINDS else "Thermal") +
+                            " studies only)")
                     group.addChild(item)
                     if index == self._selected_condition:
                         selected_item = item
@@ -12958,7 +13383,14 @@ class ThermalDialog(QDialog):
                      f"{c['bath_c']:g} °C" if c["bath_mode"] == "fixed" else
                      "fills to the faces" if c["fill_auto"] else f"fill to Z {c['fill_z']:g} mm") +
                  (", flow solved" if c["liquid_model"] == "flow" and c["bath_mode"] != "fixed" else ""),
-                 "insulated": lambda c: ""}[kind](condition)
+                 "insulated": lambda c: "",
+                 "support_fixed": lambda c: "",
+                 "support_roller": lambda c: "",
+                 "support_pin": lambda c: "slides along the axis" if c["pin_axial_free"] else "",
+                 "force": lambda c: f"({c['fx']:g}, {c['fy']:g}, {c['fz']:g}) N",
+                 "pressure": lambda c: f"{c['pressure_mpa']:g} MPa",
+                 "torque": lambda c: f"{c['torque_nm']:g} N·m" + (", reversed" if c["torque_reverse"]
+                                                                  else "")}[kind](condition)
         count = len(condition["faces"])
         return (f"{condition['name']}   [{CONDITION_KINDS[kind][0]}" + (f", {value}" if value else "")
                 + f"]   {count} face{'s' if count != 1 else ''}" + ("" if count else "  ⚠"))
@@ -13853,6 +14285,10 @@ class ThermalDialog(QDialog):
                     color = np.asarray(body["color"][:3], float) * 0.62 + 0.08
                     caps.append((entry, vertices, triangles, color))
                     continue
+                if result.get("mode") == "structural":
+                    caps.append(self._structural_cap(entry, key, vertices, triangles, result, low_high,
+                                                      (ci, bi)))
+                    continue
                 weights = entry.get("_cap_weights")
                 if weights is None or weights[0] != (key, id(result)):
                     fine, fine_tris = refine_triangles(vertices, triangles, result["cell_mm"])
@@ -13967,6 +14403,15 @@ class ThermalDialog(QDialog):
                                  for points, values in lines]
 
     # ── face conditions ───────────────────────────────────────────────────────
+    def _fill_condition_menu(self):
+        """The Face Condition menu lists the kinds of the current solver (Thermal or Structural)."""
+        self.condition_menu.clear()
+        mode = self.study["settings"]["mode"] if getattr(self, "study", None) else "conduction"
+        for kind in condition_kinds(mode):
+            if mode == "structural" and kind == "force":
+                self.condition_menu.addSeparator()
+            self.condition_menu.addAction(f"{CONDITION_KINDS[kind][0]}…", lambda k=kind: self._add_condition(k))
+
     def _condition(self):
         index = self._selected_condition
         if index is None or not 0 <= index < len(self.study["conditions"]):
@@ -14029,7 +14474,25 @@ class ThermalDialog(QDialog):
                 self.thermostat_condition.set_thermostat(
                     condition.get("thermostat"), [p["name"] for p in self.study["probes"]],
                     owner="heated bodies")
+            for spin, key in zip(self.sp_force, ("fx", "fy", "fz")):
+                spin.setValue(condition[key])
+            force = math.sqrt(condition["fx"] ** 2 + condition["fy"] ** 2 + condition["fz"] ** 2)
+            self.lbl_force.setText(f"{force:.4g} N")
+            self.sp_pressure.setValue(condition["pressure_mpa"])
+            self.sp_torque.setValue(condition["torque_nm"])
+            self.chk_torque_reverse.setChecked(condition["torque_reverse"])
+            self.chk_pin_axial.setChecked(condition["pin_axial_free"])
             self.lbl_condition_hint.setText(CONDITION_HINTS[kind])
+            mode = self.study["settings"]["mode"]
+            other = (kind in STRUCTURAL_KINDS) != (mode == "structural")
+            self.lbl_pick_hint.setText(
+                ("⚠ This condition belongs to a " + ("Structural" if kind in STRUCTURAL_KINDS else "Thermal") +
+                 " study: the current solver leaves it out.\n" if other else "") +
+                "Click faces to add them; click a chosen face again to remove it. Esc or the button "
+                "ends picking. " + ("Faces without a condition are free (no support, no load)."
+                                    if kind in STRUCTURAL_KINDS else
+                                    "Faces without a condition exchange heat with the environment "
+                                    "(Simulation panel)."))
             faces = condition["faces"]
             parts = {ref["component"] for ref in faces}
             area = 0.0
@@ -14065,6 +14528,13 @@ class ThermalDialog(QDialog):
         if condition["kind"] == "flux":
             condition["profile"] = self.profile_condition.profile()
             condition["thermostat"] = self.thermostat_condition.thermostat()
+        if condition["kind"] in STRUCTURAL_KINDS:
+            for spin, key in zip(self.sp_force, ("fx", "fy", "fz")):
+                condition[key] = float(spin.value())
+            condition["pressure_mpa"] = float(self.sp_pressure.value())
+            condition["torque_nm"] = float(self.sp_torque.value())
+            condition["torque_reverse"] = self.chk_torque_reverse.isChecked()
+            condition["pin_axial_free"] = self.chk_pin_axial.isChecked()
         if condition["kind"] in LIQUID_KINDS:
             condition["fluid"] = self.cb_liquid_fluid.currentData()
             condition["liquid_model"] = self.cb_liquid_model.currentData()
@@ -14251,6 +14721,460 @@ class ThermalDialog(QDialog):
                          (f"on {component['name']}" if component is not None else "in the air") +
                          " — click for more, Esc ends")
 
+    # ── structural results ────────────────────────────────────────────────────
+    def _thermal_result_layout(self):
+        """Results table, colour range and controls of a Thermal result."""
+        self.w_struct_view.hide()
+        self._struct_timer.stop()
+        self.tbl_results.setHorizontalHeaderLabels(["Body", "Material", "W", "Min °C", "Mean °C",
+                                                    "Max °C"])
+        self.tbl_probes.setHorizontalHeaderLabels(["Probe", "On part", "°C"])
+        for spin in (self.sp_range_low, self.sp_range_high):
+            spin.blockSignals(True)
+            spin.setRange(-273.0, 5000.0)
+            spin.setSuffix(" °C")
+            spin.blockSignals(False)
+
+    def _show_structural_result(self):
+        result = self._result
+        modal = result["analysis"] == "modal"
+        self._frame = 0
+        self._struct_phase = 1.0
+        for widget in (self.cb_struct_field, self.cb_struct_mode):
+            widget.blockSignals(True)
+        try:
+            field = self.cb_struct_field.currentData()
+            self.cb_struct_field.clear()
+            if modal:
+                self.cb_struct_field.addItem("Mode shape (relative displacement)", "disp")
+            else:
+                for key, (title, _legend, _unit) in STRUCT_FIELDS.items():
+                    self.cb_struct_field.addItem(title, key)
+                self.cb_struct_field.setCurrentIndex(max(0, self.cb_struct_field.findData(field)))
+            self.cb_struct_mode.clear()
+            for k, frequency in enumerate(result["frequencies"] if modal else []):
+                self.cb_struct_mode.addItem(f"{k + 1}:  {frequency:.4g} Hz")
+        finally:
+            for widget in (self.cb_struct_field, self.cb_struct_mode):
+                widget.blockSignals(False)
+        self.cb_struct_mode.setVisible(modal)
+        self.lbl_struct_mode.setVisible(modal)
+        self.w_struct_view.show()
+        self.tbl_results.blockSignals(True)
+        self.tbl_results.setHorizontalHeaderLabels(["Body", "Material", "kg", "Max |u| mm",
+                                                    "Max σv MPa", "Safety"])
+        self.tbl_probes.setHorizontalHeaderLabels(["Probe", "On part", "|u|" if modal else "σv MPa"])
+        self.tbl_results.setRowCount(len(result["bodies"]))
+        for row, body in enumerate(result["bodies"]):
+            safety = body["safety"]
+            texts = [body["name"], body["material"] or "", f"{body['mass_kg']:.4g}",
+                     "" if modal else f"{body['disp_max']:.4g}", "" if modal else f"{body['vm_max']:.4g}",
+                     "" if modal or safety is None else f"{safety:.3g}"]
+            for column, text in enumerate(texts):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, body["key"])
+                if column >= 2:
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.tbl_results.setItem(row, column, item)
+            if safety is not None and not modal:
+                colour = "#ff6b6b" if safety < 1.0 else "#ffb454" if safety < 1.5 else "#e2e5e9"
+                self.tbl_results.item(row, 5).setForeground(QColor(colour))
+                self.tbl_results.item(row, 5).setToolTip(
+                    f"{'Strength' if body['brittle'] else 'Yield strength'} {body['yield']:g} MPa / "
+                    f"max von Mises {body['vm_max']:.4g} MPa")
+        self.tbl_results.blockSignals(False)
+        self.w_playback.hide()
+        self.lbl_plot.hide()
+        self.plot.hide()
+        notes = self.txt_messages.toPlainText().strip()
+        self.txt_messages.setPlainText("\n".join(result["summary"] + [""] + result["messages"] +
+                                                 ([notes] if notes else [])))
+        self.act_streamlines.setEnabled(False)
+        for spin in (self.sp_range_low, self.sp_range_high):
+            spin.blockSignals(True)
+            spin.setRange(-1e12, 1e12)
+            spin.blockSignals(False)
+        self._show_structural_frame()
+        self.act_results.setEnabled(True)
+        self.act_results.setChecked(True)
+        self._on_results_toggled(True)
+        self._sync_section_ui()
+
+    def _structural_scale(self):
+        """Exaggeration of the deformed shape: automatic = the largest displacement shows as
+        about 8 % of the model size (never less than the true shape)."""
+        result = self._result
+        if not self.chk_struct_deformed.isChecked():
+            return 0.0
+        if self.chk_struct_scale_auto.isChecked():
+            points = result["volume"]["points"]
+            size = float(np.ptp(points, axis=0).max()) if len(points) else 1.0
+            largest = 1.0 if result["analysis"] == "modal" else result["disp_max"]
+            scale = _nice(max(1.0, 0.08 * size / max(largest, 1e-30))) if largest > 0 else 1.0
+            if result["analysis"] == "modal":
+                scale = 0.08 * size
+            self.sp_struct_scale.blockSignals(True)
+            self.sp_struct_scale.setValue(scale)
+            self.sp_struct_scale.blockSignals(False)
+            self.sp_struct_scale.setEnabled(False)
+            return scale
+        self.sp_struct_scale.setEnabled(True)
+        return float(self.sp_struct_scale.value())
+
+    def _structural_range(self):
+        result = self._result
+        field = self.cb_struct_field.currentData() or "vm"
+        if result["analysis"] == "modal":
+            field = "disp"
+        mode = max(0, self.cb_struct_mode.currentIndex())
+        suffix = STRUCT_FIELDS[field][2]
+        for spin in (self.sp_range_low, self.sp_range_high):
+            if spin.suffix() != suffix:
+                spin.blockSignals(True)
+                spin.setSuffix(suffix)
+                spin.blockSignals(False)
+        if self.chk_auto_range.isChecked():
+            values = [structural_values(result, item, field, mode) for item in result["surface"].values()]
+            values = np.concatenate(values) if values else np.zeros(1)
+            finite = values[np.isfinite(values)]
+            if field == "safety":
+                low, high = 0.0, float(min(5.0, max(2.0, np.max(finite) if len(finite) else 5.0)))
+            else:
+                low, high = 0.0, float(finite.max()) if len(finite) else 1.0
+            if high - low < 1e-12:
+                high = low + 1.0
+            for spin, value in ((self.sp_range_low, low), (self.sp_range_high, high)):
+                spin.blockSignals(True); spin.setValue(value); spin.blockSignals(False)
+        else:
+            low, high = self.sp_range_low.value(), self.sp_range_high.value()
+            if high <= low:
+                high = low + 1e-6
+        self.sp_range_low.setEnabled(not self.chk_auto_range.isChecked())
+        self.sp_range_high.setEnabled(not self.chk_auto_range.isChecked())
+        return low, high
+
+    def _structural_colors(self, values, low, high, field):
+        if field == "safety":               # small safety factors red
+            return temperature_colors(-np.minimum(values, high), -high, -low)
+        return temperature_colors(values, low, high)
+
+    def _apply_structural_colors(self):
+        result = self._result
+        low, high = self._color_range()
+        modal = result["analysis"] == "modal"
+        field = "disp" if modal else (self.cb_struct_field.currentData() or "vm")
+        mode = max(0, self.cb_struct_mode.currentIndex())
+        scale = self._structural_scale() * self._struct_phase
+        strength = {body["key"]: body["yield"] for body in result["bodies"]}
+        for ci, component in enumerate(self.study["components"]):
+            for bi, body in enumerate(component["bodies"]):
+                entry = body.get("_render")
+                if entry is None:
+                    continue
+                item = result["surface"].get((ci, bi))
+                if item is None:
+                    self.view.set_entry_colors(entry, None)
+                    continue
+                item["yield"] = strength.get((ci, bi))
+                disp = item["modes"][mode] if modal else item["disp"]
+                values = structural_values(result, item, field, mode)
+                vertices = item["vertices"] + scale * disp if scale else item["vertices"]
+                self.view.set_entry_colors(entry, self._structural_colors(values, low, high, field),
+                                           (vertices, item["triangles"]))
+        title = "|u|  (relative)" if modal else STRUCT_FIELDS[field][1]
+        if field == "safety":
+            self.legend.set_range(high, low, "", title)
+        else:
+            self.legend.set_range(low, high, "", title)
+        self.view.update()
+
+    def _structural_cap(self, entry, key, vertices, triangles, result, low_high, body_key):
+        """A section cap of a structural result: values and displacement of the nearest node."""
+        cached = entry.get("_cap_weights")
+        if cached is None or cached[0] != (key, id(result)):
+            fine, fine_tris = refine_triangles(vertices, triangles, max(result["element_size"] / 2.0, 1e-3))
+            tree = result.get("_node_tree")
+            if tree is None:
+                from scipy.spatial import cKDTree
+                tree = result["_node_tree"] = cKDTree(result["volume"]["points"])
+            _d, nearest = tree.query(fine)
+            cached = ((key, id(result)), fine, fine_tris, nearest)
+            entry["_cap_weights"] = cached
+        _k, fine, fine_tris, nearest = cached
+        volume = result["volume"]
+        modal = result["analysis"] == "modal"
+        mode = max(0, self.cb_struct_mode.currentIndex())
+        field = "disp" if modal else (self.cb_struct_field.currentData() or "vm")
+        disp = (volume["modes"][mode] if modal else volume["disp"])[nearest]
+        if field == "disp":
+            values = np.linalg.norm(disp, axis=1)
+        else:
+            values = volume["vm"][nearest]
+            if field == "safety":
+                owner = next((b for b in result["bodies"] if tuple(b["key"]) == tuple(body_key)), None)
+                strength = owner["yield"] if owner else None
+                values = strength / np.maximum(values, 1e-12) if strength else np.full(len(values), np.inf)
+        scale = self._structural_scale() * self._struct_phase
+        return (entry, fine + scale * disp if scale else fine, fine_tris,
+                self._structural_colors(values, *low_high, field))
+
+    def _show_structural_frame(self):
+        result = self._result
+        modal = result["analysis"] == "modal"
+        self._apply_result_colors()
+        if modal:
+            self.view.hot_marker = None
+            frequencies = result["frequencies"]
+            mode = max(0, self.cb_struct_mode.currentIndex())
+            text = (f"Natural frequency {mode + 1}: <b>{frequencies[mode]:.4g} Hz</b>" if len(frequencies)
+                    else "No natural frequency found")
+            if len(frequencies) > 1:
+                text += "<br>All: " + ", ".join(f"{f:.4g}" for f in frequencies) + " Hz"
+        else:
+            hot = max(result["bodies"], key=lambda b: b["vm_max"])
+            self.view.hot_marker = (np.asarray(hot["vm_point"], float), f"max {hot['vm_max']:.4g} MPa")
+            text = (f"Max von Mises <b>{hot['vm_max']:.4g} MPa</b> in {hot['name']} · max "
+                    f"displacement {result['disp_max']:.4g} mm")
+            safety = [b["safety"] for b in result["bodies"] if b["safety"] is not None]
+            if safety:
+                lowest = min(safety)
+                colour = "#ff6b6b" if lowest < 1.0 else "#ffb454" if lowest < 1.5 else "#9be29b"
+                text += f" · safety factor <span style='color:{colour}'><b>{lowest:.3g}</b></span>"
+            lines = [f"{entry['name']}: {np.linalg.norm(entry['force']):.4g} N"
+                     for entry in result["reactions"][:4]]
+            if lines:
+                text += "<br>Reactions: " + " · ".join(lines)
+            text += f"<br>Force balance {result['balance_error']:.1e}"
+        if self._result_note:
+            text = f"<span style='color:#80c8ff'>{self._result_note}</span><br>" + text
+        self.lbl_result.setText(text)
+        self._fill_probe_table()
+        self._refresh_overlays()
+        if self._selected_probe is not None:
+            self._show_probe()
+        self._schedule_section()
+        self.view.update()
+
+    def _on_struct_view_edited(self, *_args):
+        if self._result is None or self._result.get("mode") != "structural":
+            return
+        self._show_structural_frame()
+
+    def _on_struct_animate(self, on):
+        if on and self._result is not None and self._result.get("mode") == "structural":
+            if not self.act_results.isChecked():
+                self.act_results.setChecked(True)
+            self._struct_clock = time.perf_counter()
+            self._struct_timer.start()
+        else:
+            self._struct_timer.stop()
+            self._struct_phase = 1.0
+            if self._result is not None and self._result.get("mode") == "structural":
+                self._apply_result_colors()
+                self._schedule_section()
+
+    def _struct_animation_step(self):
+        if self._result is None or self._result.get("mode") != "structural":
+            self._struct_timer.stop()
+            return
+        elapsed = time.perf_counter() - getattr(self, "_struct_clock", time.perf_counter())
+        wave = math.sin(2.0 * math.pi * elapsed / 1.6)
+        # a mode shape swings both ways; a static deformation grows from the unloaded shape
+        self._struct_phase = wave if self._result["analysis"] == "modal" else 0.5 * (1.0 - math.cos(
+            2.0 * math.pi * elapsed / 1.6))
+        self._apply_result_colors()
+
+    def _check_structural(self, jobs):
+        """What a Structural run needs: the packages, elastic data, supports and loads."""
+        missing = structural_missing_text()
+        if missing:
+            QMessageBox.warning(self, "Structural", missing.replace(" ⚠ ", ""))
+            return False
+        jobs = [job for job in jobs if not job.get("zone")]
+        lacking = [job for job in jobs if not (job["props"] or {}).get("E")]
+        if lacking:
+            ci, bi = lacking[0]["key"]
+            self._select(self.study["components"][ci], bi)
+            names = "\n".join("•  " + f"{job['name']} ({job['material']})" for job in lacking[:10])
+            QMessageBox.warning(self, "Mechanical data missing",
+                                f"These bodies have materials without mechanical data (Young's "
+                                f"modulus):\n\n{names}\n\nChoose another material, or add E, ν and "
+                                "the yield strength to your material in Materials.")
+            return False
+        settings = self.study["settings"]
+        if settings["struct_analysis"] == "modal":
+            return True
+        conditions = study_conditions(self.study, jobs, STRUCTURAL_KINDS)
+        if not any(c["kind"].startswith("support") and c["targets"] for c in conditions):
+            QMessageBox.warning(self, "No support",
+                                "Nothing holds the parts. Put a support on faces (Face Condition → "
+                                "Fixed support, Sliding support or Pinned support).")
+            return False
+        if not any(c["kind"] in ("force", "pressure", "torque") and c["targets"] for c in conditions) \
+                and not settings["struct_gravity"] and settings["struct_thermal"] == "none":
+            QMessageBox.warning(self, "No load",
+                                "There is no load. Put a force, pressure or torque on faces (Face "
+                                "Condition), or switch on gravity or thermal expansion.")
+            return False
+        return True
+
+    def _write_structural_csv(self, path):
+        result = self._result
+        modal = result["analysis"] == "modal"
+        rows = [["Structural study", self.study["name"]],
+                ["Analysis", "Natural frequencies" if modal else "Linear static"],
+                ["Elements", result["elements"]], ["Element size mm", f"{result['element_size']:g}"], []]
+        if modal:
+            rows.append(["Mode", "Frequency Hz"])
+            rows += [[k + 1, f"{f:.6g}"] for k, f in enumerate(result["frequencies"])]
+        else:
+            rows.append(["Body", "Material", "Mass kg", "Max displacement mm", "Max von Mises MPa",
+                         "Yield / strength MPa", "Safety factor"])
+            for body in result["bodies"]:
+                rows.append([body["name"], body["material"] or "", f"{body['mass_kg']:.5g}",
+                             f"{body['disp_max']:.5g}", f"{body['vm_max']:.5g}",
+                             "" if not body["yield"] else f"{body['yield']:g}",
+                             "" if body["safety"] is None else f"{body['safety']:.4g}"])
+            rows += [[], ["Support", "Kind", "Fx N", "Fy N", "Fz N", "Mx N·m", "My N·m", "Mz N·m"]]
+            for entry in result["reactions"]:
+                rows.append([entry["name"], CONDITION_KINDS[entry["kind"]][0]] +
+                            [f"{v:.5g}" for v in entry["force"]] + [f"{v:.5g}" for v in entry["moment"]])
+            rows += [[], ["Load", "Kind", "Fx N", "Fy N", "Fz N"]]
+            for entry in result["loads"]:
+                rows.append([entry["name"], CONDITION_KINDS[entry["kind"]][0]] +
+                            [f"{v:.5g}" for v in entry["resultant"]])
+            rows += [[], ["Force balance", f"{result['balance_error']:.3e}"]]
+        rows += [[], ["Probe", "On part", "Von Mises MPa", "Displacement mm"]]
+        for probe in self.study["probes"]:
+            point = probe_world_point(self.study, probe)
+            if point is None:
+                continue
+            vm, disp = structural_point(result, point)
+            rows.append([probe["name"], probe.get("component") or "", "" if modal else f"{vm:.5g}",
+                         f"{np.linalg.norm(disp):.5g}"])
+        try:
+            write_csv(path, rows)
+        except OSError as ex:
+            QMessageBox.critical(self, "Export failed", f"Could not write\n{path}\n\n{ex}")
+            return
+        self._set_status(f"Results saved to {path}")
+
+    def _export_structural_vtu(self):
+        path = self._export_path("Export for ParaView", ".vtu", "VTK unstructured grid (*.vtu)")
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            import simplecad_structural as structural
+            structural.export_vtu(self._result, path)
+        except (OSError, ValueError, MemoryError) as ex:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Export failed", f"Could not write\n{path}\n\n{ex}")
+            return
+        QApplication.restoreOverrideCursor()
+        self._set_status(f"Saved for ParaView: {path} ({os.path.getsize(path) / 1e6:.1f} MB). In "
+                         "ParaView: open it, Apply, colour by VonMises; the Warp By Vector filter "
+                         "shows the deformed shape.")
+
+    def _structural_report(self):
+        """(HTML, images) of the PDF report of a Structural study."""
+        import html as html_module
+        import datetime
+        esc = html_module.escape
+        result = self._result
+        settings = self.study["settings"]
+        modal = settings["struct_analysis"] == "modal" if result is None else result["analysis"] == "modal"
+        out = ["<html><head><style>"
+               "body { font-family: Arial; font-size: 9pt; color: #202428; }"
+               "h1 { font-size: 17pt; color: #17324d; margin-bottom: 2px; }"
+               "h2 { font-size: 12pt; color: #17324d; margin-top: 14px; margin-bottom: 4px; }"
+               "th { background-color: #e3e8ee; text-align: left; font-weight: bold; }"
+               ".num { text-align: right; } .hot { color: #c62828; font-weight: bold; }"
+               ".note { color: #5f6b77; font-size: 8pt; } .warn { color: #b26a00; }"
+               "</style></head><body>"]
+
+        def table(header, rows, numeric_from=1):
+            parts = ["<table border='1' cellspacing='0' cellpadding='3' width='100%' "
+                     "style='border-color: #b8c0c8; border-collapse: collapse;'><tr>"]
+            parts += [f"<th>{esc(str(title))}</th>" for title in header]
+            parts.append("</tr>")
+            for row in rows:
+                parts.append("<tr>")
+                for index, cell in enumerate(row):
+                    text, css = cell if isinstance(cell, tuple) else (str(cell), "")
+                    parts.append(f"<td class='{'num' if index >= numeric_from else ''} {css}'>{esc(text)}</td>")
+                parts.append("</tr>")
+            parts.append("</table>")
+            return "".join(parts)
+
+        path = self._window._thermal_file
+        out.append(f"<h1>Structural study: {esc(self.study['name'])}</h1>")
+        out.append(f"<p class='note'>{esc(path) if path else 'not saved yet'} · "
+                   f"{datetime.datetime.now():%Y-%m-%d %H:%M} · SimpleCAD {ADDON_TITLE} {ADDON_VERSION}</p>")
+        image = self._view_image()
+        if image.width() > 1600:
+            image = image.scaledToWidth(1600, Qt.SmoothTransformation)
+        images = {"view.png": image}
+        out.append("<p align='center'><img src='view.png' width='520'><br><span class='note'>"
+                   "As shown in the window" + (" (deformation exaggerated "
+                   f"{self.sp_struct_scale.value():g}×)" if result is not None and
+                   self.chk_struct_deformed.isChecked() else "") + "</span></p>")
+        out.append("<h2>Setup</h2>")
+        rows = [("Analysis", STRUCTURAL_ANALYSES[settings["struct_analysis"]])]
+        if not modal:
+            rows.append(("Gravity", "on (along −Z)" if settings["struct_gravity"] else "off"))
+            thermal = settings["struct_thermal"]
+            rows.append(("Thermal expansion", STRUCTURAL_THERMAL[thermal] +
+                         (f" {settings['struct_uniform_c']:g} °C" if thermal == "uniform" else "") +
+                         (f", stress-free at {settings['struct_reference_c']:g} °C" if thermal != "none" else "")))
+        if result is not None:
+            rows.append(("Mesh", result["summary"][0].split(": ", 1)[-1]))
+        out.append(table(["Item", "Value"], rows, numeric_from=9))
+        conditions = [c for c in self.study["conditions"] if c["kind"] in STRUCTURAL_KINDS]
+        if conditions:
+            out.append("<h2>Supports and loads</h2>")
+            out.append(table(["Name", "Condition", "Faces"],
+                             [(c["name"], self._condition_text(c).split("[", 1)[-1].split("]")[0]
+                               + ("" if c.get("enabled", True) else " (off)"), str(len(c["faces"])))
+                              for c in conditions], numeric_from=2))
+        out.append("<h2>Materials</h2>")
+        used = sorted({body.get("material") for component in self.study["components"]
+                       for body in component["bodies"] if body.get("material")})
+        out.append(table(["Material", "Mechanical data"],
+                         [(name, mechanical_text(material_properties(name) or {}) or "—") for name in used],
+                         numeric_from=9))
+        if result is None:
+            out.append("<p>No results yet.</p></body></html>")
+            return "".join(out), images
+        if modal:
+            out.append("<h2>Natural frequencies</h2>")
+            out.append(table(["Mode", "Frequency Hz"],
+                             [(str(k + 1), f"{f:.5g}") for k, f in enumerate(result["frequencies"])]))
+        else:
+            out.append("<h2>Results</h2>")
+            rows = []
+            for body in result["bodies"]:
+                safety = body["safety"]
+                css = "hot" if safety is not None and safety < 1.0 else "warn" if safety is not None and safety < 1.5 else ""
+                rows.append((body["name"], body["material"] or "", f"{body['mass_kg']:.4g}",
+                             f"{body['disp_max']:.4g}", f"{body['vm_max']:.4g}",
+                             "—" if not body["yield"] else f"{body['yield']:g}",
+                             ("—" if safety is None else f"{safety:.3g}", css)))
+            out.append(table(["Body", "Material", "kg", "Max |u| mm", "Max σv MPa", "Yield MPa",
+                              "Safety factor"], rows, numeric_from=2))
+            if result["reactions"]:
+                out.append("<h2>Reactions at the supports</h2>")
+                out.append(table(["Support", "Fx N", "Fy N", "Fz N", "|F| N", "Moment N·m (about the face centre)"],
+                                 [(e["name"], *[f"{v:.4g}" for v in e["force"]],
+                                   f"{np.linalg.norm(e['force']):.4g}",
+                                   ", ".join(f"{v:.3g}" for v in e["moment"])) for e in result["reactions"]]))
+        out.append("<h2>Messages</h2><p>" + "<br>".join(esc(line) for line in result["summary"] +
+                                                        result["messages"]) + "</p>")
+        out.append("<p class='note'>Linear elastic analysis: small deformations, no contact "
+                   "separation, no plasticity. Stresses at sharp inside corners depend on the mesh.</p>")
+        out.append("</body></html>")
+        return "".join(out), images
+
     def _probe_series(self, probe):
         """Temperatures of a probe for every stored frame of the result, or None
         (interpolated in the stored whole fields at the probe point)."""
@@ -14265,6 +15189,9 @@ class ThermalDialog(QDialog):
         point = probe_world_point(self.study, probe)
         if point is None:
             return None
+        if result.get("mode") == "structural":
+            vm, disp = structural_point(result, point, max(0, self.cb_struct_mode.currentIndex()))
+            return np.array([float(np.linalg.norm(disp)) if result["analysis"] == "modal" else vm])
         key = (id(result), probe.get("component"), probe["body"], tuple(probe["point"]),
                tuple(np.round(point, 6)))
         if key not in self._probe_cache:
@@ -14314,7 +15241,12 @@ class ThermalDialog(QDialog):
         self.lbl_probe_point.setText("—" if point is None else
                                      "  ".join(f"{axis} {value:.2f}" for axis, value in zip("XYZ", point)))
         value = self._probe_frame_values()[index]
-        if value is None:
+        if value is not None and self._result.get("mode") == "structural":
+            vm, disp = structural_point(self._result, point, max(0, self.cb_struct_mode.currentIndex()))
+            self.lbl_probe_value.setText(
+                f"|u| {np.linalg.norm(disp):.3g} (mode shape, relative)" if self._result["analysis"] == "modal"
+                else f"σv {vm:.4g} MPa, |u| {np.linalg.norm(disp):.4g} mm")
+        elif value is None:
             self.lbl_probe_value.setText("— (start the simulation)" if self._result is None else "—")
         else:
             when = "" if self._result["analysis"] != "transient" else \
@@ -14366,13 +15298,34 @@ class ThermalDialog(QDialog):
         self._loading = True
         try:
             airflow = settings["mode"] == "airflow"
-            self.cb_mode.setCurrentIndex(1 if airflow else 0)
+            structural = settings["mode"] == "structural"
+            self.cb_mode.setCurrentIndex(max(0, self.cb_mode.findData(settings["mode"])))
             self.lbl_mode_hint.setText(
                 "Airflow + heat (CHT): air and solids are solved together on one grid — buoyancy, "
                 "fans and vents decide where the heat goes. Takes minutes (transient runs longer)."
-                if airflow
+                if airflow else
+                "Structural: stresses and deformation of the parts under supports and loads (Face "
+                "Condition), or their natural frequencies. Touching parts are bonded; parts need "
+                "materials with mechanical data." + structural_missing_text() if structural
                 else "Conduction (FEM): heat conduction in the bodies; air cooling and radiation act "
                      "on their surfaces. Fast.")
+            modal = settings["struct_analysis"] == "modal"
+            self.cb_struct_analysis.setCurrentIndex(max(0, self.cb_struct_analysis.findData(
+                settings["struct_analysis"])))
+            self.sp_struct_modes.setValue(int(settings["struct_modes"]))
+            self.chk_struct_gravity.setChecked(settings["struct_gravity"])
+            self.cb_struct_thermal.setCurrentIndex(max(0, self.cb_struct_thermal.findData(
+                settings["struct_thermal"])))
+            self.sp_struct_uniform.setValue(settings["struct_uniform_c"])
+            self.sp_struct_reference.setValue(settings["struct_reference_c"])
+            struct_auto = settings["struct_mesh_mm"] <= 0
+            self.chk_struct_auto.setChecked(struct_auto)
+            self.sp_struct_size.setEnabled(not struct_auto)
+            if not struct_auto:
+                self.sp_struct_size.setValue(settings["struct_mesh_mm"])
+            self.sp_struct_max.setValue(int(settings["struct_max_elements"]))
+            self.cb_struct_order.setCurrentIndex(0 if settings["struct_order"] == 2 else 1)
+            heat_run = structural and not modal and settings["struct_thermal"] == "conduction"
             self.sp_ambient.setValue(settings["ambient_c"])
             self.cb_convection.setCurrentIndex(max(0, self.cb_convection.findData(
                 settings["convection"])))
@@ -14417,11 +15370,21 @@ class ThermalDialog(QDialog):
                     if widget is not None:
                         widget.setVisible(on)
 
-            show(self._conduction_rows, not airflow)
-            show(self._transient_rows, transient)
-            show(self._speed_rows, not airflow and settings["convection"] == "forced")
-            show(self._h_rows, not airflow and settings["convection"] == "fixed")
-            show(self._mesh_rows, not airflow)
+            thermal = not structural or heat_run
+            show(self._structural_rows, structural)
+            show(self._struct_modal_rows, structural and modal)
+            show(self._struct_static_rows, structural and not modal)
+            show(self._struct_uniform_rows, structural and not modal and
+                 settings["struct_thermal"] == "uniform")
+            show(self._struct_thermal_rows, structural and not modal and
+                 settings["struct_thermal"] != "none")
+            show(self._thermal_analysis_rows, not structural)
+            show(self._environment_rows, thermal)
+            show(self._conduction_rows, not airflow and thermal)
+            show(self._transient_rows, transient and not structural)
+            show(self._speed_rows, not airflow and thermal and settings["convection"] == "forced")
+            show(self._h_rows, not airflow and thermal and settings["convection"] == "fixed")
+            show(self._mesh_rows, not airflow and thermal)
             show(self._airflow_rows, airflow)
             show(self._flow_steady_rows, airflow and not transient)
             show(self._flow_transient_rows, airflow and transient)
@@ -14470,11 +15433,39 @@ class ThermalDialog(QDialog):
         settings["flow_max_cells"] = int(self.sp_flow_max_cells.value())
         settings["flow_iterations"] = int(self.sp_flow_iterations.value())
         settings["flow_step_iterations"] = int(self.sp_flow_step_iterations.value())
+        settings["struct_analysis"] = self.cb_struct_analysis.currentData()
+        settings["struct_modes"] = int(self.sp_struct_modes.value())
+        settings["struct_gravity"] = self.chk_struct_gravity.isChecked()
+        settings["struct_thermal"] = self.cb_struct_thermal.currentData()
+        settings["struct_uniform_c"] = float(self.sp_struct_uniform.value())
+        settings["struct_reference_c"] = float(self.sp_struct_reference.value())
+        settings["struct_mesh_mm"] = 0.0 if self.chk_struct_auto.isChecked() else \
+            float(self.sp_struct_size.value())
+        settings["struct_max_elements"] = int(self.sp_struct_max.value())
+        settings["struct_order"] = int(self.cb_struct_order.currentData())
+        mode_changed = getattr(self, "_shown_mode", settings["mode"]) != settings["mode"]
+        self._shown_mode = settings["mode"]
+        if mode_changed:
+            self._fill_condition_menu()
         self._show_settings()
         self._changed()
+        if mode_changed:                         # conditions of the other study type grey out
+            self._rebuild_tree()
+            if self._condition() is not None:
+                self._show_condition()
 
     def _update_estimate(self):
         settings = self.study["settings"]
+        if settings["mode"] == "structural":
+            self.lbl_struct_estimate.setText(structural_estimate_text(self.study))
+            if settings["struct_mesh_mm"] <= 0:
+                size = structural_auto_size(self.study)
+                if size:
+                    self.sp_struct_size.blockSignals(True)
+                    self.sp_struct_size.setValue(size)
+                    self.sp_struct_size.blockSignals(False)
+            if not (settings["struct_analysis"] == "static" and settings["struct_thermal"] == "conduction"):
+                return
         if settings["mode"] == "airflow":
             try:
                 plan = plan_flow_grid(study_jobs(self.study), settings)
@@ -15019,8 +16010,10 @@ class ThermalDialog(QDialog):
                                 "Choose a material in the properties (Body → Material).")
             return False
         settings = self.study["settings"]
+        if settings["mode"] == "structural":
+            return self._check_structural(jobs)
         airflow = settings["mode"] == "airflow"
-        conditions = study_conditions(self.study, jobs)
+        conditions = study_conditions(self.study, jobs, THERMAL_KINDS)
         drives = any(c["kind"] in ("flux", "fixed") and c["targets"] for c in conditions) or \
             (airflow and "wall_fixed" in settings["flow_sides"].values())
         if not any(profile_peak_power(job.get("profile"), job["power"]) > 0 for job in jobs) and \
@@ -15088,6 +16081,18 @@ class ThermalDialog(QDialog):
         self._result = result
         self._result_note = ""
         self._show_result()
+        if result.get("mode") == "structural":
+            if result["analysis"] == "modal":
+                frequencies = result["frequencies"]
+                self._set_status(f"Simulation finished in {result['seconds']:.1f} s — lowest natural "
+                                 f"frequency {frequencies[0]:.4g} Hz" if len(frequencies) else
+                                 f"Simulation finished in {result['seconds']:.1f} s")
+            else:
+                hot = max(result["bodies"], key=lambda b: b["vm_max"])
+                self._set_status(f"Simulation finished in {result['seconds']:.1f} s — maximum von "
+                                 f"Mises {hot['vm_max']:.4g} MPa in {hot['name']}, maximum "
+                                 f"displacement {result['disp_max']:.4g} mm")
+            return
         hottest = max((b for b in result["bodies"] if b["max"] is not None),
                       key=lambda b: b["max"], default=None)
         self._set_status(f"Simulation finished in {result['seconds']:.1f} s — maximum "
@@ -15250,6 +16255,9 @@ class ThermalDialog(QDialog):
         result = self._result
         if result is None:
             return
+        if result.get("mode") == "structural":
+            self._export_structural_vtu()
+            return
         frames = None
         kept = list(np.asarray(result["volume_index"]).tolist())
         if result["analysis"] == "transient" and len(kept) > 1:
@@ -15344,6 +16352,9 @@ class ThermalDialog(QDialog):
             return
         path = self._export_path("Export results", "_results.csv", "CSV files (*.csv)")
         if not path:
+            return
+        if result.get("mode") == "structural":
+            self._write_structural_csv(path)
             return
         transient = result["analysis"] == "transient"
         number = (lambda v: "" if v is None or not np.isfinite(v) else f"{v:.4g}")
@@ -15451,7 +16462,7 @@ class ThermalDialog(QDialog):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             html, images = self._report()
-            write_pdf(path, html, images, f"Thermal study {self.study['name']}")
+            write_pdf(path, html, images, ("Structural" if self.study["settings"]["mode"] == "structural" else "Thermal") + f" study {self.study['name']}")
         except Exception as ex:
             QApplication.restoreOverrideCursor()
             cad._trace("Thermal report error:\n" + traceback.format_exc())
@@ -15469,6 +16480,8 @@ class ThermalDialog(QDialog):
         esc = html_module.escape
         result = self._result
         settings = self.study["settings"]
+        if settings["mode"] == "structural" or (result is not None and result.get("mode") == "structural"):
+            return self._structural_report()
         airflow = settings["mode"] == "airflow"
         images = {}
         out = ["<html><head><style>"
@@ -15685,6 +16698,12 @@ class ThermalDialog(QDialog):
         self._result = None
         self._result_note = ""
         self._frame = 0
+        self._struct_timer.stop()
+        self.btn_struct_animate.blockSignals(True)
+        self.btn_struct_animate.setChecked(False)
+        self.btn_struct_animate.blockSignals(False)
+        self._struct_phase = 1.0
+        self.w_struct_view.hide()
         self._play_timer.stop()
         self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.w_playback.hide()
@@ -15726,6 +16745,8 @@ class ThermalDialog(QDialog):
 
     def _color_range(self):
         result = self._result
+        if result.get("mode") == "structural":
+            return self._structural_range()
         if self.chk_auto_range.isChecked():
             low, high = result["t_min"], result["t_max"]
             if high - low < 0.1:
@@ -15745,6 +16766,9 @@ class ThermalDialog(QDialog):
         transient run covers the whole run, so the frames can be compared)."""
         result = self._result
         if result is None:
+            return
+        if result.get("mode") == "structural":
+            self._apply_structural_colors()
             return
         low, high = self._color_range()
         for ci, component in enumerate(self.study["components"]):
@@ -15772,6 +16796,10 @@ class ThermalDialog(QDialog):
 
     def _show_result(self):
         result = self._result
+        if result.get("mode") == "structural":
+            self._show_structural_result()
+            return
+        self._thermal_result_layout()
         transient = result["analysis"] == "transient"
         last = len(result["frame_times"]) - 1
         self._frame = last                          # the state at the end of the run
@@ -15843,6 +16871,9 @@ class ThermalDialog(QDialog):
         """Show the temperatures of one stored frame (the only one of a steady-state run)."""
         result = self._result
         if result is None:
+            return
+        if result.get("mode") == "structural":
+            self._show_structural_frame()
             return
         frame = int(min(max(frame, 0), len(result["frame_times"]) - 1))
         self._frame = frame
@@ -15980,6 +17011,10 @@ class ThermalDialog(QDialog):
             if key is not None and tuple(item.data(Qt.UserRole)) == key:
                 self.tbl_results.selectRow(row)
                 body = self._result["bodies"][row]
+                if self._result.get("mode") == "structural":
+                    self._set_status(f"{body['name']}: max von Mises {body['vm_max']:.4g} MPa, max "
+                                     f"displacement {body['disp_max']:.4g} mm, {body['mass_kg']:.4g} kg")
+                    break
                 low, mean, high = frame_body_stats(self._result, self._frame)[row]
                 when = "" if self._result["analysis"] != "transient" else \
                     f" at t = {format_time(self._result['frame_times'][self._frame])}"

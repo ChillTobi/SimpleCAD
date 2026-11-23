@@ -402,7 +402,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "2.2b"
+APP_VERSION = "2.3b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -734,7 +734,7 @@ def _json_default(obj):
 # Add-ons import this module as "SimpleCAD" (also when it runs as the main script).
 # Each add-on defines ADDON_TITLE and ADDON_VERSION (listed in Help → About). Keep this list in
 # step with ADDONS in build.py.
-KNOWN_ADDONS = ("simplecad_thermal",)
+KNOWN_ADDONS = ("simplecad_thermal", "simplecad_motion")
 _ADDONS = {}
 
 def load_addon(name):
@@ -24904,7 +24904,8 @@ def assembly_project_groups(root, objects):
                                                     "signature": []})
             group["bodies"].append(assembly_body(
                 part["name"], vertices, triangles, faces, part.get("color", DEFAULT_SOLID_COLOR),
-                part.get("opacity", 1.0), id(part) in fused, part.get("material")))
+                part.get("opacity", 1.0), id(part) in fused, part.get("material"),
+                assembly_gear_data(part)))
             group["signature"].append(_assembly_mesh_signature(vertices, triangles))
     return [groups[key] for key in sorted(groups, key=lambda key: (len(key), key))]
 
@@ -24944,18 +24945,53 @@ def assembly_world_faces(component, faces, offset=None):
     return out
 
 def assembly_body(name, vertices, triangles, faces, color=DEFAULT_SOLID_COLOR, opacity=1.0,
-                  fused=False, material=None):
-    """Snapshot of a solid. `material` is the project object's material (None for files)."""
-    return {"name": name, "color": [float(c) for c in list(color)[:3]], "opacity": float(opacity),
+                  fused=False, material=None, gear=None):
+    """Snapshot of a solid. `material` is the project object's material (None for files);
+    `gear` the data of a gear made with the Gear tool (assembly_gear_data), used for motion."""
+    body = {"name": name, "color": [float(c) for c in list(color)[:3]], "opacity": float(opacity),
             "vertices": np.asarray(vertices, float).reshape(-1, 3).copy(),
             "triangles": [tuple(int(i) for i in tri) for tri in triangles],
             "faces": _assembly_faces(faces), "fused": bool(fused),
             "material": material if material in MATERIAL_DENSITIES_G_CM3 else None}
+    gear = _assembly_gear_clean(gear)
+    if gear:
+        body["gear"] = gear
+    return body
+
+def _assembly_gear_clean(gear):
+    """A JSON-safe copy of a body's gear data, or None."""
+    if not isinstance(gear, dict) or not gear.get("kind"):
+        return None
+    out = {"kind": str(gear["kind"])}
+    for key in ("teeth", "module", "starts", "ring_teeth", "sun_teeth", "planet_teeth"):
+        if gear.get(key) is not None:
+            try:
+                out[key] = float(gear[key])
+            except (TypeError, ValueError):
+                pass
+    for key in ("origin", "axis", "x_axis"):
+        if gear.get(key) is not None:
+            out[key] = [float(x) for x in gear[key]][:3]
+    return out
+
+def assembly_gear_data(entry):
+    """Kind, teeth, module and the axis (in the entry's coordinates) of a gear made with the Gear
+    tool, or None for other bodies."""
+    parameters = entry.get("gear_parameters")
+    if not parameters or not parameters.get("kind"):
+        return None
+    rotation = _import_rotation_matrix(entry.get("gear_rotation", (0.0, 0.0, 0.0)))
+    gear = {key: parameters.get(key) for key in ("kind", "teeth", "module", "starts", "ring_teeth",
+                                                 "sun_teeth", "planet_teeth")}
+    gear["origin"] = list(entry.get("gear_position", (0.0, 0.0, 0.0)))
+    gear["axis"] = rotation[:, 2].tolist()
+    gear["x_axis"] = rotation[:, 0].tolist()
+    return _assembly_gear_clean(gear)
 
 def assembly_body_from_entry(entry, fused=False):
     return assembly_body(entry["name"], entry["solid"][0], entry["solid"][1], entry.get("faces", []),
                          entry.get("color", DEFAULT_SOLID_COLOR), entry.get("opacity", 1.0), fused,
-                         entry.get("material"))
+                         entry.get("material"), assembly_gear_data(entry))
 
 def assembly_bodies_from_parts(parts):
     """Snapshots of the parts (all pieces); solids already contained in a Bridge are flagged
@@ -24964,7 +25000,7 @@ def assembly_bodies_from_parts(parts):
              for source in part.get("bridge_sources", []) if source.get("entry") is not None}
     return [assembly_body(part["name"], vertices, triangles, faces,
                           part.get("color", DEFAULT_SOLID_COLOR), part.get("opacity", 1.0),
-                          id(part) in fused, part.get("material"))
+                          id(part) in fused, part.get("material"), assembly_gear_data(part))
             for part in parts for vertices, triangles, faces in mesh_pieces_of(part)]
 
 def assembly_world_vertices(component, vertices):
@@ -25511,7 +25547,8 @@ def assembly_apply_cuts(bodies, cuts):
         faces = [dict(face, planar=True) if face.get("section") is not None else face
                  for face in mesh[2]]
         out.append(assembly_body(body["name"], mesh[0], mesh[1], faces, body["color"],
-                                 body["opacity"], body.get("fused", False), body.get("material")))
+                                 body["opacity"], body.get("fused", False), body.get("material"),
+                                 body.get("gear")))
     return out
 
 # Version of the cutting code the stored cut bodies were made with. Assemblies saved with an
@@ -25590,14 +25627,16 @@ def assembly_to_data(assembly, keep_empty=False):
             "name": body["name"], "color": body["color"], "opacity": body["opacity"],
             "fused": body.get("fused", False), "material": body.get("material"),
             "vertices": body["vertices"].tolist(), "triangles": [list(t) for t in body["triangles"]],
-            "faces": body["faces"]} for body in component["bodies"]]
+            "faces": body["faces"], **({"gear": copy.deepcopy(body["gear"])} if body.get("gear") else {})}
+            for body in component["bodies"]]
         if component.get("cuts") and component.get("uncut_bodies"):
             data["uncut_bodies"] = [{
                 "name": body["name"], "color": body["color"], "opacity": body["opacity"],
                 "fused": body.get("fused", False), "material": body.get("material"),
                 "vertices": np.asarray(body["vertices"], float).tolist(),
                 "triangles": [list(t) for t in body["triangles"]],
-                "faces": body["faces"]} for body in component["uncut_bodies"]]
+                "faces": body["faces"], **({"gear": copy.deepcopy(body["gear"])} if body.get("gear") else {})}
+                for body in component["uncut_bodies"]]
             data["cut_version"] = ASSEMBLY_CUT_VERSION
         components.append(data)
     return {"name": assembly["name"], "alignment_direction": "second-follows-first",
@@ -25605,6 +25644,8 @@ def assembly_to_data(assembly, keep_empty=False):
             "constraints": copy.deepcopy(assembly["constraints"]),
             "explosion_distance": float(assembly.get(
                 "explosion_distance", ASSEMBLY_EXPLOSION_DISTANCE)),
+            # motion studies of the Motion add-on (kept as they are without it)
+            **({"motion": copy.deepcopy(assembly["motion"])} if assembly.get("motion") else {}),
             **({"section": {"position": [float(x) for x in assembly["section"]["position"]],
                             "rotation": [float(x) for x in assembly["section"]["rotation"]],
                             "flip": bool(assembly["section"].get("flip")),
@@ -25643,7 +25684,7 @@ def assembly_from_data(data):
             "bodies": [assembly_body(body["name"], body["vertices"], body["triangles"],
                                      body.get("faces", []), body.get("color", DEFAULT_SOLID_COLOR),
                                      body.get("opacity", 1.0), body.get("fused", False),
-                                     body.get("material"))
+                                     body.get("material"), body.get("gear"))
                        for body in item.get("bodies", [])]}
         for key in ("source_name", "path", "signature", "file_stamp", "file_root",
                     "source_piece", "file_piece"):
@@ -25658,11 +25699,13 @@ def assembly_from_data(data):
                     assembly_body(body["name"], body["vertices"], body["triangles"],
                                   body.get("faces", []), body.get("color", DEFAULT_SOLID_COLOR),
                                   body.get("opacity", 1.0), body.get("fused", False),
-                                  body.get("material"))
+                                  body.get("material"), body.get("gear"))
                     for body in item["uncut_bodies"]]
                 if item.get("cut_version") != ASSEMBLY_CUT_VERSION:
                     assembly_recut(component)     # made with older cutting code
         assembly["components"].append(component)
+    if isinstance(data.get("motion"), dict):
+        assembly["motion"] = copy.deepcopy(data["motion"])
     for item in data.get("constraints", []):
         if item.get("kind") not in ("coincident", "mate"):
             raise ValueError("invalid assembly constraint")
@@ -25735,6 +25778,8 @@ class AssemblyView3D(View3D):
         self._explosion_drag = None
         self._pick_modifiers = Qt.NoModifier
         self.alignment_picking = False       # Align on: references in neon orange
+        self.overlay_painters = []           # callables drawing extras (Motion: trace curves)
+        self.mouse_handlers = []             # objects with press / move / release(view, event) -> True = used
 
     # ── picking ───────────────────────────────────────────────────────────────
     def _click_select3d(self, pos, ctrl=False, shift=False):
@@ -26130,8 +26175,20 @@ class AssemblyView3D(View3D):
         return float(np.argmin(distance))
 
     # ── gizmo mouse handling ──────────────────────────────────────────────────
+    def _handled(self, method, e):
+        """An add-on's mouse handler (Motion: drag handles) took the event."""
+        for handler in list(self.mouse_handlers):
+            try:
+                if getattr(handler, method)(self, e):
+                    return True
+            except Exception as ex:
+                _dbg(f"assembly mouse handler failed: {ex}")
+        return False
+
     def mousePressEvent(self, e):
         self._pick_modifiers = e.modifiers()
+        if self._handled("press", e):
+            return
         if e.button() == Qt.LeftButton and self._explosion_active() and self._explosion_pick(e.pos()):
             arrow = self.explosion_arrow
             drag = self._explosion_handle_data()
@@ -26162,6 +26219,8 @@ class AssemblyView3D(View3D):
 
     def mouseMoveEvent(self, e):
         self._pick_modifiers = e.modifiers()
+        if self._handled("move", e):
+            return
         if self._explosion_drag is not None:
             drag = self._explosion_drag
             if not e.buttons() & Qt.LeftButton:
@@ -26206,6 +26265,8 @@ class AssemblyView3D(View3D):
 
     def mouseReleaseEvent(self, e):
         self._pick_modifiers = e.modifiers()
+        if self._handled("release", e):
+            return
         if e.button() == Qt.LeftButton and self._explosion_drag is not None:
             self.explosionFinished.emit(self._explosion_drag["start_distance"])
             self._explosion_drag = None
@@ -26228,6 +26289,11 @@ class AssemblyView3D(View3D):
     # ── drawing ───────────────────────────────────────────────────────────────
     def paintGL(self):
         super().paintGL()
+        for painter in list(self.overlay_painters):
+            try:
+                painter()
+            except Exception as ex:                   # an add-on never breaks the view
+                _dbg(f"assembly overlay failed: {ex}")
         if not self._measure_mode:
             self._draw_markers()
         if self._explosion_active():
@@ -26408,7 +26474,15 @@ class AssemblyDialog(QDialog):
         self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint |
                             Qt.WindowCloseButtonHint | Qt.WindowSystemMenuHint)
         self.resize(1400, 860)
+        self._motion = None
         self._build_ui()
+        addon = load_addon("simplecad_motion")      # Motion mode (optional add-on)
+        if addon is not None:
+            try:
+                self._motion = addon.attach(self)
+            except Exception:
+                _trace(f"Motion add-on could not attach:\n{traceback.format_exc()}")
+                self._motion = None
         # Enter in a number field must only confirm the value: no button of this window is the
         # dialog's default button (otherwise Enter "clicks" e.g. the colour button)
         for button in self.findChildren(QPushButton):
@@ -26835,6 +26909,9 @@ class AssemblyDialog(QDialog):
         bottom.addWidget(self.status, 1); bottom.addWidget(close)
 
         root = QVBoxLayout(self)
+        self._root_layout = root
+        self._toolbar = toolbar
+        self._tools_menu = tools_menu
         root.setMenuBar(menu_bar)
         enlarge_toolbar_icons(toolbar)                   # icons as large as the buttons allow
         for button in toolbar.findChildren(QToolButton):     # Import opens its source menu
@@ -26981,6 +27058,8 @@ class AssemblyDialog(QDialog):
     def closeEvent(self, e):
         if not self._confirm_close():
             e.ignore(); return
+        if self._motion is not None:
+            self._motion.closing()
         if self.act_align.isChecked():
             self.act_align.setChecked(False)
         if self.act_measure.isChecked():
@@ -27033,6 +27112,8 @@ class AssemblyDialog(QDialog):
         self._sync_selection()
         if self.act_align.isChecked():
             self.view.measure_clear()
+        if self._motion is not None:
+            self._motion.scene_rebuilt()
         self.view.update()
 
     def _apply_transform(self, component):
@@ -27080,6 +27161,12 @@ class AssemblyDialog(QDialog):
         self._update_gizmo()
 
     def _update_gizmo(self):
+        if self._motion is not None and self._motion.active:
+            # Motion mode: parts are moved by the mechanism, not by hand
+            self.view.gizmo_center = None
+            self.view.gizmo_twist = None
+            self.view.explosion_arrow = None
+            return
         component = self._selected
         centre = None
         if component is not None and component["visible"] and component["bodies"]:
@@ -27486,6 +27573,8 @@ class AssemblyDialog(QDialog):
         self.changed = True
         self._window._mark_dirty()
         self._update_title()
+        if self._motion is not None:
+            self._motion.assembly_changed()
 
     def _reset_history(self):
         self._undo_history = [assembly_to_data(self.assembly, keep_empty=True)]
@@ -27897,6 +27986,8 @@ class AssemblyDialog(QDialog):
         self.assembly["components"] = [c for c in self.assembly["components"] if c is not component]
         self.assembly["constraints"] = [c for c in self.assembly["constraints"]
                                         if component["name"] not in (c["moving"], c["target"])]
+        if self._motion is not None:
+            self._motion.component_removed(component["name"])
         self._selected = None
         self._selected_alignment = None
         self._after_components_changed()
@@ -27914,6 +28005,8 @@ class AssemblyDialog(QDialog):
             for key in ("moving", "target"):
                 if constraint[key] == component["name"]:
                     constraint[key] = name
+        if self._motion is not None:
+            self._motion.component_renamed(component["name"], name)
         component["name"] = name
         self._after_components_changed()
 
@@ -28935,10 +29028,10 @@ class MainWindow(QMainWindow):
         self.act_thermal = None
         if self._thermal_addon is not None:
             self.act_thermal = QAction(
-                QIcon(os.path.join(icon_dir, "thermal_sim.png")), "Thermal", self,
+                QIcon(os.path.join(icon_dir, "thermal_sim.png")), "Simulation", self,
                 triggered=self._open_thermal_study,
-                toolTip="Thermal - Simulate the temperatures of parts and assemblies "
-                        "with heat sources")
+                toolTip="Simulation - temperatures of parts and assemblies with heat sources "
+                        "(Thermal), stresses and natural frequencies (Structural)")
             tb2.addAction(self.act_thermal)
         self.sp_grid=QDoubleSpinBox(); self.sp_grid.setRange(1,100); self.sp_grid.setValue(DEFAULT_GRID)
         self.sp_grid.setSuffix(" mm"); self.sp_grid.setToolTip("Grid spacing (mm)")
@@ -30363,8 +30456,9 @@ class MainWindow(QMainWindow):
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
         if load_addon("simplecad_thermal") is not None:
-            act(m, "&Thermal…", self._open_thermal_study,
-                tip="Simulate the temperatures of parts and assemblies with heat sources",
+            act(m, "&Simulation…", self._open_thermal_study,
+                tip="Simulate the temperatures (Thermal) or the stresses and natural frequencies "
+                    "(Structural) of parts and assemblies",
                 icon=app_icon("thermal_sim.png"))
         m.addSeparator()
         act(m, "E&xit", self.close, key="exit", icon=app_icon("exit.png"))
@@ -30397,8 +30491,9 @@ class MainWindow(QMainWindow):
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
         if load_addon("simplecad_thermal") is not None:
-            act(m, "&Thermal…", self._open_thermal_study,
-                tip="Simulate the temperatures of parts and assemblies with heat sources",
+            act(m, "&Simulation…", self._open_thermal_study,
+                tip="Simulate the temperatures (Thermal) or the stresses and natural frequencies "
+                    "(Structural) of parts and assemblies",
                 icon=app_icon("thermal_sim.png"))
         m.addSeparator()
         act(m, "&Edit Selected…", self._edit_selected_entry, None,

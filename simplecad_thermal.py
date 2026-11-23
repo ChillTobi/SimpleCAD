@@ -39,6 +39,24 @@ Both solvers: user materials (library thermal_materials.json, copied into each s
 optional k(T) and cp(T) tables; thermostats (power off / on by a probe or the body's own
 temperature, with hysteresis; in steady state the share of the power that holds the setpoint).
 
+Liquid cooling (water, water–glycol, oils; properties over temperature):
+  * Coolant channel: the picked inner faces of a pipe or passage give its length, hydraulic
+    diameter and cross-section; the liquid (fixed flow or a pump curve) warms along it, with the
+    wall coefficient from pipe-flow correlations (laminar with the entry region, transitional,
+    turbulent) and the pressure drop from Darcy–Weisbach. Channels can feed each other.
+  * Liquid bath: the liquid fills a container up to a fill level and is well mixed (natural
+    convection on the wetted faces, the open surface loses heat by convection, radiation and
+    evaporation), or the faces sit in a large volume at a fixed temperature.
+  * In Airflow mode the liquid itself can be solved instead: a bath with buoyancy from the
+    density table, or a channel fed by its pump at the inlet.
+
+Printed circuit boards: imported from KiCad (.kicad_pcb, KiCad 5 … 10) or Gerber files (RS-274X
+with Excellon drill files, optionally a Gerber job). The outline is extruded to the board; every
+copper layer is rasterised, and each cell's conductivity follows the layer stack (FR-4 or an
+aluminium-core IMS board), the copper share there and the plated holes. Power components are
+placed as package blocks with a two-resistor junction model (θ to the package top, θ to the
+board); the results give their junction temperatures.
+
 Results: temperature map, section view (movable plane; cut faces in temperature colours, in
 airflow results the air temperature or speed with velocity arrows), probes, streamlines, and
 the heat balance of every run. Parameter sweeps run the study for several values of one
@@ -66,13 +84,13 @@ import ctypes
 import SimpleCAD as cad        # the running application (SimpleCAD.load_addon registers it)
 
 ADDON_TITLE = "Thermal"
-ADDON_VERSION = "2.1b"         # add-on release, shown in SimpleCAD's Help → About
+ADDON_VERSION = "2.3"          # add-on release, shown in SimpleCAD's Help → About
 THERMAL_FORMAT = "simplecad-thermal-study"
 THERMAL_EXTENSION = ".thml"
 THERMAL_DEFAULT_NAME = "Untitled"
 HEAT_SOURCE_COLOR = (1.0, 0.45, 0.15)
 PRIMITIVE_KINDS = ("block", "cylinder")
-COMPONENT_KINDS = ("project", "file", "assembly") + PRIMITIVE_KINDS + ("fan", "vent")
+COMPONENT_KINDS = ("project", "file", "assembly") + PRIMITIVE_KINDS + ("fan", "vent", "pcb")
 FLOW_COLOR = (0.3, 0.85, 1.0)
 
 # ── materials ─────────────────────────────────────────────────────────────────
@@ -127,6 +145,9 @@ MATERIAL_THERMAL = {
                      "note": "across the grain"},
     "Wood (Walnut)": {"k": 0.14, "cp": 1900.0, "emissivity": 0.90, "max_c": 100.0,
                       "note": "across the grain"},
+    "Mould compound": {"k": 0.8, "cp": 880.0, "emissivity": 0.90, "max_c": None, "density": 1900.0,
+                       "note": "epoxy mould compound of IC packages (the die is modelled by the "
+                               "package's θ values)"},
 }
 AIR_CONDUCTIVITY = 0.026            # W/(m·K), still air at about 25 °C (air enclosed in a housing)
 AIR_DENSITY = 1.18                  # kg/m³
@@ -270,7 +291,7 @@ def material_properties(name, materials=None):
     if data is not None:
         props = dict(data)
         density = cad.MATERIAL_DENSITIES_G_CM3.get(name)
-        props["density"] = None if density is None else density * 1000.0
+        props["density"] = data.get("density") if density is None else density * 1000.0
         return props
     data = user_material(name, materials) if name else None
     return None if data is None else copy.deepcopy(data)
@@ -304,6 +325,84 @@ def material_note(name, materials=None):
 
 
 _LIBRARY_ERROR = load_material_library()
+
+
+# ── liquids ───────────────────────────────────────────────────────────────────
+# Coolants and bath liquids at about 1 bar, tabled over temperature (°C): density kg/m³, specific
+# heat J/(kg·K), conductivity W/(m·K), dynamic viscosity mPa·s. Water follows IAPWS; the glycol
+# mixtures (ethylene glycol by volume) and the oils are typical values (actual products vary).
+#   limit_c / limit_text   warning when a wetted face gets hotter (boiling, oil ageing)
+#   evaporation            share of the evaporation of plain water from an open surface
+FLUIDS = {
+    "Water": {
+        "t": [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        "rho": [999.8, 999.7, 998.2, 995.7, 992.2, 988.0, 983.2, 977.8, 971.8, 965.3, 958.4],
+        "cp": [4217, 4192, 4182, 4178, 4179, 4181, 4185, 4190, 4197, 4205, 4216],
+        "k": [0.561, 0.580, 0.598, 0.615, 0.631, 0.644, 0.654, 0.663, 0.670, 0.675, 0.679],
+        "mu": [1.792, 1.307, 1.002, 0.797, 0.653, 0.547, 0.467, 0.404, 0.355, 0.315, 0.282],
+        "limit_c": 100.0, "limit_text": "boils at 100 °C (1 bar); boiling is not modelled",
+        "evaporation": 1.0, "emissivity": 0.95, "note": "freezes at 0 °C"},
+    "Water–glycol 30 %": {
+        "t": [-10, 0, 20, 40, 60, 80, 100],
+        "rho": [1050, 1048, 1041, 1032, 1021, 1009, 995],
+        "cp": [3680, 3700, 3750, 3800, 3850, 3900, 3950],
+        "k": [0.45, 0.46, 0.48, 0.50, 0.52, 0.53, 0.54],
+        "mu": [5.0, 3.4, 2.0, 1.25, 0.85, 0.62, 0.48],
+        "limit_c": 104.0, "limit_text": "boils near 104 °C (1 bar); boiling is not modelled",
+        "evaporation": 0.85, "emissivity": 0.95,
+        "note": "ethylene glycol 30 % by volume, frost protection to about −15 °C"},
+    "Water–glycol 50 %": {
+        "t": [-20, 0, 20, 40, 60, 80, 100],
+        "rho": [1090, 1082, 1072, 1061, 1049, 1036, 1022],
+        "cp": [3200, 3280, 3360, 3440, 3520, 3600, 3680],
+        "k": [0.36, 0.37, 0.38, 0.39, 0.40, 0.41, 0.41],
+        "mu": [17.0, 7.5, 3.9, 2.3, 1.5, 1.05, 0.78],
+        "limit_c": 107.0, "limit_text": "boils near 107 °C (1 bar); boiling is not modelled",
+        "evaporation": 0.65, "emissivity": 0.95,
+        "note": "ethylene glycol 50 % by volume, frost protection to about −37 °C"},
+    "Transformer oil": {
+        "t": [-20, 0, 20, 40, 60, 80, 100],
+        "rho": [908, 895, 882, 869, 856, 843, 830],
+        "cp": [1720, 1800, 1860, 1930, 2000, 2070, 2140],
+        "k": [0.136, 0.134, 0.132, 0.130, 0.128, 0.126, 0.124],
+        "mu": [420, 70, 22, 9.5, 5.2, 3.3, 2.3],
+        "limit_c": 105.0, "limit_text": "ages quickly above about 105 °C",
+        "evaporation": 0.0, "emissivity": 0.9,
+        "note": "mineral insulating oil (IEC 60296), viscosity rises steeply in the cold"},
+    "Hydraulic oil (ISO VG 32)": {
+        "t": [0, 20, 40, 60, 80, 100],
+        "rho": [878, 865, 852, 839, 826, 813],
+        "cp": [1840, 1900, 1970, 2040, 2110, 2180],
+        "k": [0.136, 0.134, 0.132, 0.130, 0.128, 0.126],
+        "mu": [262, 73, 27.2, 13.0, 7.2, 4.4],
+        "limit_c": 90.0, "limit_text": "ages quickly above about 90 °C",
+        "evaporation": 0.0, "emissivity": 0.9, "note": "mineral oil, 32 mm²/s at 40 °C"},
+}
+DEFAULT_FLUID = "Water"
+
+
+def fluid_props(name, t):
+    """Properties of a liquid at the temperature(s) t °C (clamped to its table): {"rho", "cp",
+    "k", "mu" (Pa·s), "nu" (m²/s), "alpha" (m²/s), "pr", "beta" (1/K)}; arrays for array t."""
+    f = FLUIDS.get(name) or FLUIDS[DEFAULT_FLUID]
+    temps = np.asarray(f["t"], float)
+    scalar = np.ndim(t) == 0
+    tt = np.clip(np.asarray(t, float), temps[0], temps[-1])
+    rho = np.interp(tt, temps, f["rho"])
+    cp = np.interp(tt, temps, f["cp"])
+    k = np.interp(tt, temps, f["k"])
+    mu = np.exp(np.interp(tt, temps, np.log(np.asarray(f["mu"], float)))) * 1e-3   # log-linear
+    slope = np.gradient(np.asarray(f["rho"], float), temps)
+    beta = np.maximum(-np.interp(tt, temps, slope) / rho, 0.0)
+    out = {"rho": rho, "cp": cp, "k": k, "mu": mu, "nu": mu / rho, "alpha": k / (rho * cp),
+           "pr": mu * cp / k, "beta": beta}
+    return {key: float(value) for key, value in out.items()} if scalar else out
+
+
+def fluid_density(name, t):
+    f = FLUIDS.get(name) or FLUIDS[DEFAULT_FLUID]
+    temps = np.asarray(f["t"], float)
+    return np.interp(np.clip(np.asarray(t, float), temps[0], temps[-1]), temps, f["rho"])
 
 
 # ── study data model ──────────────────────────────────────────────────────────
@@ -653,7 +752,7 @@ def contact_text(contact):
 
 _COMPONENT_KEYS = ("name", "kind", "visible", "position", "rotation", "pivot", "source",
                    "source_name", "signature", "path", "file_stamp", "file_root", "shape", "zone",
-                   "flow")
+                   "flow", "pcb", "package")
 
 
 def study_new(name=THERMAL_DEFAULT_NAME):
@@ -785,8 +884,22 @@ CONDITION_KINDS = {             # kind: (title, colour in the 3-D view)
     "flux": ("Heat flux", (1.0, 0.3, 0.8)),        # magenta: apart from orange heat sources
     "convection": ("Convection", (0.2, 0.85, 0.85)),
     "insulated": ("Insulated", (0.8, 0.8, 0.8)),
+    "coolant": ("Coolant channel", (0.1, 0.65, 1.0)),
+    "bath": ("Liquid bath", (0.45, 0.45, 1.0)),
 }
+LIQUID_KINDS = ("coolant", "bath")
+LIQUID_MODELS = {"simple": "Correlations (fast)", "flow": "Liquid flow solved (Airflow mode)"}
+BATH_MODES = {"container": "Fills the container", "fixed": "Large volume, fixed temperature"}
 CONDITION_HINTS = {
+    "coolant": "Pick the inner faces of a pipe, drilled channel or cold-plate passage. The liquid "
+               "enters at the lower end (or reversed), takes up heat from the wall and warms "
+               "along the channel; the heat transfer follows pipe-flow correlations (laminar with "
+               "the entry region, transitional, turbulent).",
+    "bath": "Pick faces that touch the liquid, e.g. the inside of the container and the heater. "
+            "'Fills the container': the liquid fills the container up to the fill level and is "
+            "well mixed (one temperature), with natural convection on the wetted faces and the "
+            "open surface losing heat to the room. 'Large volume': the faces see liquid at a "
+            "fixed temperature.",
     "fixed": "The faces are held at this temperature, e.g. a part clamped to a cold plate or a "
              "water-cooled surface.",
     "flux": "This heat enters through the faces (e.g. a heating foil or a known load). The faces "
@@ -803,7 +916,14 @@ def condition_new(kind, name):
             "temperature_c": 25.0,                                  # fixed
             "flux_mode": "total", "power_w": 1.0, "flux_w_m2": 1000.0,  # flux
             "profile": None, "thermostat": None,                    # flux: time profile, control
-            "h": 25.0, "fluid_ambient": True, "fluid_c": 25.0}      # convection
+            "h": 25.0, "fluid_ambient": True, "fluid_c": 25.0,      # convection
+            # coolant channel and liquid bath
+            "fluid": DEFAULT_FLUID, "liquid_model": "simple",
+            "flow_mode": "fixed", "flow_lpm": 1.0,                   # coolant: L/min or a pump
+            "pump_max_lpm": 4.0, "pump_max_kpa": 20.0, "pump_curve": [],
+            "inlet_c": 25.0, "inlet_from": "", "reverse": False,
+            "bath_mode": "container", "fill_auto": True, "fill_z": 0.0,   # bath
+            "bath_c": 25.0, "bath_start_auto": True, "evaporation": True}
 
 
 def condition_settings(data):
@@ -813,9 +933,22 @@ def condition_settings(data):
         raise ValueError(f"invalid face condition kind: {kind!r}")
     condition = condition_new(kind, str(data.get("name", CONDITION_KINDS[kind][0])))
     condition["enabled"] = bool(data.get("enabled", True))
-    for key in ("temperature_c", "power_w", "flux_w_m2", "h", "fluid_c"):
+    for key in ("temperature_c", "power_w", "flux_w_m2", "h", "fluid_c", "flow_lpm",
+                "pump_max_lpm", "pump_max_kpa", "inlet_c", "fill_z", "bath_c"):
         if key in data:
             condition[key] = float(data[key])
+    for key in ("flow_lpm", "pump_max_lpm", "pump_max_kpa"):
+        condition[key] = max(0.0, condition[key])
+    if data.get("fluid") in FLUIDS:
+        condition["fluid"] = data["fluid"]
+    condition["liquid_model"] = "flow" if data.get("liquid_model") == "flow" else "simple"
+    condition["flow_mode"] = "pump" if data.get("flow_mode") == "pump" else "fixed"
+    condition["pump_curve"] = [[float(q), float(p)] for q, p in data.get("pump_curve") or []]
+    condition["inlet_from"] = str(data.get("inlet_from") or "")
+    condition["bath_mode"] = "fixed" if data.get("bath_mode") == "fixed" else "container"
+    for key, default in (("reverse", False), ("fill_auto", True), ("bath_start_auto", True),
+                         ("evaporation", True)):
+        condition[key] = bool(data.get(key, default))
     condition["flux_mode"] = "density" if data.get("flux_mode") == "density" else "total"
     condition["profile"] = profile_settings(data.get("profile"))
     condition["thermostat"] = thermostat_settings(data.get("thermostat"))
@@ -1341,7 +1474,8 @@ def study_used_materials(study):
 def study_to_data(study):
     components = []
     for component in study["components"]:
-        data = {key: copy.deepcopy(component[key]) for key in _COMPONENT_KEYS if key in component}
+        data = {key: pack_arrays(component[key]) if key == "pcb" else copy.deepcopy(component[key])
+                for key in _COMPONENT_KEYS if key in component}
         data["bodies"] = [{
             "name": body["name"], "color": list(body["color"]), "opacity": body["opacity"],
             "fused": bool(body.get("fused", False)), "material": body.get("material"),
@@ -1396,6 +1530,10 @@ def study_from_data(data):
                     "shape", "zone", "flow"):
             if key in item:
                 component[key] = copy.deepcopy(item[key])
+        if isinstance(item.get("pcb"), dict):
+            component["pcb"] = unpack_arrays(item["pcb"])
+        if isinstance(item.get("package"), dict):
+            component["package"] = package_settings(item["package"])
         study["components"].append(component)
     study["conditions"] = [condition_settings(item) for item in data.get("conditions", [])]
     study["probes"] = [probe_settings(item) for item in data.get("probes", [])]
@@ -1435,8 +1573,8 @@ _SHARED_BODY_KEYS = ("vertices", "triangles", "faces")
 def study_state(study):
     components = []
     for component in study["components"]:
-        data = {key: copy.deepcopy(value) for key, value in component.items()
-                if key != "bodies" and not key.startswith("_")}
+        data = {key: copy_sharing_arrays(value) if key == "pcb" else copy.deepcopy(value)
+                for key, value in component.items() if key != "bodies" and not key.startswith("_")}
         data["bodies"] = [{key: (value if key in _SHARED_BODY_KEYS else copy.deepcopy(value))
                            for key, value in body.items() if not key.startswith("_")}
                           for body in component["bodies"]]
@@ -1505,6 +1643,11 @@ def study_jobs(study):
                              for face in body.get("faces", [])],
                    "primitive": component["kind"] in PRIMITIVE_KINDS,
                    "zone": bool(component.get("zone"))}
+            if component.get("pcb") is not None:
+                job["pcb"] = component["pcb"]
+                job["pcb_frame"] = pcb_frame_of(component)
+            if component.get("package") is not None:
+                job["junction"] = dict(component["package"])
             (primitives if job["primitive"] else jobs).append(job)
     return jobs + primitives
 
@@ -1669,15 +1812,2088 @@ def _natural_h(dT, length, orientation):
     return np.select([orientation == 0, orientation == 1], [vertical, up], down)
 
 
-def _forced_h(speed, length):
-    """Forced-convection coefficient W/(m²·K) of air flowing along a surface of `length` m at
-    `speed` m/s (flat plate, laminar / turbulent, average over the length)."""
+def _forced_h(speed, length, nu_fluid=AIR_KINEMATIC_VISCOSITY, prandtl=AIR_PRANDTL,
+              k_fluid=AIR_CONDUCTIVITY):
+    """Forced-convection coefficient W/(m²·K) of air (or another fluid) flowing along a surface
+    of `length` m at `speed` m/s (flat plate, laminar / turbulent, average over the length)."""
     length = np.maximum(length, 1e-3)
-    re = np.maximum(speed, 0.0) * length / AIR_KINEMATIC_VISCOSITY
-    pr3 = AIR_PRANDTL ** (1.0 / 3.0)
+    re = np.maximum(speed, 0.0) * length / nu_fluid
+    pr3 = prandtl ** (1.0 / 3.0)
     nu = np.where(re < 5e5, 0.664 * np.sqrt(re) * pr3,
                   np.maximum(0.037 * re ** 0.8 - 871.0, 0.664 * np.sqrt(5e5)) * pr3)
-    return nu * AIR_CONDUCTIVITY / length
+    return nu * k_fluid / length
+
+
+# ── liquid cooling: pipe flow, channel shape, natural convection in liquids ───────────
+def _duct_constants(geometry):
+    """Fully developed laminar Nu (uniform wall temperature, uniform heat flux) and f·Re (Darcy)
+    of a channel cross-section: round, or rectangular by its aspect ratio (Shah & London)."""
+    if geometry.get("shape") == "rect":
+        a = float(np.clip(geometry.get("aspect", 1.0), 0.0, 1.0))
+        nu_t = 7.541 * (1 - 2.610 * a + 4.970 * a ** 2 - 5.119 * a ** 3 + 2.702 * a ** 4 - 0.548 * a ** 5)
+        nu_h = 8.235 * (1 - 2.0421 * a + 3.0853 * a ** 2 - 2.4765 * a ** 3 + 1.0578 * a ** 4
+                        - 0.1861 * a ** 5)
+        f_re = 96.0 * (1 - 1.3553 * a + 1.9467 * a ** 2 - 1.7012 * a ** 3 + 0.9564 * a ** 4
+                       - 0.2537 * a ** 5)
+        return nu_t, nu_h, f_re
+    return 3.657, 4.364, 64.0
+
+
+def pipe_flow(fluid, flow_m3s, geometry, t_bulk, t_wall=None, wall_mode=0.5):
+    """Heat transfer and pressure drop of a liquid flowing through a channel (geometry from
+    channel_geometry). Laminar: mean Nu over the channel length with the entry region
+    (Gnielinski, VDI Heat Atlas), blended between uniform wall temperature (wall_mode 0, Nu → 3.66
+    in a long round pipe) and uniform heat flux (wall_mode 1, Nu → 4.36); turbulent: Gnielinski;
+    in between interpolated. Wall-temperature property correction when t_wall is given. Pressure
+    drop: Darcy–Weisbach, smooth walls, plus 1.5 dynamic heads for entry and exit."""
+    p = fluid_props(fluid, t_bulk)
+    dh = max(geometry["dh_mm"], 1e-3) / 1000.0
+    area = max(geometry["area_mm2"], 1e-6) * 1e-6
+    length = max(geometry["length_mm"] / 1000.0, dh)
+    velocity = max(flow_m3s, 0.0) / area
+    re = p["rho"] * velocity * dh / p["mu"]
+    pr = p["pr"]
+    nu_t, nu_h, f_re = _duct_constants(geometry)
+    w = float(np.clip(wall_mode, 0.0, 1.0))
+
+    def laminar(re_):
+        gz = re_ * pr * dh / length
+        mean_t = np.cbrt(nu_t ** 3 + 0.7 ** 3 + (1.615 * np.cbrt(gz) - 0.7) ** 3 +
+                         ((2.0 / (1.0 + 22.0 * pr)) ** (1.0 / 6.0) * math.sqrt(gz)) ** 3)
+        mean_h = np.cbrt(nu_h ** 3 + 0.6 ** 3 + (1.953 * np.cbrt(gz) - 0.6) ** 3 +
+                         (0.924 * np.cbrt(pr) * math.sqrt(re_ * dh / length)) ** 3)
+        return float(mean_t + w * (mean_h - mean_t))
+
+    def turbulent(re_):
+        xi = (1.8 * math.log10(re_) - 1.5) ** -2
+        return float((xi / 8.0) * (re_ - 1000.0) * pr /
+                     (1.0 + 12.7 * math.sqrt(xi / 8.0) * (pr ** (2.0 / 3.0) - 1.0)) *
+                     (1.0 + (dh / length) ** (2.0 / 3.0)))
+
+    if re <= 2300.0:
+        nu, regime = laminar(re), "laminar"
+    elif re >= 1e4:
+        nu, regime = turbulent(re), "turbulent"
+    else:
+        gamma = (re - 2300.0) / (1e4 - 2300.0)
+        nu, regime = (1.0 - gamma) * laminar(2300.0) + gamma * turbulent(1e4), "transitional"
+    if t_wall is not None and np.isfinite(t_wall):
+        pw = fluid_props(fluid, t_wall)
+        nu *= (p["mu"] / pw["mu"]) ** 0.14 if regime == "laminar" else (pr / pw["pr"]) ** 0.11
+    h = nu * p["k"] / dh
+
+    def turbulent_friction(re_):
+        return (1.8 * math.log10(re_) - 1.5) ** -2
+
+    if re < 2300.0:
+        friction = f_re / max(re, 1e-9)
+    elif re > 4000.0:
+        friction = turbulent_friction(re)
+    else:
+        gamma = (re - 2300.0) / 1700.0
+        friction = (1.0 - gamma) * f_re / 2300.0 + gamma * turbulent_friction(4000.0)
+    dynamic = 0.5 * p["rho"] * velocity ** 2
+    dp = (friction * length / dh + 1.5) * dynamic if re > 0 else 0.0
+    return {"velocity": velocity, "re": re, "pr": pr, "regime": regime, "nu": nu, "h": h,
+            "friction": friction, "dp": dp, "rho": p["rho"], "cp": p["cp"], "k": p["k"],
+            "mu": p["mu"], "gz": re * pr * dh / length, "wall_mode": w}
+
+
+def pump_curve(condition):
+    """(flows m³/s, pressures Pa) of a coolant pump, falling with the flow: a table
+    [[L/min, kPa], …] or the line from the shut-off pressure to the free-flowing flow rate."""
+    table = condition.get("pump_curve") or []
+    if len(table) >= 2:
+        points = np.array(sorted((float(q), float(p)) for q, p in table))
+        return points[:, 0] / 60000.0, np.maximum(points[:, 1], 0.0) * 1000.0
+    q_max = max(float(condition.get("pump_max_lpm", 4.0)), 1e-6) / 60000.0
+    return np.array([0.0, q_max]), np.array([max(float(condition.get("pump_max_kpa", 20.0)), 0.0)
+                                             * 1000.0, 0.0])
+
+
+def pump_operating_point(curve, system_dp):
+    """Flow (m³/s) where the pump curve meets the rising system curve system_dp(Q) (Pa)."""
+    flows, pressures = curve
+    low, high = 0.0, float(flows[-1])
+    if high <= 0.0:
+        return 0.0
+    for _ in range(60):
+        middle = 0.5 * (low + high)
+        if np.interp(middle, flows, pressures) > system_dp(middle):
+            low = middle
+        else:
+            high = middle
+    return 0.5 * (low + high)
+
+
+def channel_march(area, wall, h, mdot_cp, t_in):
+    """Liquid warming along a channel, segment by segment from the inlet (exact for a constant
+    wall temperature within a segment). area (n,) m², wall (n,) °C, h W/(m²·K), mdot_cp W/K.
+    Returns (t_face (n,): the liquid temperature the faces of each segment see, so that
+    h·A·(T_wall − t_face) is exactly the heat the liquid takes up there; t_after (n,); heat (n,) W)."""
+    n = len(area)
+    h = np.broadcast_to(np.asarray(h, float), (n,))      # one value, or one per segment
+    t_face, t_after, heat = np.empty(n), np.empty(n), np.zeros(n)
+    t = float(t_in)
+    for i in range(n):
+        if area[i] <= 0 or mdot_cp <= 0 or h[i] <= 0:
+            t_face[i] = t_after[i] = t
+            continue
+        ntu = h[i] * area[i] / mdot_cp
+        t_new = wall[i] + (t - wall[i]) * math.exp(-ntu)
+        heat[i] = mdot_cp * (t_new - t)
+        t_face[i] = wall[i] - heat[i] / (h[i] * area[i])
+        t_after[i] = t = t_new
+    return t_face, t_after, heat
+
+
+def wall_mode_of(area, wall, liquid):
+    """0 … 1: how much the wall behaves like uniform heat flux (wall − liquid difference even
+    along the channel) rather than uniform wall temperature (the wall itself even)."""
+    weights = np.asarray(area, float)
+    if weights.sum() <= 0 or len(weights) < 3:
+        return 0.5
+    weights = weights / weights.sum()
+
+    def spread(values):
+        mean = float(weights @ values)
+        return float(weights @ (values - mean) ** 2)
+    a, b = spread(np.asarray(wall, float)), spread(np.asarray(wall, float) - liquid)
+    return 0.5 if a + b < 1e-12 else a / (a + b)
+
+
+def _liquid_natural_h(fluid, dT, length, orientation, t_film):
+    """Natural-convection coefficient W/(m²·K) of a surface in a liquid at rest. dT = surface −
+    liquid (signed); orientation 0 = vertical, 1 = the surface faces up (into the liquid above
+    it), 2 = faces down. Churchill & Chu (vertical), Lloyd & Moran (hot face up / cold face down),
+    0.27 Ra^¼ for the stable cases."""
+    p = fluid_props(fluid, t_film)
+    dT = np.asarray(dT, float)
+    length = np.maximum(np.asarray(length, float), 1e-3)
+    ra = GRAVITY * np.maximum(p["beta"], 1e-5) * np.maximum(np.abs(dT), 0.02) * length ** 3 / \
+        (p["nu"] * p["alpha"])
+    psi = (1.0 + (0.492 / p["pr"]) ** (9.0 / 16.0)) ** (-16.0 / 9.0)
+    vertical = (0.825 + 0.387 * (ra * psi) ** (1.0 / 6.0)) ** 2
+    rising = np.where(ra < 1e7, 0.54 * ra ** 0.25, 0.15 * np.cbrt(ra))
+    stable = 0.27 * ra ** 0.25
+    plume = (orientation == 1) == (dT > 0)          # hot face up, or cold face down
+    nu = np.where(orientation == 0, vertical, np.where(plume, rising, stable))
+    return np.maximum(nu, 1.0) * p["k"] / length
+
+
+def _saturation_pressure(t):
+    """Saturation pressure of water vapour (Pa) at t °C (Magnus, at most 1 atm)."""
+    t = np.minimum(np.asarray(t, float), 100.0)
+    return np.minimum(610.94 * np.exp(17.625 * t / (t + 243.04)), 101325.0)
+
+
+def _evaporation_h(t_surface, t_air, h_air, share, humidity=0.5):
+    """Extra heat transfer coefficient W/(m²·K) for evaporation from an open liquid surface into
+    room air of 50 % humidity (Lewis analogy from the convective coefficient h_air)."""
+    if share <= 0:
+        return np.zeros_like(np.asarray(t_surface, float))
+    pressure = 101325.0
+    ps = _saturation_pressure(np.clip(t_surface, -40.0, 100.0))
+    pa = humidity * _saturation_pressure(t_air)
+    # vapour mass fractions at the surface and in the room (bounded by 1 at boiling)
+    ys = 0.622 * ps / (pressure - 0.378 * ps)
+    ya = 0.622 * pa / (pressure - 0.378 * pa)
+    q = share * np.asarray(h_air, float) / 1005.0 * np.maximum(ys - ya, 0.0) * 2.45e6
+    return q / np.maximum(np.asarray(t_surface, float) - t_air, 0.5)
+
+
+def _evaporation_q(t_surface, t_air, length, share):
+    """Evaporation heat flux W/m² of an open liquid surface at t_surface into room air (natural
+    convection above it for the Lewis analogy)."""
+    t_surface = np.asarray(t_surface, float)
+    h_air = _natural_h(t_surface - t_air, length, np.ones(t_surface.shape, int))
+    return _evaporation_h(t_surface, t_air, h_air, share) * np.maximum(t_surface - t_air, 0.5) * \
+        (t_surface > t_air)
+
+
+def channel_geometry(triangles, reverse=False):
+    """Shape of a coolant passage from its wall triangles (n, 3, 3) in mm: the position along the
+    passage comes from shortest paths over points sampled on the wall (works for bent and
+    serpentine channels), the cross-section from slices across it.
+    Returns {"length_mm", "wall_area_mm2", "area_mm2", "perimeter_mm", "dh_mm", "shape"
+    ("round" | "rect"), "aspect", "size_mm" (diameter, or width and height), "points" (samples),
+    "s" (mm from the inlet per sample), "centre" (slice centres from the inlet), "centre_s",
+    "tangent", "inlet", "outlet", "inlet_dir", "outlet_dir"}. The inlet is the lower end unless
+    `reverse`."""
+    from scipy.sparse import coo_matrix, csgraph
+    from scipy.spatial import ConvexHull, cKDTree
+    P = np.asarray(triangles, float).reshape(-1, 3, 3)
+    cross = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    tri_area = 0.5 * np.linalg.norm(cross, axis=1)
+    keep = tri_area > 1e-12
+    P, tri_area = P[keep], tri_area[keep]
+    wall_area = float(tri_area.sum())
+    if wall_area <= 0:
+        raise ThermalError("A coolant channel has no faces (pick the inner faces of the passage).")
+    rng = np.random.default_rng(12345)
+    cumulative = np.cumsum(tri_area)
+    unit_normal = cross[keep] / (2.0 * tri_area[:, None])
+
+    def sample(n):
+        """(points, unit normals of their triangles) spread evenly over the wall."""
+        u = (np.arange(n) + rng.random(n)) / n * cumulative[-1]
+        tri = np.minimum(np.searchsorted(cumulative, u, side="right"), len(P) - 1)
+        r1, r2 = np.sqrt(rng.random(n)), rng.random(n)
+        a, b, c = 1.0 - r1, r1 * (1.0 - r2), r1 * r2
+        return (a[:, None] * P[tri, 0] + b[:, None] * P[tri, 1] + c[:, None] * P[tri, 2],
+                unit_normal[tri])
+
+    # open ends: boundary loops of the welded wall mesh (edges of one triangle only); the two
+    # longest are the inlet and outlet rims, and the distance from a whole rim measures the
+    # position along the passage without leaning around the circumference
+    corners = P.reshape(-1, 3)
+    _keys, first, vid = np.unique(np.round(corners / 1e-4).astype(np.int64), axis=0,
+                                  return_index=True, return_inverse=True)
+    vid = vid.reshape(-1, 3)
+    coords = corners[first]
+    edges = np.sort(np.concatenate([vid[:, [0, 1]], vid[:, [1, 2]], vid[:, [2, 0]]]), axis=1)
+    edges, uses = np.unique(edges, axis=0, return_counts=True)
+    boundary = edges[uses == 1]
+    rims = []
+    if len(boundary):
+        n_vertices = len(coords)
+        loop_graph = coo_matrix((np.ones(len(boundary)), (boundary[:, 0], boundary[:, 1])),
+                                shape=(n_vertices, n_vertices))
+        _n, label = csgraph.connected_components(loop_graph, directed=False)
+        edge_label = label[boundary[:, 0]]
+        edge_length = np.linalg.norm(coords[boundary[:, 0]] - coords[boundary[:, 1]], axis=1)
+        totals = np.bincount(edge_label, edge_length)
+        order = np.argsort(-totals)
+        if len(order) >= 2 and totals[order[1]] > 0.3 * totals[order[0]]:
+            for lab in order[:2]:
+                spacing = totals[lab] / 64.0
+                pieces = []
+                for (a, b), size in zip(boundary[edge_label == lab], edge_length[edge_label == lab]):
+                    count = max(1, int(math.ceil(size / spacing)))
+                    f = np.arange(count)[:, None] / count
+                    pieces.append(coords[a] + f * (coords[b] - coords[a]))
+                rims.append(np.concatenate(pieces))
+
+    def along(points, use_rims=True):
+        """(position along the passage per sample in path units, share of connected samples,
+        whether the rims were used)."""
+        rim_list = rims if use_rims else []
+        nodes = np.concatenate([points] + rim_list)
+        n, n_points = len(nodes), len(points)
+        k = min(13, n)
+        distance, neighbour = cKDTree(nodes).query(nodes, k=k)
+        rows = np.repeat(np.arange(n), k - 1)
+        graph = coo_matrix((distance[:, 1:].ravel() + 1e-9, (rows, neighbour[:, 1:].ravel())),
+                           shape=(n, n)).tocsr()
+        graph = graph.maximum(graph.T)
+        _count, labels = csgraph.connected_components(graph, directed=False)
+        main = labels == np.argmax(np.bincount(labels))
+        if rim_list:
+            first_rim = np.arange(n_points, n_points + len(rims[0]))
+            da = csgraph.dijkstra(graph, indices=first_rim, min_only=True)
+            db = csgraph.dijkstra(graph, indices=np.arange(n_points + len(rims[0]), n),
+                                  min_only=True)
+            reached = main[:n_points] & np.isfinite(da[:n_points]) & np.isfinite(db[:n_points])
+            if reached.sum() < 0.5 * main[:n_points].sum():
+                # the rims lie on pieces apart from the main one (faces that do not join up):
+                # between the farthest samples instead
+                return along(points, use_rims=False)
+        else:                       # no open ends found: between the two farthest samples
+            start = int(np.flatnonzero(main)[0])
+            d0 = csgraph.dijkstra(graph, indices=start)
+            a = int(np.argmax(np.where(main, d0, -np.inf)))
+            da = csgraph.dijkstra(graph, indices=a)
+            b = int(np.argmax(np.where(main, da, -np.inf)))
+            db = csgraph.dijkstra(graph, indices=b)
+        main &= np.isfinite(da) & np.isfinite(db)
+        s = np.full(n, np.nan)
+        s[main] = (da[main] - db[main]) / 2.0
+        s -= s[main].min()
+        if not main.all():                    # stray samples: position of the nearest main one
+            tree = cKDTree(nodes[main])
+            s[~main] = s[main][tree.query(nodes[~main])[1]]
+        return s[:n_points], float(main[:n_points].mean()), bool(rim_list)
+
+    points, normals = sample(6000)
+    s, share, used_rims = along(points)
+    if not used_rims:
+        rims.clear()
+    if rims:
+        # faces of separate parts (a duct built from plates) leave open edges everywhere: the
+        # rims are the ends only when they give about the length between the farthest samples
+        s_far, share_far, _used = along(points, use_rims=False)
+        if float(s.max()) < 0.7 * float(s_far.max()):
+            rims.clear()
+            s, share = s_far, share_far
+    length = float(s.max())
+    if length <= 0:
+        raise ThermalError("A coolant channel needs the faces along the whole passage.")
+    estimate = wall_area / length / math.pi                       # diameter of a round passage
+    wanted = int(np.clip(wall_area / (estimate / 8.0) ** 2, 6000, 60000))
+    if wanted > 9000:
+        points, normals = sample(wanted)
+        s, share, used_rims = along(points)
+        if not used_rims:
+            rims.clear()
+        length = float(s.max())
+    if share < 0.8:
+        raise ThermalError("The faces of a coolant channel must form one connected passage (pick "
+                           "the inner faces of one channel; make a condition for each channel).")
+
+    def slices(s, length, count):
+        edges = np.linspace(0.0, length, count + 1)
+        which = np.clip(np.searchsorted(edges, s, side="right") - 1, 0, count - 1)
+        counts = np.bincount(which, minlength=count)
+        centre = np.stack([np.bincount(which, points[:, a], count) for a in range(3)],
+                          axis=1) / np.maximum(counts, 1)[:, None]
+        filled = counts > 0
+        middle = 0.5 * (edges[1:] + edges[:-1])
+        for a in range(3):
+            centre[~filled, a] = np.interp(middle[~filled], middle[filled], centre[filled, a])
+        return which, centre, middle
+
+    if not rims:
+        # between the farthest samples the position leans around the circumference near the
+        # ends: projected onto a centre line through wide slices (which average the lean out)
+        n_wide = int(np.clip(round(length / max(2.0 * estimate, 1e-3)), 3, 100))
+        _which, wide, _middle = slices(s, length, n_wide)
+        segment = np.diff(wide, axis=0)
+        seg_length = np.maximum(np.linalg.norm(segment, axis=1), 1e-12)
+        arc = np.r_[0.0, np.cumsum(seg_length)]
+        best = np.full(len(points), np.inf)
+        new_s = np.zeros(len(points))
+        for j in range(len(segment)):
+            t = ((points - wide[j]) @ segment[j]) / seg_length[j] ** 2
+            t = np.clip(t, -np.inf if j == 0 else 0.0, np.inf if j == len(segment) - 1 else 1.0)
+            dist = np.linalg.norm(points - (wide[j] + t[:, None] * segment[j]), axis=1)
+            better = dist < best
+            best[better] = dist[better]
+            new_s[better] = (arc[j] + t * seg_length[j])[better]
+        s = new_s - new_s.min()
+        length = float(s.max())
+
+    # path lengths over the samples run a few per cent long: scaled to the length of the line
+    # through the slice centres
+    n_coarse = int(np.clip(round(length / max(estimate, 1e-3)), 3, 200))
+    _which, centre, middle = slices(s, length, n_coarse)
+    polyline = float(np.linalg.norm(np.diff(centre, axis=0), axis=1).sum())
+    if middle[-1] > middle[0] and polyline > 0:
+        scale = polyline / (middle[-1] - middle[0])
+        s, length, estimate = s * scale, length * scale, estimate / scale
+    # slices across the passage: centre line, direction and cross-section
+    n_slices = int(np.clip(round(length / max(estimate / 2.0, 1e-3)), 4, 400))
+    which, centre, middle = slices(s, length, n_slices)
+    tangent = np.gradient(centre, axis=0) if n_slices > 1 else np.array([[1.0, 0.0, 0.0]])
+    tangent /= np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
+    areas, perimeters = [], []
+    lo, hi = int(0.1 * n_slices), max(int(0.9 * n_slices), int(0.1 * n_slices) + 1)
+    for i in range(lo, hi):
+        mine = points[which == i] - centre[i]
+        if len(mine) < 8:
+            continue
+        t = tangent[i]
+        u = np.cross(t, [0.0, 0.0, 1.0] if abs(t[2]) < 0.9 else [1.0, 0.0, 0.0])
+        u /= np.linalg.norm(u)
+        v = np.cross(t, u)
+        try:
+            hull = ConvexHull(np.stack([mine @ u, mine @ v], axis=1))
+        except Exception:
+            continue
+        areas.append(hull.volume)
+        perimeters.append(hull.area)
+    if areas:
+        area = float(np.median(areas))
+        perimeter = float(np.median(perimeters))
+    else:                                                 # too few samples: assume round
+        perimeter = wall_area / length
+        area = perimeter ** 2 / (4.0 * math.pi)
+    dh = 4.0 * area / max(perimeter, 1e-9)
+    circularity = 4.0 * math.pi * area / max(perimeter, 1e-9) ** 2
+    if circularity > 0.9:
+        shape, aspect, size = "round", 1.0, [dh]
+    else:
+        half = perimeter / 2.0
+        disc = max(half * half - 4.0 * area, 0.0)
+        width, height = (half + math.sqrt(disc)) / 2.0, (half - math.sqrt(disc)) / 2.0
+        shape, aspect, size = "rect", height / max(width, 1e-9), [width, height]
+    # inlet at the lower end (then smaller X, then Y) unless reversed; the ends are compared by
+    # the mean of the samples near them (robust against the exact end slices)
+    delta = points[s > 0.85 * length].mean(0) - points[s < 0.15 * length].mean(0)
+    lower_first = True
+    for axis in (2, 0, 1):
+        if abs(delta[axis]) > 0.01 * length:
+            lower_first = bool(delta[axis] > 0)
+            break
+    if lower_first == bool(reverse):
+        s = length - s
+        centre, tangent, middle = centre[::-1], -tangent[::-1], length - middle[::-1]
+    return {"length_mm": length, "wall_area_mm2": wall_area, "area_mm2": area,
+            "perimeter_mm": perimeter, "dh_mm": dh, "shape": shape, "aspect": aspect,
+            "size_mm": size, "points": points.astype(np.float32), "s": s,
+            "normals": normals.astype(np.float32),
+            "centre": centre, "centre_s": middle, "tangent": tangent,
+            "inlet": centre[0], "outlet": centre[-1], "inlet_dir": tangent[0],
+            "outlet_dir": tangent[-1]}
+
+
+def channel_text(geometry):
+    if geometry["shape"] == "round":
+        cross = f"round, Ø {geometry['size_mm'][0]:.3g} mm"
+    else:
+        cross = (f"rectangular {geometry['size_mm'][0]:.3g} × {geometry['size_mm'][1]:.3g} mm "
+                 f"(hydraulic Ø {geometry['dh_mm']:.3g} mm)")
+    return f"{cross}, {geometry['length_mm']:.4g} mm long"
+
+
+BATH_CONDUCTIVITY = 3000.0     # W/(m·K) inside a well-mixed bath body (far above its film)
+BATH_FILM_GUESS = 300.0        # W/(m²·K) first guess of the film on the wetted faces
+
+
+def _condition_triangles(condition, bodies):
+    """World triangles (n, 3, 3) in mm of the faces a condition picked, and their unit normals."""
+    tris, normals = [], []
+    for b, faces in condition["targets"].items():
+        body = bodies[b]
+        face_tris = body["job"].get("faces", [])
+        chosen = [np.asarray(face_tris[f], np.int64) for f in faces if 0 <= f < len(face_tris)]
+        if not chosen:
+            continue
+        P = body["V"][body["T"][np.concatenate(chosen)]]
+        normal = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+        normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
+        tris.append(P)
+        normals.append(normal)
+    if not tris:
+        return np.zeros((0, 3, 3)), np.zeros((0, 3))
+    return np.concatenate(tris), np.concatenate(normals)
+
+
+def condition_world_triangles(study, condition):
+    """World triangles (n, 3, 3) in mm of the faces a study condition picked (for the window)."""
+    components = {c["name"]: c for c in study["components"]}
+    tris = []
+    for ref in condition["faces"]:
+        component = components.get(ref["component"])
+        if component is None or not 0 <= ref["body"] < len(component["bodies"]):
+            continue
+        body = component["bodies"][ref["body"]]
+        faces = body.get("faces", [])
+        if not 0 <= ref["face"] < len(faces):
+            continue
+        V = np.asarray(cad.assembly_world_vertices(component, body["vertices"]), float)
+        T = np.asarray(body["triangles"], np.int64).reshape(-1, 3)
+        tris.append(V[T[np.asarray(faces[ref["face"]]["tris"], np.int64)]])
+    return np.concatenate(tris) if tris else np.zeros((0, 3, 3))
+
+
+def _cells_of(points, faces):
+    """Grid cells (index tuple) of points inside a grid with cell faces `faces` (per axis, mm)."""
+    inside = np.ones(len(points), bool)
+    index = []
+    for a in range(3):
+        inside &= (points[:, a] >= faces[a][0]) & (points[:, a] <= faces[a][-1])
+        index.append(np.clip(np.searchsorted(faces[a], points[:, a]) - 1, 0, len(faces[a]) - 2))
+    return tuple(i[inside] for i in index)
+
+
+def _liquid_seed_cells(tris, normals, faces, open_cells, offset):
+    """Open grid cells (bool grid open_cells) just in front of the picked triangles (`offset` mm
+    along the normal, else behind it for meshes facing inwards), as an index tuple."""
+    P = np.asarray(tris, float)
+    centre = P.mean(1)
+    points = np.concatenate([centre] + [(2.0 * P[:, v] + centre) / 3.0 for v in range(3)])
+    direction = np.tile(normals, (4, 1))
+    for sign in (1.0, -1.0):
+        cells = _cells_of(points + sign * offset * direction, faces)
+        keep = open_cells[cells]
+        if keep.any():
+            return tuple(i[keep] for i in cells)
+    return tuple(np.zeros(0, np.int64) for _ in range(3))
+
+
+def _bath_region(open_cells, faces, seeds, fill_z):
+    """Liquid cells of a container: the open cells below the fill level (cell centres) that are
+    connected to the seed cells. Returns (mask, leaks: the region reaches the grid border)."""
+    _sp, _spla, ndi, _tree = _scipy()
+    zc = 0.5 * (faces[2][1:] + faces[2][:-1])
+    below = open_cells & (zc[None, None, :] <= fill_z)
+    labels, _count = ndi.label(below)
+    found = np.unique(labels[seeds])
+    found = found[found > 0]
+    region = np.isin(labels, found) if len(found) else np.zeros(open_cells.shape, bool)
+    leaks = bool(region[0].any() or region[-1].any() or region[:, 0].any() or
+                 region[:, -1].any() or region[:, :, 0].any() or region[:, :, -1].any())
+    return region, leaks
+
+
+def _bath_fill(condition, tris):
+    """Fill level (world Z, mm) of a bath: the top of its picked faces or the value entered."""
+    if condition.get("fill_auto", True) and len(tris):
+        return float(np.asarray(tris)[:, :, 2].max())
+    return float(condition.get("fill_z", 0.0))
+
+
+def _bath_body(condition, number, low, high):
+    """Solver record of the liquid of a bath that fills its container (a well-mixed body)."""
+    fluid = condition["fluid"]
+    table = FLUIDS.get(fluid) or FLUIDS[DEFAULT_FLUID]
+    p20 = fluid_props(fluid, 20.0)
+    name = f"{condition['name']} ({fluid})"
+    extent = np.maximum(high - low, 1e-6)
+    return {"job": {"key": (-1, number), "name": name, "faces": [], "zone": False,
+                    "material": fluid},
+            "name": name, "material": fluid,
+            "props": {"k": BATH_CONDUCTIVITY, "cp": p20["cp"], "density": p20["rho"],
+                      "emissivity": table["emissivity"], "max_c": table["limit_c"], "note": ""},
+            "V": np.zeros((0, 3)), "T": np.zeros((0, 3), np.int64), "low": low, "high": high,
+            "extent": extent, "volume": 0.0, "bbox_volume": float(np.prod(extent)), "area": 0.0,
+            "k": np.full(3, BATH_CONDUCTIVITY), "emissivity": table["emissivity"], "power": 0.0,
+            "profile": None, "thermostat": None, "k_curve": None,
+            "cp_curve": (np.asarray(table["t"], float), np.asarray(table["cp"], float)),
+            "synthetic": True, "bath": condition}
+
+
+def _channel_cells(geometry, faces, open_cells, cell_size):
+    """Open grid cells inside a coolant channel (geometry from channel_geometry): nearer to the
+    centre line than the wall in that direction, between the inlet and the outlet; the largest
+    connected piece. Returns (mask, inlet mask, outlet mask) — inlet / outlet: the first and
+    last cell layer along the channel."""
+    from scipy.spatial import cKDTree
+    _sp, _spla, ndi, _tree = _scipy()
+    points = np.asarray(geometry["points"], float)
+    margin = geometry["dh_mm"]
+    centres = [0.5 * (f[1:] + f[:-1]) for f in faces]
+    box = []
+    for a in range(3):
+        lo = int(np.searchsorted(centres[a], points[:, a].min() - margin))
+        hi = int(np.searchsorted(centres[a], points[:, a].max() + margin, side="right"))
+        box.append(slice(lo, max(hi, lo)))
+    box = tuple(box)
+    sub_open = open_cells[box]
+    empty = np.zeros(open_cells.shape, bool)
+    if not sub_open.any():
+        return empty, empty, empty
+    idx = np.nonzero(sub_open)
+    X = np.stack([centres[a][box[a]][idx[a]] for a in range(3)], axis=1)
+    line, tangent, line_s = geometry["centre"], geometry["tangent"], geometry["centre_s"]
+    _d, j = cKDTree(line).query(X)
+    relative = X - line[j]
+    axial = (relative * tangent[j]).sum(1)
+    r_cell = np.linalg.norm(relative - axial[:, None] * tangent[j], axis=1)
+    s_cell = line_s[j] + axial
+    _d, w = cKDTree(points).query(X)
+    along_ok = (s_cell > 0.0) & (s_cell < geometry["length_mm"])
+    normals = geometry.get("normals")
+    if normals is not None:
+        # on the open side of the nearest wall point (the wall normals point into the channel;
+        # a mesh facing inwards is noticed by almost nothing passing)
+        side = ((X - points[w]) * np.asarray(normals, float)[w]).sum(1)
+        inside = (side > 0) & along_ok
+        if inside.sum() < 0.05 * along_ok.sum():
+            inside = (side < 0) & along_ok
+    else:
+        relative_wall = points[w] - line[j]
+        r_wall = np.linalg.norm(relative_wall - (relative_wall * tangent[j]).sum(1)[:, None] *
+                                tangent[j], axis=1)
+        inside = (r_cell < r_wall) & along_ok
+    mask_sub = np.zeros(sub_open.shape, bool)
+    mask_sub[tuple(i[inside] for i in idx)] = True
+    s_sub = np.full(sub_open.shape, np.nan)
+    s_sub[idx] = s_cell
+    # open cells the channel encloses (corners the test missed) belong to the liquid, too
+    mask_sub = ndi.binary_fill_holes(mask_sub | ~sub_open) & sub_open & np.isfinite(s_sub)
+    labels, count = ndi.label(mask_sub)
+    if count > 1:
+        mask_sub = labels == (np.argmax(np.bincount(labels.ravel())[1:]) + 1)
+    if not mask_sub.any():
+        return empty, empty, empty
+    s_in = s_sub[mask_sub]
+    layer = 1.2 * cell_size
+    inlet_sub = mask_sub & (s_sub <= s_in.min() + layer)
+    outlet_sub = mask_sub & (s_sub >= s_in.max() - layer)
+    out = []
+    for sub in (mask_sub, inlet_sub, outlet_sub):
+        full = np.zeros(open_cells.shape, bool)
+        full[box] = sub
+        out.append(full)
+    return tuple(out)
+
+
+def _ordered_channels(records):
+    """Coolant records in the order their liquid flows (an inlet fed by another channel's outlet
+    comes after it); raises on a loop."""
+    by_name = {record["condition"]["name"]: record for record in records}
+    ordered, state = [], {}
+
+    def visit(record):
+        name = record["condition"]["name"]
+        if state.get(name) == 1:
+            raise ThermalError(f"The coolant channels feed each other in a loop ('{name}'); one of "
+                               "them needs its own inlet temperature.")
+        if state.get(name) == 2:
+            return
+        state[name] = 1
+        upstream = by_name.get(record["condition"].get("inlet_from") or "")
+        record["upstream"] = upstream
+        if upstream is not None:
+            visit(upstream)
+        state[name] = 2
+        ordered.append(record)
+
+    for record in records:
+        visit(record)
+    return ordered
+
+
+def _channel_flow(record, wall_faces, face_areas):
+    """Flow of a coolant channel (fixed, or the pump operating point), its heat transfer
+    coefficient and the wall temperature per segment, from the wall temperatures of its cell
+    faces. Sets "flow", "flow_m3s", "mdot", "mdot_cp", "h", "t_in", "wall" of the record."""
+    c = record["condition"]
+    geometry = record["geometry"]
+    seg, n_seg, area = record["seg"], record["n_seg"], record["area_seg"]
+    wall = np.bincount(seg, wall_faces * face_areas, n_seg) / np.maximum(area, 1e-30)
+    upstream = record.get("upstream")
+    t_in = float(upstream["t_out"]) if upstream is not None and "t_out" in upstream \
+        else float(c["inlet_c"])
+    t_bulk = 0.5 * (t_in + record.get("t_out", t_in))
+    t_wall = float((wall_faces * face_areas).sum() / max(face_areas.sum(), 1e-30))
+    mode = record.get("mode", 0.5)
+    if c["flow_mode"] == "pump":
+        flow_m3s = pump_operating_point(
+            pump_curve(c), lambda q: pipe_flow(c["fluid"], q, geometry, t_bulk, t_wall, mode)["dp"])
+    else:
+        flow_m3s = c["flow_lpm"] / 60000.0
+    flow = pipe_flow(c["fluid"], flow_m3s, geometry, t_bulk, t_wall, mode)
+    mdot = flow_m3s * fluid_props(c["fluid"], t_in)["rho"]
+    record.update(flow=flow, flow_m3s=flow_m3s, mdot=mdot, mdot_cp=mdot * flow["cp"],
+                  h=flow["h"], t_in=t_in, wall=wall)
+    return flow
+
+
+def _update_channel(record, wall_faces, face_areas, relax=1.0):
+    """One coolant channel: flow (fixed or pump operating point), heat transfer coefficient and
+    the liquid temperature along it from the wall temperatures of its cell faces. Updates the
+    record ("h", "t_face" per segment, "t_out", "flow", …) and returns the liquid temperature
+    every face sees."""
+    flow = _channel_flow(record, wall_faces, face_areas)
+    seg, n_seg, area = record["seg"], record["n_seg"], record["area_seg"]
+    wall, t_in, mdot, mdot_cp = record["wall"], record["t_in"], record["mdot"], record["mdot_cp"]
+    flow_m3s = record["flow_m3s"]
+    # the wall follows the liquid by a share alpha per segment (≈ 1 where a heat flux drives the
+    # wall, ≈ 0 where its temperature is held), estimated from the last two updates; marching
+    # with the wall predicted that way converges in a few iterations even when the liquid warms
+    # a lot (a plain update from the last wall temperatures would crawl)
+    previous = record.get("t_face")
+    alpha = record.get("alpha", np.zeros(n_seg))
+    if previous is not None and record.get("prev_face") is not None:
+        d_face = previous - record["prev_face"]
+        d_wall = wall - record["prev_wall"]
+        moved = np.abs(d_face) > 1e-6
+        estimate = np.where(moved, d_wall / np.where(moved, d_face, 1.0), alpha)
+        alpha = np.clip(0.5 * alpha + 0.5 * np.clip(estimate, 0.0, 0.95), 0.0, 0.95)
+    base = previous if previous is not None else np.zeros(n_seg)
+    t_face, t_after, heat = channel_march(area, (wall - alpha * base) / (1.0 - alpha),
+                                          flow["h"] * (1.0 - alpha), mdot_cp, t_in)
+    if previous is not None and relax < 1.0:
+        t_face = (1.0 - relax) * previous + relax * t_face
+    filled = area > 0
+    record.update(alpha=alpha, prev_face=previous, prev_wall=wall)
+    record.update(t_face=t_face, t_after=t_after, wall=wall, t_in=t_in,
+                  t_out=float(t_after[-1]) if n_seg else t_in, flow=flow, flow_m3s=flow_m3s,
+                  mdot=mdot, mdot_cp=mdot_cp, h=flow["h"], heat_march=float(heat.sum()),
+                  mode=wall_mode_of(area[filled], wall[filled], t_face[filled]))
+    return t_face[seg]
+
+
+def liquid_rows(result, number):
+    """(header, rows) of the liquids of a result (coolant channels and baths)."""
+    header = ["Liquid item", "Kind", "Liquid", "Flow L/min", "In °C", "Out / liquid °C", "Heat W",
+              "h W/m²K", "Pressure drop kPa"]
+    rows = []
+    for entry in result.get("liquids") or []:
+        if entry["kind"] == "coolant":
+            rows.append([entry["name"], "Coolant channel" + (" (flow solved)" if entry.get("solved") else ""),
+                         entry["fluid"], number(entry["flow_lpm"]), number(entry["t_in"]),
+                         number(entry["t_out"]), number(entry["heat"]), number(entry.get("h")),
+                         number(entry["dp_pa"] / 1000.0)])
+        else:
+            kind = "Bath, large volume" if entry.get("mode") == "fixed" else \
+                "Bath, flow solved" if entry.get("solved") else "Bath, well mixed"
+            rows.append([entry["name"], kind, entry["fluid"], "", "", number(entry["t_liquid"]),
+                         number(entry["heat"]), number(entry.get("h")), ""])
+    return header, rows
+
+
+def channel_summary(record, heat):
+    """Result entry and summary line of a coolant channel; `heat` = W taken up from the faces."""
+    c, flow, geometry = record["condition"], record["flow"], record["geometry"]
+    lpm = record["flow_m3s"] * 60000.0
+    entry = {"name": c["name"], "kind": "coolant", "fluid": c["fluid"], "flow_lpm": lpm,
+             "velocity": flow["velocity"], "re": flow["re"], "pr": flow["pr"],
+             "regime": flow["regime"], "nu": flow["nu"], "h": flow["h"], "dp_pa": flow["dp"],
+             "wall_mode": record.get("mode", 0.5),
+             "t_in": record["t_in"], "t_out": record["t_out"], "heat": heat,
+             "check_t_out": record["t_in"] + heat / max(record["mdot_cp"], 1e-12),
+             "wall_max": float(np.nanmax(record["wall"][record["area_seg"] > 0]))
+             if (record["area_seg"] > 0).any() else None,
+             "geometry": channel_text(geometry), "length_mm": geometry["length_mm"],
+             "dh_mm": geometry["dh_mm"],
+             "profile_s": (np.arange(record["n_seg"]) + 1.0) / record["n_seg"] * geometry["length_mm"],
+             "profile_liquid": record["t_after"], "profile_wall": record["wall"]}
+    pump = f" (pump operating point at {flow['dp'] / 1000.0:.3g} kPa)" if c["flow_mode"] == "pump" else ""
+    text = (f"Coolant '{c['name']}' ({c['fluid']}, {lpm:.3g} L/min{pump}, {channel_text(geometry)}): "
+            f"{flow['regime']}, Re {flow['re']:.0f}, Nu {flow['nu']:.3g}, h {flow['h']:.4g} W/m²K; "
+            f"in {record['t_in']:.2f} °C → out {record['t_out']:.2f} °C, {heat:.4g} W taken up, "
+            f"pressure drop ≈ {flow['dp'] / 1000.0:.3g} kPa")
+    return entry, text
+
+
+# ── printed circuit boards ────────────────────────────────────────────────────
+# A board comes from KiCad (.kicad_pcb) or from Gerber files (+ Excellon drill, + Gerber job)
+# and becomes one body: the outline extruded to the board thickness. Its conductivity varies
+# from cell to cell: every copper layer is rasterised into a coverage map (share of copper per
+# area), and plated holes add copper through the board. A cell's in-plane conductivity is the
+# thickness-weighted mean of the layers it stands for, its through-plane conductivity the
+# series value, plus the copper barrels of the vias in parallel.
+COPPER_K = 390.0               # W/(m·K), PCB copper
+PCB_RESIN_K = 0.25             # W/(m·K), resin between the copper of a layer
+COPPER_WEIGHTS_UM = (18, 35, 70, 105, 140)        # ½, 1, 2, 3, 4 oz
+PCB_CORES = {
+    "FR-4": {"title": "FR-4", "k_plane": 0.81, "k_through": 0.29, "material": "FR-4"},
+    "IMS": {"title": "Aluminium core (IMS)", "k_plane": 2.0, "k_through": 2.0,
+            "material": "Aluminium", "base_k": 167.0},
+}
+PCB_DEFAULT_PLATING_UM = 25.0
+PCB_COLOR = (0.12, 0.42, 0.20)
+PCB_MAX_PIXELS = 2400          # raster size limit per side
+
+
+def _sexpr_parse(text):
+    """Nested lists of a KiCad S-expression file (strings unquoted)."""
+    import re
+    stack = [[]]
+    for match in re.finditer(r'\(|\)|"(?:[^"\\]|\\.)*"|[^\s()"]+', text):
+        token = match.group(0)
+        if token == "(":
+            stack.append([])
+        elif token == ")":
+            if len(stack) < 2:
+                raise ValueError("unbalanced parentheses")
+            item = stack.pop()
+            stack[-1].append(item)
+        elif token[0] == '"':
+            stack[-1].append(token[1:-1].replace('\\"', '"').replace("\\\\", "\\"))
+        else:
+            stack[-1].append(token)
+    if len(stack) != 1 or not stack[0]:
+        raise ValueError("not an S-expression file")
+    return stack[0][0]
+
+
+def _sx_children(node, name):
+    return [item for item in node[1:] if isinstance(item, list) and item and item[0] == name]
+
+
+def _sx_child(node, name):
+    for item in node[1:]:
+        if isinstance(item, list) and item and item[0] == name:
+            return item
+    return None
+
+
+def _sx_value(node, name, default=None, index=1):
+    item = _sx_child(node, name)
+    if item is None or len(item) <= index:
+        return default
+    return item[index]
+
+
+def _sx_xy(node, name):
+    item = _sx_child(node, name)
+    if item is None or len(item) < 3:
+        return None
+    return float(item[1]), float(item[2])
+
+
+def _sx_pts(node):
+    pts = _sx_child(node, "pts")
+    if pts is None:
+        return []
+    out = []
+    for item in pts[1:]:
+        if isinstance(item, list) and item and item[0] == "xy":
+            out.append((float(item[1]), float(item[2])))
+        elif isinstance(item, list) and item and item[0] == "arc":   # arc inside a polygon
+            start, mid, end = _sx_xy(item, "start"), _sx_xy(item, "mid"), _sx_xy(item, "end")
+            if start and mid and end:
+                out += _arc3(start, mid, end)[:-1] + [end]
+    return out
+
+
+def _sx_layers(node):
+    """Layer names of an item: (layer "F.Cu") or (layers "F.Cu" "B.Cu")."""
+    single = _sx_child(node, "layer")
+    names = [single[1]] if single is not None and len(single) > 1 else []
+    many = _sx_child(node, "layers")
+    if many is not None:
+        names += [str(x) for x in many[1:] if not isinstance(x, list)]
+    return names
+
+
+def _arc3(start, mid, end, step_mm=0.25):
+    """Points of the circular arc through start, mid and end."""
+    (x1, y1), (x2, y2), (x3, y3) = start, mid, end
+    d = 2.0 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(d) < 1e-12:
+        return [start, end]
+    ux = ((x1 * x1 + y1 * y1) * (y2 - y3) + (x2 * x2 + y2 * y2) * (y3 - y1) +
+          (x3 * x3 + y3 * y3) * (y1 - y2)) / d
+    uy = ((x1 * x1 + y1 * y1) * (x3 - x2) + (x2 * x2 + y2 * y2) * (x1 - x3) +
+          (x3 * x3 + y3 * y3) * (x2 - x1)) / d
+    r = math.hypot(x1 - ux, y1 - uy)
+    a1, a2, a3 = (math.atan2(y - uy, x - ux) for x, y in (start, mid, end))
+    sweep = (a3 - a1) % (2 * math.pi)
+    if (a2 - a1) % (2 * math.pi) > sweep:            # the mid point lies the other way round
+        sweep -= 2 * math.pi
+    return _arc_from(ux, uy, r, a1, sweep, step_mm)
+
+
+def _arc_from(cx, cy, r, a0, sweep, step_mm=0.25):
+    count = max(2, int(math.ceil(abs(sweep) * r / step_mm)) + 1, int(abs(sweep) / 0.2) + 1)
+    return [(cx + r * math.cos(a0 + sweep * i / (count - 1)),
+             cy + r * math.sin(a0 + sweep * i / (count - 1))) for i in range(count)]
+
+
+def _circle_pts(cx, cy, r, step_mm=0.25):
+    return _arc_from(cx, cy, r, 0.0, 2 * math.pi, step_mm)[:-1]
+
+
+def _rounded_rect(x0, y0, x1, y1, radius):
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    radius = min(max(radius, 0.0), (x1 - x0) / 2, (y1 - y0) / 2)
+    if radius <= 1e-9:
+        return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    pts = []
+    for cx, cy, start in ((x1 - radius, y0 + radius, -math.pi / 2), (x1 - radius, y1 - radius, 0.0),
+                          (x0 + radius, y1 - radius, math.pi / 2), (x0 + radius, y0 + radius, math.pi)):
+        pts += _arc_from(cx, cy, radius, start, math.pi / 2, 0.2)
+    return pts
+
+
+def _poly_area(pts):
+    if len(pts) < 3:
+        return 0.0
+    p = np.asarray(pts, float)
+    return 0.5 * float(np.sum(p[:, 0] * np.roll(p[:, 1], -1) - np.roll(p[:, 0], -1) * p[:, 1]))
+
+
+def _chain_loops(paths, tolerance=0.05):
+    """Closed loops from open polylines whose ends meet (board outlines)."""
+    loops, open_paths = [], []
+    for path in paths:
+        if len(path) < 2:
+            continue
+        if math.dist(path[0], path[-1]) <= tolerance and len(path) > 2:
+            loops.append(list(path[:-1]))
+        else:
+            open_paths.append(list(path))
+    while open_paths:
+        current = open_paths.pop(0)
+        grown = True
+        while grown:
+            grown = False
+            if math.dist(current[0], current[-1]) <= tolerance:
+                break
+            for i, path in enumerate(open_paths):
+                if math.dist(current[-1], path[0]) <= tolerance:
+                    current += path[1:]
+                elif math.dist(current[-1], path[-1]) <= tolerance:
+                    current += path[::-1][1:]
+                elif math.dist(current[0], path[-1]) <= tolerance:
+                    current = path[:-1] + current
+                elif math.dist(current[0], path[0]) <= tolerance:
+                    current = path[::-1][:-1] + current
+                else:
+                    continue
+                open_paths.pop(i)
+                grown = True
+                break
+        if math.dist(current[0], current[-1]) <= tolerance and len(current) > 3:
+            loops.append(current[:-1])
+    return loops
+
+
+def _rotate_kicad(x, y, degrees):
+    """KiCad rotation (counter-clockwise on screen, Y pointing down)."""
+    a = math.radians(degrees)
+    c, s = math.cos(a), math.sin(a)
+    return x * c + y * s, -x * s + y * c
+
+
+def _kicad_graphic(item, transform=None, step_mm=0.25):
+    """('poly', pts) | ('stroke', pts, width) | None of a gr_* / fp_* item (KiCad coordinates)."""
+    head = item[0][3:] if item[0].startswith(("gr_", "fp_")) else item[0]
+    tf = transform or (lambda x, y: (x, y))
+    stroke = _sx_child(item, "stroke")
+    width = float(_sx_value(stroke, "width", 0.0)) if stroke is not None else \
+        float(_sx_value(item, "width", 0.0))
+    fill = _sx_value(item, "fill", "no")
+    filled = fill in ("yes", "solid", "true")
+    if head == "line":
+        a, b = _sx_xy(item, "start"), _sx_xy(item, "end")
+        return ("stroke", [tf(*a), tf(*b)], width) if a and b else None
+    if head == "arc":
+        start, mid, end = _sx_xy(item, "start"), _sx_xy(item, "mid"), _sx_xy(item, "end")
+        if start and mid and end:
+            pts = _arc3(start, mid, end, step_mm)
+        else:                                  # KiCad 5: (start centre) (end point) (angle)
+            centre, point = _sx_xy(item, "start"), _sx_xy(item, "end")
+            angle = float(_sx_value(item, "angle", 0.0))
+            if not centre or not point:
+                return None
+            r = math.dist(centre, point)
+            a0 = math.atan2(point[1] - centre[1], point[0] - centre[0])
+            pts = _arc_from(centre[0], centre[1], r, a0, math.radians(angle), step_mm)
+        return ("stroke", [tf(*p) for p in pts], width)
+    if head == "circle":
+        centre, point = _sx_xy(item, "center"), _sx_xy(item, "end")
+        if not centre or not point:
+            return None
+        pts = [tf(*p) for p in _circle_pts(centre[0], centre[1], math.dist(centre, point), step_mm)]
+        return ("poly", pts) if filled else ("stroke", pts + [pts[0]], width)
+    if head == "rect":
+        a, b = _sx_xy(item, "start"), _sx_xy(item, "end")
+        if not a or not b:
+            return None
+        pts = [tf(*p) for p in _rounded_rect(a[0], a[1], b[0], b[1],
+                                              float(_sx_value(item, "radius", 0.0)))]
+        return ("poly", pts) if filled else ("stroke", pts + [pts[0]], width)
+    if head == "poly":
+        pts = [tf(*p) for p in _sx_pts(item)]
+        if len(pts) < 3:
+            return None
+        return ("poly", pts) if filled or width <= 0 else ("stroke", pts + [pts[0]], width)
+    if head == "curve":
+        pts = [tf(*p) for p in _sx_pts(item)]
+        return ("stroke", pts, width) if len(pts) >= 2 else None
+    return None
+
+
+def _pad_shapes(pad, place):
+    """Copper shapes of a footprint pad; place(x, y) maps pad-local points to the board."""
+    kind = pad[3] if len(pad) > 3 and not isinstance(pad[3], list) else "rect"
+    size = _sx_child(pad, "size")
+    w, h = (float(size[1]), float(size[2])) if size is not None and len(size) > 2 else (1.0, 1.0)
+    out = []
+    if kind == "circle":
+        out.append(("poly", [place(*p) for p in _circle_pts(0.0, 0.0, w / 2, 0.1)]))
+    elif kind == "oval":
+        if abs(w - h) < 1e-9:
+            out.append(("poly", [place(*p) for p in _circle_pts(0.0, 0.0, w / 2, 0.1)]))
+        elif w > h:
+            out.append(("stroke", [place(-(w - h) / 2, 0.0), place((w - h) / 2, 0.0)], h))
+        else:
+            out.append(("stroke", [place(0.0, -(h - w) / 2), place(0.0, (h - w) / 2)], w))
+    elif kind == "roundrect":
+        ratio = float(_sx_value(pad, "roundrect_rratio", 0.25))
+        out.append(("poly", [place(*p) for p in _rounded_rect(-w / 2, -h / 2, w / 2, h / 2,
+                                                              ratio * min(w, h))]))
+    elif kind == "custom":
+        out.append(("poly", [place(*p) for p in _rounded_rect(-w / 2, -h / 2, w / 2, h / 2, 0.0)]))
+        primitives = _sx_child(pad, "primitives")
+        for item in (primitives[1:] if primitives is not None else []):
+            if isinstance(item, list) and item and item[0].startswith("gr_"):
+                graphic = _kicad_graphic(item, place, 0.1)
+                if graphic is not None:
+                    if graphic[0] == "stroke" and graphic[2] <= 0:
+                        graphic = ("poly", graphic[1])
+                    out.append(graphic)
+    else:                                       # rect, trapezoid, chamfered rect
+        out.append(("poly", [place(*p) for p in _rounded_rect(-w / 2, -h / 2, w / 2, h / 2, 0.0)]))
+    return out, w * h
+
+
+def read_kicad_pcb(path):
+    """Board description of a KiCad board file (KiCad 5 … 10), see pcb_from_description."""
+    with open(path, encoding="utf-8", errors="replace") as stream:
+        root = _sexpr_parse(stream.read())
+    if not root or root[0] != "kicad_pcb":
+        raise ThermalError("This is not a KiCad board file (.kicad_pcb).")
+    messages = []
+    general = _sx_child(root, "general")
+    thickness = float(_sx_value(general, "thickness", 1.6)) if general is not None else 1.6
+    names = []
+    layers = _sx_child(root, "layers")
+    for item in (layers[1:] if layers is not None else []):
+        if isinstance(item, list) and len(item) > 1 and str(item[1]).endswith(".Cu"):
+            names.append(str(item[1]))
+
+    def order(name):
+        if name == "F.Cu":
+            return -1
+        if name == "B.Cu":
+            return 10 ** 6
+        digits = "".join(ch for ch in name if ch.isdigit())
+        return int(digits) if digits else 999
+    names = sorted(set(names), key=order) or ["F.Cu", "B.Cu"]
+    # stack-up: copper thickness and the dielectric between neighbouring copper layers
+    copper_um = {name: 35.0 for name in names}
+    dielectric = [None] * max(len(names) - 1, 0)
+    setup = _sx_child(root, "setup")
+    stackup = _sx_child(setup, "stackup") if setup is not None else None
+    if stackup is not None:
+        index, pending = -1, 0.0
+        for item in _sx_children(stackup, "layer"):
+            name = str(item[1]) if len(item) > 1 else ""
+            kind = str(_sx_value(item, "type", ""))
+            value = _sx_value(item, "thickness")
+            if name in copper_um:
+                if value is not None:
+                    copper_um[name] = float(value) * 1000.0
+                if index >= 0 and index < len(dielectric):
+                    dielectric[index] = pending
+                index += 1
+                pending = 0.0
+            elif kind in ("core", "prepreg") or "dielectric" in name:
+                for sub in [item] + _sx_children(item, "addsublayer"):
+                    sub_value = _sx_value(sub, "thickness")
+                    if sub_value is not None:
+                        pending += float(sub_value)
+    known = sum(d for d in dielectric if d)
+    unknown = [i for i, d in enumerate(dielectric) if not d]
+    if unknown:
+        rest = max(thickness - known - sum(copper_um.values()) / 1000.0, 0.1 * len(unknown))
+        for i in unknown:
+            dielectric[i] = rest / len(unknown)
+    copper = set(names)
+
+    def copper_of(layer_names):
+        out = set()
+        for name in layer_names:
+            if name in ("*.Cu", "F&B.Cu"):
+                out |= copper if name == "*.Cu" else {"F.Cu", "B.Cu"} & copper
+            elif name in copper:
+                out.add(name)
+        return out
+
+    shapes = {name: [] for name in names}
+    edges, holes_round, plated, vias = [], [], [], []
+    # board graphics
+    for item in root[1:]:
+        if not (isinstance(item, list) and item and isinstance(item[0], str)):
+            continue
+        head = item[0]
+        if head.startswith("gr_"):
+            layer_names = _sx_layers(item)
+            graphic = _kicad_graphic(item)
+            if graphic is None:
+                continue
+            if "Edge.Cuts" in layer_names:
+                edges.append(graphic[1] if graphic[0] == "stroke" else graphic[1] + [graphic[1][0]])
+            for name in copper_of(layer_names):
+                shapes[name].append(graphic)
+        elif head in ("segment", "arc"):
+            a, b = _sx_xy(item, "start"), _sx_xy(item, "end")
+            if not a or not b:
+                continue
+            mid = _sx_xy(item, "mid") if head == "arc" else None
+            pts = _arc3(a, mid, b, 0.1) if mid else [a, b]
+            width = float(_sx_value(item, "width", 0.2))
+            for name in copper_of(_sx_layers(item)):
+                shapes[name].append(("stroke", pts, width))
+        elif head == "via":
+            at = _sx_xy(item, "at")
+            if not at:
+                continue
+            size = float(_sx_value(item, "size", 0.6))
+            drill = float(_sx_value(item, "drill", 0.3))
+            vias.append((at[0], at[1], drill))
+            span = copper if len(item) > 1 and item[1] not in ("blind", "micro") else \
+                copper_of(_sx_layers(item))
+            ring = _circle_pts(at[0], at[1], size / 2, 0.05)
+            for name in span or copper:
+                shapes[name].append(("poly", ring))
+        elif head == "zone":
+            if _sx_child(item, "keepout") is not None:
+                continue
+            zone_layers = copper_of(_sx_layers(item))
+            fills = _sx_children(item, "filled_polygon")
+            if fills:
+                for fill in fills:
+                    target = copper_of(_sx_layers(fill)) or zone_layers
+                    pts = _sx_pts(fill)
+                    if len(pts) >= 3:
+                        for name in target:
+                            shapes[name].append(("poly", pts))
+            else:
+                outline = _sx_child(item, "polygon")
+                pts = _sx_pts(outline) if outline is not None else []
+                if len(pts) >= 3 and zone_layers:
+                    for name in zone_layers:
+                        shapes[name].append(("poly", pts))
+                    messages.append("A copper zone is not filled in the file (refill it in KiCad and "
+                                    "save); its outline counts as full copper.")
+    # footprints (KiCad 5: "module")
+    footprints = []
+    for item in root[1:]:
+        if not (isinstance(item, list) and item and item[0] in ("footprint", "module")):
+            continue
+        lib = str(item[1]) if len(item) > 1 and not isinstance(item[1], list) else ""
+        at = _sx_child(item, "at")
+        fx, fy = (float(at[1]), float(at[2])) if at is not None else (0.0, 0.0)
+        angle = float(at[3]) if at is not None and len(at) > 3 else 0.0
+        side = "bottom" if _sx_value(item, "layer", "F.Cu") == "B.Cu" else "top"
+        reference, value = "", ""
+        for prop in _sx_children(item, "property"):
+            if len(prop) > 2 and prop[1] == "Reference":
+                reference = str(prop[2])
+            elif len(prop) > 2 and prop[1] == "Value":
+                value = str(prop[2])
+        for text in _sx_children(item, "fp_text"):
+            if len(text) > 2 and text[1] == "reference" and not reference:
+                reference = str(text[2])
+            elif len(text) > 2 and text[1] == "value" and not value:
+                value = str(text[2])
+
+        def to_board(x, y, fx=fx, fy=fy, angle=angle):
+            rx, ry = _rotate_kicad(x, y, angle)
+            return fx + rx, fy + ry
+
+        pad_boxes, pad_area, largest = [], 0.0, 0.0
+        for pad in _sx_children(item, "pad"):
+            pat = _sx_child(pad, "at")
+            px, py = (float(pat[1]), float(pat[2])) if pat is not None else (0.0, 0.0)
+            pad_angle = float(pat[3]) if pat is not None and len(pat) > 3 else 0.0
+            cx, cy = to_board(px, py)
+
+            def place(x, y, cx=cx, cy=cy, pad_angle=pad_angle):
+                rx, ry = _rotate_kicad(x, y, pad_angle)
+                return cx + rx, cy + ry
+            pad_kind = pad[2] if len(pad) > 2 else "smd"
+            layer_set = copper_of(_sx_layers(pad))
+            pad_shapes, area = _pad_shapes(pad, place)
+            if layer_set:
+                for name in layer_set:
+                    shapes[name] += pad_shapes
+                pad_area += area
+                largest = max(largest, area)
+                pts = np.array([p for s in pad_shapes for p in s[1]])
+                # pad extent in the footprint's own frame
+                local = np.array([_rotate_kicad(x - fx, y - fy, -angle) for x, y in pts])
+                pad_boxes.append((local.min(0), local.max(0)))
+            drill = _sx_child(pad, "drill")
+            if drill is not None and len(drill) > 1:
+                values = [float(v) for v in drill[1:] if not isinstance(v, list) and v != "oval"]
+                if values:
+                    d = min(values) if len(values) > 1 else values[0]
+                    if pad_kind == "np_thru_hole":
+                        holes_round.append((cx, cy, d))
+                    else:
+                        plated.append((cx, cy, d))
+        for graphic_item in item[1:]:
+            if isinstance(graphic_item, list) and graphic_item and graphic_item[0].startswith("fp_") \
+                    and graphic_item[0] != "fp_text":
+                layer_names = _sx_layers(graphic_item)
+                graphic = _kicad_graphic(graphic_item, to_board)
+                if graphic is None:
+                    continue
+                if "Edge.Cuts" in layer_names:
+                    edges.append(graphic[1] if graphic[0] == "stroke" else graphic[1] + [graphic[1][0]])
+                for name in copper_of(layer_names):
+                    shapes[name].append(graphic)
+        if pad_boxes:
+            low = np.min([b[0] for b in pad_boxes], axis=0)
+            high = np.max([b[1] for b in pad_boxes], axis=0)
+        else:
+            low = high = np.zeros(2)
+        footprints.append({"reference": reference, "value": value, "footprint": lib,
+                           "x": fx, "y": fy, "angle": angle, "side": side,
+                           "pads_size": [float(high[0] - low[0]), float(high[1] - low[1])],
+                           "pads_centre": [float(x) for x in to_board(*((low + high) / 2))],
+                           "pad_area": pad_area, "largest_pad": largest})
+    loops = _chain_loops(edges)
+    return {"format": "kicad", "path": path, "thickness_mm": thickness, "copper_layers": names,
+            "copper_um": [copper_um[n] for n in names], "dielectric_mm": dielectric,
+            "loops": loops, "round_holes": holes_round, "shapes": shapes,
+            "plated": plated + [(x, y, d) for x, y, d in vias], "footprints": footprints,
+            "y_down": True, "messages": messages}
+
+
+def _gerber_expression(text, variables):
+    """Value of a Gerber aperture-macro expression ($n variables, x = multiply)."""
+    import re
+    expression = re.sub(r"\$(\d+)", lambda m: repr(float(variables.get(int(m.group(1)), 0.0))),
+                        text.replace("x", "*").replace("X", "*"))
+    if not re.fullmatch(r"[0-9eE.+\-*/() ]*", expression):
+        raise ValueError(f"bad macro expression {text!r}")
+    return float(eval(expression, {"__builtins__": {}}, {})) if expression.strip() else 0.0
+
+
+def _gerber_macro_shapes(body, params):
+    """Aperture-local shapes [('poly', pts) | ('circle', x, y, r)] of a macro with parameters."""
+    variables = {i + 1: value for i, value in enumerate(params)}
+    out = []
+
+    def rotated(points, degrees):
+        a = math.radians(degrees)
+        c, s = math.cos(a), math.sin(a)
+        return [(x * c - y * s, x * s + y * c) for x, y in points]
+
+    for statement in body:
+        statement = statement.strip()
+        if not statement or statement.startswith("0"):
+            continue
+        if statement.startswith("$"):
+            name, _sep, value = statement.partition("=")
+            variables[int(name[1:])] = _gerber_expression(value, variables)
+            continue
+        values = [_gerber_expression(v, variables) for v in statement.split(",")]
+        code = int(values[0])
+        if len(values) < 2 or values[1] == 0:          # exposure off: left out
+            continue
+        if code == 1 and len(values) >= 5:            # circle: d, x, y[, rotation]
+            x, y = values[3], values[4]
+            if len(values) > 5 and values[5]:
+                (x, y), = rotated([(x, y)], values[5])
+            out.append(("circle", x, y, values[2] / 2))
+        elif code in (2, 20) and len(values) >= 8:    # vector line: width, x1, y1, x2, y2, rot
+            w, x1, y1, x2, y2, rot = values[2:8]
+            dx, dy = x2 - x1, y2 - y1
+            length = math.hypot(dx, dy) or 1e-9
+            nx, ny = -dy / length * w / 2, dx / length * w / 2
+            out.append(("poly", rotated([(x1 + nx, y1 + ny), (x2 + nx, y2 + ny),
+                                         (x2 - nx, y2 - ny), (x1 - nx, y1 - ny)], rot)))
+        elif code == 21 and len(values) >= 7:         # centre line: w, h, cx, cy, rot
+            w, h, cx, cy, rot = values[2:7]
+            out.append(("poly", rotated([(cx - w / 2, cy - h / 2), (cx + w / 2, cy - h / 2),
+                                         (cx + w / 2, cy + h / 2), (cx - w / 2, cy + h / 2)], rot)))
+        elif code == 22 and len(values) >= 7:         # lower-left line (old)
+            w, h, x0, y0, rot = values[2:7]
+            out.append(("poly", rotated([(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)], rot)))
+        elif code == 4 and len(values) >= 3:          # outline: n, x0, y0, …, rot
+            n = int(values[2])
+            coords = values[3:3 + 2 * (n + 1)]
+            rot = values[3 + 2 * (n + 1)] if len(values) > 3 + 2 * (n + 1) else 0.0
+            pts = [(coords[i], coords[i + 1]) for i in range(0, len(coords) - 1, 2)]
+            out.append(("poly", rotated(pts, rot)))
+        elif code == 5 and len(values) >= 6:          # polygon: n, cx, cy, d, rot
+            n, cx, cy, d = int(values[2]), values[3], values[4], values[5]
+            rot = values[6] if len(values) > 6 else 0.0
+            pts = [(cx + d / 2 * math.cos(2 * math.pi * i / n), cy + d / 2 * math.sin(2 * math.pi * i / n))
+                   for i in range(n)]
+            out.append(("poly", rotated(pts, rot)))
+        elif code == 7 and len(values) >= 6:          # thermal: cx, cy, outer, inner, gap — a ring
+            cx, cy, outer = values[1], values[2], values[3]
+            out.append(("circle", cx, cy, outer / 2))
+    return out
+
+
+def read_gerber(path):
+    """(file function or None, shapes [(kind, data…, dark)], outline paths) of a Gerber
+    (RS-274X) file in mm. Shapes: ('poly', pts, dark), ('stroke', pts, width, dark),
+    ('circle', x, y, r, dark)."""
+    import re
+    with open(path, encoding="latin-1") as stream:
+        text = stream.read()
+    function = None
+    match = re.search(r"TF\.FileFunction,([^*%]+)", text)
+    if match:
+        function = match.group(1).strip()
+    integer, decimals, omit_trailing = 3, 6, False
+    scale = 1.0                                    # to mm
+    apertures, macros = {}, {}
+    shapes, strokes = [], []
+    x = y = 0.0
+    aperture = None
+    mode = "G01"
+    dark = True
+    region = None                                   # list of contours while in G36 … G37
+    last_d = "D01"
+
+    def number(value):
+        negative = value.startswith("-")
+        digits = value.lstrip("+-")
+        if "." in digits:
+            result = float(digits)
+        else:
+            if omit_trailing:
+                digits = digits.ljust(integer + decimals, "0")
+            result = int(digits or "0") / 10 ** decimals
+        return (-result if negative else result) * scale
+
+    def flash(cx, cy):
+        if aperture not in apertures:
+            return
+        kind, params = apertures[aperture]
+        if kind == "C":
+            shapes.append(("circle", cx, cy, params[0] / 2 * scale, dark))
+        elif kind in ("R", "O"):
+            w, h = params[0] * scale, params[1] * scale
+            if kind == "O" and abs(w - h) > 1e-9:
+                if w > h:
+                    shapes.append(("stroke", [(cx - (w - h) / 2, cy), (cx + (w - h) / 2, cy)], h, dark))
+                else:
+                    shapes.append(("stroke", [(cx, cy - (h - w) / 2), (cx, cy + (h - w) / 2)], w, dark))
+            elif kind == "O":
+                shapes.append(("circle", cx, cy, w / 2, dark))
+            else:
+                shapes.append(("poly", [(cx - w / 2, cy - h / 2), (cx + w / 2, cy - h / 2),
+                                        (cx + w / 2, cy + h / 2), (cx - w / 2, cy + h / 2)], dark))
+        elif kind == "P":
+            d, n = params[0] * scale, int(params[1]) if len(params) > 1 else 6
+            rot = math.radians(params[2]) if len(params) > 2 else 0.0
+            shapes.append(("poly", [(cx + d / 2 * math.cos(rot + 2 * math.pi * i / n),
+                                     cy + d / 2 * math.sin(rot + 2 * math.pi * i / n))
+                                    for i in range(n)], dark))
+        elif kind in macros:
+            for item in _gerber_macro_shapes(macros[kind], params):
+                if item[0] == "circle":
+                    shapes.append(("circle", cx + item[1] * scale, cy + item[2] * scale,
+                                   item[3] * scale, dark))
+                else:
+                    shapes.append(("poly", [(cx + px * scale, cy + py * scale) for px, py in item[1]],
+                                   dark))
+
+    def stroke_width():
+        if aperture not in apertures:
+            return 0.0
+        kind, params = apertures[aperture]
+        if kind in ("C", "P"):
+            return params[0] * scale
+        if kind in ("R", "O") and len(params) > 1:
+            return min(params[0], params[1]) * scale
+        return 0.1
+
+    for block in re.findall(r"%[^%]*%|[^%*]+\*", text):
+        if block.startswith("%"):
+            parts = [p.strip() for p in block[1:-1].split("*") if p.strip()]
+            if not parts:
+                continue
+            head = parts[0]
+            if head.startswith("FS"):
+                m = re.search(r"X(\d)(\d)", head)
+                if m:
+                    integer, decimals = int(m.group(1)), int(m.group(2))
+                omit_trailing = head[2:3] == "T"
+            elif head.startswith("MO"):
+                scale = 25.4 if head[2:4] == "IN" else 1.0
+            elif head.startswith("AD"):
+                m = re.match(r"ADD(\d+)([A-Za-z_.$][^,]*),?(.*)", head)
+                if m:
+                    params = [float(v) for v in m.group(3).split("X") if v.strip()] if m.group(3) else []
+                    apertures[int(m.group(1))] = (m.group(2), params)
+            elif head.startswith("AM"):
+                macros[head[2:]] = parts[1:]
+            elif head.startswith("LP"):
+                dark = head[2:3] != "C"
+            continue
+        word = block[:-1].strip().replace("\n", "").replace("\r", "")
+        if not word or word.startswith("G04"):
+            continue
+        for code in re.findall(r"G0?([0-9]{1,2})", word.split("X")[0].split("Y")[0].split("D")[0]):
+            code = int(code)
+            if code in (1, 2, 3):
+                mode = f"G0{code}"
+            elif code == 36:
+                region = []
+            elif code == 37:
+                if region:
+                    for contour in region:
+                        if len(contour) >= 3:
+                            shapes.append(("poly", contour, dark))
+                region = None
+            elif code == 70:
+                scale = 25.4
+            elif code == 71:
+                scale = 1.0
+        if word.startswith("G54"):
+            word = word[3:]
+        m = re.search(r"D(\d+)$", word)
+        d_code = int(m.group(1)) if m else None
+        if d_code is not None and d_code >= 10:
+            aperture = d_code
+            continue
+        coords = dict(re.findall(r"([XYIJ])([+-]?[\d.]+)", word))
+        if not coords and d_code is None:
+            continue
+        nx = number(coords["X"]) if "X" in coords else x
+        ny = number(coords["Y"]) if "Y" in coords else y
+        operation = f"D0{d_code}" if d_code is not None else last_d
+        last_d = operation
+        if operation == "D01":
+            if mode == "G01":
+                pts = [(x, y), (nx, ny)]
+            else:
+                ci, cj = number(coords.get("I", "0")), number(coords.get("J", "0"))
+                cx, cy = x + ci, y + cj
+                r = math.hypot(x - cx, y - cy)
+                a0 = math.atan2(y - cy, x - cx)
+                a1 = math.atan2(ny - cy, nx - cx)
+                sweep = (a1 - a0) % (2 * math.pi)
+                if mode == "G02":
+                    sweep -= 2 * math.pi
+                if abs(sweep) < 1e-9:
+                    sweep = 2 * math.pi if mode == "G03" else -2 * math.pi
+                pts = _arc_from(cx, cy, r, a0, sweep, 0.1)
+            if region is not None:
+                if not region:
+                    region.append([(x, y)])
+                region[-1] += pts[1:]
+            else:
+                width = stroke_width()
+                strokes.append(pts)
+                shapes.append(("stroke", pts, width, dark))
+        elif operation == "D02":
+            if region is not None:
+                region.append([(nx, ny)])
+        elif operation == "D03":
+            flash(nx, ny)
+        x, y = nx, ny
+    return function, shapes, strokes
+
+
+def read_excellon(path):
+    """Holes [(x, y, diameter, plated)] in mm of an Excellon drill file."""
+    import re
+    with open(path, encoding="latin-1") as stream:
+        lines = stream.read().splitlines()
+    scale, integer, decimals, leading = 1.0, 3, 3, True       # leading zeros kept (LZ)
+    tools, holes = {}, []
+    tool = None
+    plated = not ("npth" in os.path.basename(path).lower() or "non_plated" in path.lower())
+    x = y = 0.0
+    header = True
+
+    def number(value):
+        if "." in value:
+            return float(value) * scale
+        negative = value.startswith("-")
+        digits = value.lstrip("+-")
+        if leading:
+            digits = digits.ljust(integer + decimals, "0")
+        result = int(digits or "0") / 10 ** decimals
+        return (-result if negative else result) * scale
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if upper.startswith(";"):
+            m = re.search(r"FILE_FORMAT\s*=\s*(\d+):(\d+)", upper)
+            if m:
+                integer, decimals = int(m.group(1)), int(m.group(2))
+            if "TYPE=NON_PLATED" in upper or "NPTH" in upper and "TF.FILEFUNCTION" in upper:
+                plated = False
+            elif "TYPE=PLATED" in upper:
+                plated = True
+            continue
+        if upper.startswith(("METRIC", "M71")):
+            scale = 1.0
+            if "TZ" in upper:
+                leading = False
+            elif "LZ" in upper:
+                leading = True
+            if "000.000" in upper or "0000.00" in upper:
+                integer, decimals = (len(upper.split(",")[-1].split(".")[0]),
+                                     len(upper.split(",")[-1].split(".")[1]))
+            continue
+        if upper.startswith(("INCH", "M72")):
+            scale = 25.4
+            leading = "TZ" not in upper
+            if "LZ" not in upper and "TZ" not in upper:
+                leading = True
+            integer, decimals = 2, 4
+            continue
+        if upper == "%" or upper.startswith("M95"):
+            header = False
+            continue
+        m = re.match(r"T(\d+).*C([\d.]+)", upper)
+        if m:
+            tools[int(m.group(1))] = float(m.group(2)) * scale
+            continue
+        m = re.match(r"T(\d+)$", upper)
+        if m and not header:
+            tool = int(m.group(1))
+            continue
+        if upper.startswith(("X", "Y")) and tool in tools:
+            first = upper.split("G85")[0]
+            coords = dict(re.findall(r"([XY])([+-]?[\d.]+)", first))
+            x = number(coords["X"]) if "X" in coords else x
+            y = number(coords["Y"]) if "Y" in coords else y
+            holes.append((x, y, tools[tool], plated))
+            if "G85" in upper:                       # a slot: its other end, too
+                coords = dict(re.findall(r"([XY])([+-]?[\d.]+)", upper.split("G85")[1]))
+                holes.append((number(coords["X"]) if "X" in coords else x,
+                              number(coords["Y"]) if "Y" in coords else y, tools[tool], plated))
+    return holes
+
+
+_GERBER_EXTENSIONS = {".gtl": ("Copper", 1), ".gbl": ("Copper", 99), ".cmp": ("Copper", 1),
+                      ".sol": ("Copper", 99), ".gko": ("Profile", 0), ".gml": ("Profile", 1),
+                      ".gm1": ("Profile", 2), ".gm2": ("Profile", 3), ".gm3": ("Profile", 4)}
+
+
+def _gerber_role(path, function):
+    """('copper', order) | ('profile', priority) | None from the file function or the name."""
+    import re
+    name = os.path.basename(path).lower()
+    if function:
+        parts = [p.strip() for p in function.split(",")]
+        if parts[0] == "Copper":
+            m = re.match(r"L(\d+)", parts[1]) if len(parts) > 1 else None
+            return ("copper", int(m.group(1)) if m else 50)
+        if parts[0] == "Profile":
+            return ("profile", 0)
+        return None
+    extension = os.path.splitext(name)[1]
+    if extension in _GERBER_EXTENSIONS:
+        kind, order = _GERBER_EXTENSIONS[extension]
+        return ("copper", order) if kind == "Copper" else ("profile", order)
+    m = re.match(r"\.g(\d+)$", extension) or re.match(r"\.gp(\d+)$", extension)
+    if m:
+        return ("copper", 1 + int(m.group(1)))
+    if "f_cu" in name or "top_copper" in name or "copper_top" in name:
+        return ("copper", 1)
+    if "b_cu" in name or "bottom_copper" in name or "copper_bottom" in name:
+        return ("copper", 99)
+    m = re.search(r"in(\d+)_cu", name)
+    if m:
+        return ("copper", 1 + int(m.group(1)))
+    if "edge_cuts" in name or "outline" in name or "profile" in name:
+        return ("profile", 0)
+    return None
+
+
+def read_gerber_set(path):
+    """Board description (see read_kicad_pcb) of a Gerber set: a .gbrjob file, a folder, or a
+    single Gerber file (its folder is read)."""
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    job = None
+    if path.lower().endswith(".gbrjob"):
+        with open(path, encoding="utf-8") as stream:
+            job = json.load(stream)
+    else:
+        candidates = [f for f in os.listdir(folder) if f.lower().endswith(".gbrjob")]
+        if candidates:
+            with open(os.path.join(folder, candidates[0]), encoding="utf-8") as stream:
+                job = json.load(stream)
+    files = []
+    if job and job.get("FilesAttributes"):
+        for entry in job["FilesAttributes"]:
+            files.append((os.path.join(folder, entry.get("Path", "")), entry.get("FileFunction")))
+    else:
+        for name in sorted(os.listdir(folder)):
+            full = os.path.join(folder, name)
+            if os.path.isfile(full) and os.path.getsize(full) > 0:
+                files.append((full, None))
+    copper, profiles, holes, messages = [], [], [], []
+    for full, function in files:
+        if not os.path.isfile(full):
+            continue
+        lower = full.lower()
+        try:
+            with open(full, encoding="latin-1") as stream:
+                head = stream.read(4000)
+        except OSError:
+            continue
+        if head.lstrip().startswith("M48") or lower.endswith((".drl", ".xln")) and "M48" in head:
+            holes += read_excellon(full)
+            continue
+        if "%FS" not in head and "%MO" not in head and "FSLA" not in head:
+            continue
+        found_function = function
+        if found_function is None:
+            import re
+            m = re.search(r"TF\.FileFunction,([^*%]+)", head)
+            found_function = m.group(1).strip() if m else None
+        role = _gerber_role(full, found_function)
+        if role is None:
+            continue
+        func, shapes, strokes = read_gerber(full)
+        if role[0] == "copper":
+            copper.append((role[1], os.path.basename(full), shapes))
+        else:
+            profiles.append((role[1], strokes, shapes))
+    if not copper:
+        raise ThermalError("No copper layer found among the Gerber files (top / bottom copper, e.g. "
+                           "*.GTL / *.GBL or *-F_Cu.gbr).")
+    copper.sort(key=lambda item: item[0])
+    names = [name for _order, name, _shapes in copper]
+    loops = []
+    for _priority, strokes, shapes in sorted(profiles, key=lambda item: item[0]):
+        loops = _chain_loops(strokes + [s[1] for s in shapes if s[0] == "poly"])
+        if loops:
+            break
+    if not loops:
+        messages.append("No closed board outline among the Gerber files: the board is the box around "
+                        "the copper.")
+    thickness, copper_um, dielectric = 1.6, [35.0] * len(names), None
+    if job:
+        specs = job.get("GeneralSpecs", {})
+        thickness = float(specs.get("BoardThickness", thickness))
+        stack = job.get("MaterialStackup") or []
+        copper_entries = [e for e in stack if str(e.get("Type", "")).lower() == "copper"]
+        if len(copper_entries) == len(names):
+            copper_um = [float(e.get("Thickness", 0.035)) * 1000.0 for e in copper_entries]
+        dielectric, pending, seen = [], 0.0, 0
+        for entry in stack:
+            kind = str(entry.get("Type", "")).lower()
+            if kind == "copper":
+                if seen:
+                    dielectric.append(pending)
+                seen += 1
+                pending = 0.0
+            elif kind == "dielectric":
+                pending += float(entry.get("Thickness", 0.0))
+        if len(dielectric) != len(names) - 1 or not all(dielectric):
+            dielectric = None
+    if dielectric is None:
+        rest = max(thickness - sum(copper_um) / 1000.0, 0.2)
+        dielectric = [rest / max(len(names) - 1, 1)] * max(len(names) - 1, 0)
+    return {"format": "gerber", "path": path, "thickness_mm": thickness, "copper_layers": names,
+            "copper_um": copper_um, "dielectric_mm": dielectric, "loops": loops,
+            "round_holes": [(x, y, d) for x, y, d, plated in holes if not plated],
+            "shapes": {name: shapes for (_o, name, shapes) in copper},
+            "plated": [(x, y, d) for x, y, d, plated in holes if plated], "footprints": [],
+            "y_down": False, "messages": messages}
+
+
+def read_board_file(path):
+    """Board description of a KiCad board, a Gerber job, a Gerber / drill file or a folder."""
+    if os.path.isfile(path) and path.lower().endswith(".kicad_pcb"):
+        return read_kicad_pcb(path)
+    return read_gerber_set(path)
+
+
+def _render_layer(shapes, x0, y0, pixel, nx, ny):
+    """Copper share per pixel (uint8, row 0 at y0, i.e. bottom-up) of the shapes (board mm)."""
+    from PyQt5.QtGui import QImage, QPainterPath, QBrush
+    image = QImage(nx, ny, QImage.Format_Grayscale8)
+    image.fill(0)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    height = ny * pixel
+
+    def point(p):
+        return QPointF((p[0] - x0) / pixel, (y0 + height - p[1]) / pixel)
+
+    for shape in shapes:
+        dark = shape[-1] if isinstance(shape[-1], bool) else True
+        color = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
+        if shape[0] == "poly":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(QPolygonF([point(p) for p in shape[1]]), Qt.WindingFill)
+        elif shape[0] == "circle":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(point((shape[1], shape[2])), shape[3] / pixel, shape[3] / pixel)
+        elif shape[0] == "stroke":
+            pts, width = shape[1], shape[2]
+            if len(pts) < 2 or width <= 0:
+                continue
+            pen = QPen(color)
+            pen.setWidthF(max(width / pixel, 0.5))
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            path = QPainterPath(point(pts[0]))
+            for p in pts[1:]:
+                path.lineTo(point(p))
+            painter.drawPath(path)
+    painter.end()
+    bits = image.constBits()
+    bits.setsize(image.byteCount())
+    array = np.frombuffer(bits, np.uint8).reshape(ny, image.bytesPerLine())[:, :nx]
+    return np.ascontiguousarray(array[::-1])
+
+
+def _point_in_polygon(point, polygon):
+    x, y = point
+    inside = False
+    n = len(polygon)
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-300) + x1:
+            inside = not inside
+    return inside
+
+
+def pcb_from_description(desc, core="FR-4", copper_um=None, dielectric_mm=None,
+                         plating_um=PCB_DEFAULT_PLATING_UM, ims_dielectric_mm=0.1, ims_k=2.0):
+    """Study data of a board ("pcb" of a component): outline and holes in board coordinates
+    (lower-left corner of the outline at 0, 0; Y up), layer stack, copper coverage rasters per
+    copper layer and the plated-hole copper per pixel. Also returns the transform of the
+    description's coordinates to the board's (for placing parts)."""
+    flip = -1.0 if desc.get("y_down") else 1.0
+
+    def fix(p):
+        return (float(p[0]), flip * float(p[1]))
+
+    messages = list(desc.get("messages", []))
+    loops = [[fix(p) for p in loop] for loop in desc.get("loops", []) if len(loop) >= 3]
+    loops = [loop for loop in loops if abs(_poly_area(loop)) > 1e-6]
+    points = [fix(p) for shapes in desc["shapes"].values() for s in shapes
+              for p in (s[1] if s[0] in ("poly", "stroke") else [(s[1], s[2])])]
+    copper_box = (np.min(points, axis=0) - 1.0, np.max(points, axis=0) + 1.0) if points else None
+    outline = max(loops, key=lambda loop: abs(_poly_area(loop))) if loops else None
+    if outline is not None and copper_box is not None and \
+            abs(_poly_area(outline)) < 0.25 * float(np.prod(copper_box[1] - copper_box[0])):
+        messages.append("The closed outline found is much smaller than the copper (a detail, not "
+                        "the board edge): the board is the box around the copper.")
+        outline = None
+    if outline is not None:
+        holes = [loop for loop in loops if loop is not outline and
+                 _point_in_polygon(loop[0], outline)]
+    else:
+        if copper_box is None:
+            raise ThermalError("The board has neither an outline nor copper.")
+        if not loops:
+            messages.append("The file has no closed board outline (Edge.Cuts / profile): the board "
+                            "is the box around the copper.")
+        low, high = copper_box
+        outline = [(low[0], low[1]), (high[0], low[1]), (high[0], high[1]), (low[0], high[1])]
+        holes = []
+    for x, y, d in desc.get("round_holes", []):
+        if d >= 0.8:
+            holes.append(_circle_pts(*fix((x, y)), d / 2, 0.3)[::-1])
+    if _poly_area(outline) < 0:
+        outline = outline[::-1]
+    holes = [h if _poly_area(h) < 0 else h[::-1] for h in holes]
+    low = np.min(outline, axis=0)
+    high = np.max(outline, axis=0)
+    shift = -low
+
+    def place(p):
+        q = fix(p)
+        return (q[0] + shift[0], q[1] + shift[1])
+
+    outline = [(x + shift[0], y + shift[1]) for x, y in outline]
+    holes = [[(x + shift[0], y + shift[1]) for x, y in hole] for hole in holes]
+    size = high - low
+    pixel = max(0.05, float(max(size)) / PCB_MAX_PIXELS)
+    nx, ny = int(math.ceil(size[0] / pixel)) + 2, int(math.ceil(size[1] / pixel)) + 2
+    names = list(desc["copper_layers"])
+    copper_um = list(copper_um or desc.get("copper_um") or [35.0] * len(names))
+    dielectric_mm = list(dielectric_mm or desc.get("dielectric_mm") or [])
+    layers = []
+    for index, name in enumerate(names):
+        shapes = []
+        for shape in desc["shapes"].get(name, []):
+            if shape[0] == "circle":
+                cx, cy = place((shape[1], shape[2]))
+                shapes.append(("circle", cx, cy, shape[3]) + tuple(shape[4:]))
+            else:
+                shapes.append((shape[0], [place(p) for p in shape[1]]) + tuple(shape[2:]))
+        coverage = _render_layer(shapes, -pixel, -pixel, pixel, nx, ny)
+        layers.append({"name": name, "copper_um": float(copper_um[index]), "coverage": coverage})
+    # plated holes: copper of the barrel (annulus of the plating) per pixel, mm²
+    via_area = np.zeros((ny, nx), np.float32)
+    t = plating_um / 1000.0
+    count = 0
+    for x, y, d in desc.get("plated", []):
+        px, py = place((x, y))
+        ix, iy = int((px + pixel) / pixel), int((py + pixel) / pixel)
+        if 0 <= ix < nx and 0 <= iy < ny:
+            via_area[iy, ix] += math.pi * ((d / 2 + t) ** 2 - (d / 2) ** 2)
+            count += 1
+    if not desc.get("plated"):
+        messages.append("No plated holes (vias) found.")
+    thickness = (sum(c / 1000.0 for c in copper_um) + sum(dielectric_mm)) if core != "IMS" else \
+        float(desc.get("thickness_mm", 1.6))
+    pcb = {"source": os.path.basename(desc.get("path", "")), "format": desc["format"],
+           "outline": [[float(x), float(y)] for x, y in outline],
+           "holes": [[[float(x), float(y)] for x, y in hole] for hole in holes],
+           "core": core if core in PCB_CORES else "FR-4", "layers": layers,
+           "dielectric_mm": [float(d) for d in dielectric_mm], "plating_um": float(plating_um),
+           "ims_dielectric_mm": float(ims_dielectric_mm), "ims_k": float(ims_k),
+           "thickness_mm": float(thickness), "pixel_mm": pixel, "origin": [-pixel, -pixel],
+           "via_area": via_area, "plated_holes": count, "size_mm": [float(size[0]), float(size[1])],
+           "background_w": 0.0}
+    return pcb, place, messages
+
+
+def pcb_board_mesh(pcb):
+    """(vertices, triangles, faces) of the board: outline and holes extruded from Z 0 to the
+    board thickness; faces: top, bottom, outer edge, each hole wall."""
+    outer = [tuple(p) for p in pcb["outline"]]
+    holes = [[tuple(p) for p in hole] for hole in pcb["holes"]]
+    tris, pts = cad.triangulate_with_holes(outer, holes)
+    n = len(pts)
+    thickness = pcb["thickness_mm"]
+    vertices = [(x, y, 0.0) for x, y in pts] + [(x, y, thickness) for x, y in pts]
+    triangles, faces = [], []
+
+    def add(group):
+        faces.append({"planar": True, "tris": list(range(len(triangles), len(triangles) + len(group)))})
+        triangles.extend(group)
+
+    add([(a + n, b + n, c + n) for a, b, c in tris])                     # top (CCW from above)
+    add([(a, c, b) for a, b, c in tris])                                 # bottom
+    start = 0
+    for loop in [outer] + holes:
+        m = len(loop)
+        walls = []
+        for i in range(m):
+            a, b = start + i, start + (i + 1) % m
+            walls += [(a, b, b + n), (a, b + n, a + n)]
+        start += m
+        faces.append({"planar": False, "tris": list(range(len(triangles), len(triangles) + len(walls)))})
+        triangles.extend(walls)
+    return vertices, triangles, faces
+
+
+def pcb_stack(pcb):
+    """Layers of the board from its top: [(thickness mm, copper layer index or None, k in plane,
+    k through)] (copper layers get their conductivity from the coverage)."""
+    core = PCB_CORES.get(pcb.get("core"), PCB_CORES["FR-4"])
+    layers = pcb["layers"]
+    if pcb.get("core") == "IMS":
+        top = layers[0]["copper_um"] / 1000.0 if layers else 0.035
+        dielectric = pcb.get("ims_dielectric_mm", 0.1)
+        base = max(pcb["thickness_mm"] - top - dielectric, 0.1)
+        k = pcb.get("ims_k", 2.0)
+        return [(top, 0, None, None), (dielectric, None, k, k), (base, None, core["base_k"], core["base_k"])]
+    slabs = []
+    for index, layer in enumerate(layers):
+        slabs.append((layer["copper_um"] / 1000.0, index, None, None))
+        if index < len(layers) - 1:
+            d = pcb["dielectric_mm"][index] if index < len(pcb["dielectric_mm"]) else 0.2
+            slabs.append((d, None, core["k_plane"], core["k_through"]))
+    return slabs
+
+
+_PCB_TABLES = {}                 # summed-area tables of board rasters (by the rasters' identity)
+
+
+def pack_arrays(value):
+    """JSON-ready copy: numpy arrays become {"__array__": base64 of zlib bytes, …}; keys that
+    start with '_' are left out."""
+    import base64, zlib
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        return {"__array__": base64.b64encode(zlib.compress(array.tobytes(), 6)).decode("ascii"),
+                "dtype": str(array.dtype), "shape": list(array.shape)}
+    if isinstance(value, dict):
+        return {k: pack_arrays(v) for k, v in value.items() if not str(k).startswith("_")}
+    if isinstance(value, (list, tuple)):
+        return [pack_arrays(v) for v in value]
+    return value
+
+
+def unpack_arrays(value):
+    import base64, zlib
+    if isinstance(value, dict):
+        if "__array__" in value:
+            raw = zlib.decompress(base64.b64decode(value["__array__"]))
+            return np.frombuffer(raw, np.dtype(value["dtype"])).reshape(value["shape"]).copy()
+        return {k: unpack_arrays(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [unpack_arrays(v) for v in value]
+    return value
+
+
+def copy_sharing_arrays(value):
+    """Deep copy of dicts and lists that shares numpy arrays (never changed in place)."""
+    if isinstance(value, dict):
+        return {k: copy_sharing_arrays(v) for k, v in value.items() if not str(k).startswith("_")}
+    if isinstance(value, list):
+        return [copy_sharing_arrays(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value
+    return copy.deepcopy(value)
+
+
+def _summed_area(raster):
+    table = np.zeros((raster.shape[0] + 1, raster.shape[1] + 1))
+    table[1:, 1:] = np.cumsum(np.cumsum(raster.astype(float), axis=0), axis=1)
+    return table
+
+
+def _box_mean(table, origin, pixel, x, y, dx, dy):
+    """Mean of a raster (given by its summed-area table) over boxes around (x, y)."""
+    ny, nx = table.shape[0] - 1, table.shape[1] - 1
+    x0 = np.clip(np.floor((x - dx / 2 - origin[0]) / pixel).astype(int), 0, nx)
+    x1 = np.clip(np.ceil((x + dx / 2 - origin[0]) / pixel).astype(int), 0, nx)
+    y0 = np.clip(np.floor((y - dy / 2 - origin[1]) / pixel).astype(int), 0, ny)
+    y1 = np.clip(np.ceil((y + dy / 2 - origin[1]) / pixel).astype(int), 0, ny)
+    total = table[y1, x1] - table[y0, x1] - table[y1, x0] + table[y0, x0]
+    count = np.maximum((x1 - x0) * (y1 - y0), 1)
+    return total / count, count
+
+
+def pcb_conductivity(pcb, x, y, dx, dy, layer, layers, dz):
+    """(n, 3) conductivities W/(m·K) of board cells at board coordinates x, y (mm) with cell
+    sizes dx, dy, dz; `layer` = index of the cell from the board top within its column of
+    `layers` cells. The column stands for the whole stack: its cells share it evenly, so the
+    in-plane sheet conductance and the through resistance of the column are the stack's."""
+    slabs = pcb_stack(pcb)
+    total = sum(s[0] for s in slabs)
+    key = (id(pcb["via_area"]),) + tuple(id(l["coverage"]) for l in pcb["layers"])
+    cache = _PCB_TABLES.get(key)
+    if cache is None:                       # summed-area tables, kept for the next run
+        if len(_PCB_TABLES) > 6:
+            _PCB_TABLES.clear()
+        cache = _PCB_TABLES[key] = {
+            "copper": [_summed_area(l["coverage"] / 255.0) for l in pcb["layers"]],
+            "vias": _summed_area(pcb["via_area"]), "arrays": (pcb["via_area"], pcb["layers"])}
+    origin, pixel = pcb["origin"], pcb["pixel_mm"]
+    lo = layer / layers * total
+    hi = (layer + 1) / layers * total
+    sheet = np.zeros(len(x))
+    resistance = np.zeros(len(x))
+    depth = 0.0
+    for thickness, copper, k_plane, k_through in slabs:
+        overlap = np.clip(np.minimum(hi, depth + thickness) - np.maximum(lo, depth), 0.0, None)
+        depth += thickness
+        if not overlap.any():
+            continue
+        if copper is not None:
+            share, _count = _box_mean(cache["copper"][copper], origin, pixel, x, y, dx, dy)
+            k = share * COPPER_K + (1.0 - share) * PCB_RESIN_K
+            sheet += overlap * k
+            resistance += overlap / k
+        else:
+            sheet += overlap * k_plane
+            resistance += overlap / k_through
+    span = hi - lo
+    # plated holes: copper barrels through the board, in parallel to the layers
+    via_mm2, count = _box_mean(cache["vias"], origin, pixel, x, y, dx, dy)
+    share = np.clip(via_mm2 * count / np.maximum(dx * dy, 1e-12), 0.0, 0.9)
+    conductance = (1.0 - share) / np.maximum(resistance, 1e-12) + share * COPPER_K / np.maximum(span, 1e-12)
+    k_plane_cell = sheet / np.maximum(dz, 1e-12)
+    k_through_cell = conductance * dz
+    return np.stack([k_plane_cell, k_plane_cell, k_through_cell], axis=1)
+
+
+def pcb_summary(pcb):
+    """'2 copper layers (35 / 35 µm), FR-4, 1.6 mm, 37 × 25 mm, 64 vias'."""
+    copper = " / ".join(f"{layer['copper_um']:g}" for layer in pcb["layers"])
+    core = PCB_CORES.get(pcb.get("core"), PCB_CORES["FR-4"])["title"]
+    shares = [float(layer["coverage"].mean()) / 255.0 for layer in pcb["layers"]]
+    return (f"{len(pcb['layers'])} copper layer{'s' if len(pcb['layers']) != 1 else ''} ({copper} µm, "
+            f"covered {' / '.join(f'{s:.0%}' for s in shares)}), {core}, {pcb['thickness_mm']:.3g} mm, "
+            f"{pcb['size_mm'][0]:.4g} × {pcb['size_mm'][1]:.4g} mm, {pcb.get('plated_holes', 0)} plated holes")
+
+
+# ── component packages (two-resistor model) ───────────────────────────────────
+# Simple blocks; the die is a node with a resistance to the package top (θJC top) and one to
+# the board below (θJB, or θJC of an exposed pad / tab soldered to the board). Typical values
+# for orientation; datasheet values are better.
+PACKAGES = {      # name: (length, width, height mm, θ top K/W, θ board K/W, Tj max °C, footprint pattern)
+    "SOT-23": (2.9, 1.3, 1.0, 120.0, 80.0, 150.0, r"SOT-23(?!-?[5-8])"),
+    "SOT-23-6": (2.9, 1.6, 1.1, 100.0, 60.0, 150.0, r"SOT-23-[56]|TSOT-23"),
+    "SOT-223": (6.5, 3.5, 1.6, 30.0, 15.0, 150.0, r"SOT-223"),
+    "SOT-89": (4.5, 2.5, 1.5, 40.0, 20.0, 150.0, r"SOT-89"),
+    "SOD-123": (2.7, 1.6, 1.1, 150.0, 100.0, 150.0, r"SOD-123"),
+    "SMA (DO-214AC)": (4.3, 2.6, 2.1, 60.0, 25.0, 150.0, r"D_SMA|DO-214AC"),
+    "SMB (DO-214AA)": (4.6, 3.6, 2.2, 40.0, 18.0, 150.0, r"D_SMB|DO-214AA"),
+    "SOIC-8": (4.9, 3.9, 1.5, 45.0, 60.0, 150.0, r"SOIC-8|SO-8"),
+    "SOIC-8 EP": (4.9, 3.9, 1.5, 40.0, 10.0, 150.0, r"SOIC-8-1EP|SO-8.*EP"),
+    "MSOP-8": (3.0, 3.0, 1.0, 60.0, 80.0, 150.0, r"MSOP-8|VSSOP-8"),
+    "TSSOP-20 EP": (6.5, 4.4, 1.2, 30.0, 8.0, 150.0, r"TSSOP-\d+.*EP|HTSSOP"),
+    "WSON / DFN 2×2 EP": (2.0, 2.0, 0.8, 70.0, 15.0, 150.0, r"WSON-6.*2x2|DFN-6.*2x2|SON.*2x2"),
+    "QFN 3×3 EP": (3.0, 3.0, 0.9, 40.0, 6.0, 150.0, r"QFN-\d+.*3x3|DFN-\d+.*3x3"),
+    "QFN 4×4 EP": (4.0, 4.0, 0.9, 25.0, 4.0, 150.0, r"QFN-\d+.*4x4"),
+    "QFN 5×5 EP": (5.0, 5.0, 0.9, 20.0, 3.0, 150.0, r"QFN-\d+.*5x5|DFN-\d+.*5x6"),
+    "DPAK (TO-252)": (6.6, 6.1, 2.3, 25.0, 2.0, 175.0, r"TO-252"),
+    "D2PAK (TO-263)": (10.2, 9.2, 4.5, 15.0, 1.0, 175.0, r"TO-263"),
+    "TO-220 (lying flat)": (10.2, 15.0, 4.5, 30.0, 1.5, 175.0, r"TO-220"),
+    "TO-247 (lying flat)": (16.0, 21.0, 5.0, 25.0, 0.6, 175.0, r"TO-247"),
+    "Power LED 3535": (3.5, 3.5, 2.0, 60.0, 8.0, 135.0, r"3535"),
+    "LED 5050": (5.0, 5.0, 1.6, 60.0, 12.0, 125.0, r"5050"),
+    "LED 1206": (3.2, 1.6, 1.1, 300.0, 150.0, 125.0, r"LED_1206"),
+    "Resistor 0603": (1.6, 0.8, 0.45, 600.0, 250.0, 155.0, r"R_0603"),
+    "Resistor 0805": (2.0, 1.25, 0.5, 450.0, 180.0, 155.0, r"R_0805"),
+    "Resistor 1206": (3.2, 1.6, 0.6, 300.0, 120.0, 155.0, r"R_1206"),
+    "Resistor / shunt 2512": (6.4, 3.2, 0.6, 150.0, 30.0, 155.0, r"R_2512|R_2010|Shunt"),
+    "Inductor 1812": (4.5, 3.2, 3.0, 100.0, 50.0, 125.0, r"L_1812"),
+    "Inductor 10×10": (10.0, 10.0, 4.5, 40.0, 20.0, 125.0, r"L_.*10\.?0?x10|IHLP-4040"),
+    "Inductor 6×6": (6.0, 6.0, 3.0, 60.0, 30.0, 125.0, r"L_.*6\.?\d?x6|IHLP-2525"),
+    "Custom block": (5.0, 5.0, 1.5, 50.0, 20.0, 150.0, None),
+}
+PACKAGE_MATERIAL = "Mould compound"
+
+
+def guess_package(footprint):
+    """Package name for a footprint name (KiCad library id), or 'Custom block'."""
+    import re
+    for name, entry in PACKAGES.items():
+        if entry[6] and re.search(entry[6], footprint or "", re.IGNORECASE):
+            return name
+    return "Custom block"
+
+
+def package_new(name, reference="", power_w=0.0):
+    entry = PACKAGES.get(name, PACKAGES["Custom block"])
+    return {"type": name if name in PACKAGES else "Custom block", "reference": reference,
+            "theta_top": entry[3], "theta_board": entry[4], "tj_max": entry[5], "side": "top"}
+
+
+def package_settings(data):
+    if not isinstance(data, dict):
+        return None
+    package = package_new(str(data.get("type", "Custom block")), str(data.get("reference", "")))
+    for key in ("theta_top", "theta_board", "tj_max"):
+        if key in data:
+            package[key] = max(1e-3, float(data[key])) if key != "tj_max" else float(data[key])
+    package["side"] = "bottom" if data.get("side") == "bottom" else "top"
+    return package
+
+
+def pcb_frame_of(component):
+    """Placement of a board: {"origin": world point of its 0, 0, 0, "axes": its unit X, Y, Z in
+    world coordinates}."""
+    basis = np.asarray(cad.assembly_world_vertices(component, [[0, 0, 0], [1, 0, 0], [0, 1, 0],
+                                                               [0, 0, 1]]), float)
+    return {"origin": basis[0].tolist(), "axes": (basis[1:] - basis[0]).tolist()}
+
+
+def pcb_local(frame, points):
+    return (np.asarray(points, float) - np.asarray(frame["origin"], float)) @ \
+        np.asarray(frame["axes"], float).T
+
+
+def pcb_flipped(frame):
+    """True when the board's top looks down (placed upside down)."""
+    return float(np.asarray(frame["axes"], float)[2][2]) < 0
+
+
+def _column_layers(i, j, k, flipped=False):
+    """(index from the board top, cells in the column) of grid cells (i, j, k)."""
+    column = np.asarray(i, np.int64) * 1_000_003 + np.asarray(j, np.int64)
+    _unique, inverse, counts = np.unique(column, return_inverse=True, return_counts=True)
+    top = np.full(len(_unique), -1, np.int64)
+    bottom = np.full(len(_unique), 1 << 40, np.int64)
+    np.maximum.at(top, inverse, k)
+    np.minimum.at(bottom, inverse, k)
+    layer = (np.asarray(k) - bottom[inverse]) if flipped else (top[inverse] - np.asarray(k))
+    return layer, counts[inverse]
+
+
+def junction_lines(results, transient):
+    """Summary lines and warnings of the package junctions of a run."""
+    lines, warnings = [], []
+    for entry in results:
+        peak = entry.get("peak", entry["t_j"])
+        lines.append(f"Junction of '{entry['name']}' ({entry['package']}, {entry['power']:.3g} W): "
+                     f"{entry['t_j']:.1f} °C" + (f" at the end, highest {peak:.1f} °C" if transient else "") +
+                     f" (package top {entry['t_top']:.1f} °C, board below {entry['t_board']:.1f} °C; "
+                     f"Tj max {entry['tj_max']:g} °C)")
+        if peak > entry["tj_max"]:
+            warnings.append(f"⚠ The junction of '{entry['name']}' reaches {peak:.1f} °C, above its "
+                            f"{entry['tj_max']:g} °C limit.")
+    return lines, warnings
+
+
+def package_text(package):
+    return (f"{package['type']}, θ top {package['theta_top']:g} K/W, θ board "
+            f"{package['theta_board']:g} K/W, Tj max {package['tj_max']:g} °C")
 
 
 def _scipy():
@@ -2007,16 +4223,64 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
             not has_flux and not has_fixed:
         raise ThermalError("No heat source: give a body a power (W), add a heat source, or put a "
                            "heat flux or fixed temperature on faces.")
+    coolants = [c for c in conditions if c["kind"] == "coolant" and c["targets"]]
+    baths = [c for c in conditions if c["kind"] == "bath" and c["targets"]]
     if settings["convection"] == "fixed" and settings["h"] <= 0 and not settings["radiation"] \
-            and not has_fixed:
+            and not has_fixed and not coolants and not any(c["bath_mode"] == "fixed" for c in baths):
         raise ThermalError("Without convection (h = 0) and radiation the heat cannot leave.")
     _check_thermostats(bodies, conditions)
+    for condition in coolants + baths:
+        if condition.get("liquid_model") == "flow":
+            messages.append(f"'{condition['name']}': the liquid flow is solved in Airflow mode; "
+                            "Conduction mode uses the correlations.")
 
     # 2. voxels ---------------------------------------------------------------------------
     grid = _voxel_owner(bodies, settings, step, messages)
     owner, h_mm, origin, shape = grid["owner"], grid["h_mm"], grid["origin"], grid["shape"]
     air_index, cavity_cells = grid["air_index"], grid["cavity_cells"]
     h = h_mm / 1000.0
+    # liquids: a closed passage or a lidded container next to liquid faces is opened (its
+    # faces then take the liquid condition); a bath that fills its container becomes a body of
+    # its own (well mixed), the liquid below the fill level
+    container_baths = [c for c in baths if c["bath_mode"] == "container"]
+    if coolants or baths:
+        grid_faces = [origin[a] + np.arange(shape[a] + 1) * h_mm for a in range(3)]
+        triangles = {id(c): _condition_triangles(c, bodies) for c in coolants + baths}
+        if cavity_cells:
+            labels, _count = ndi.label(owner == air_index)
+            opened = set()
+            for c in coolants + baths:
+                seeds = _liquid_seed_cells(*triangles[id(c)], grid_faces, owner < 0, 0.5 * h_mm)
+                opened |= set(np.unique(labels[seeds]).tolist()) - {0}
+            if opened:
+                owner[np.isin(labels, sorted(opened))] = -1
+                cavity_cells = int((owner == air_index).sum())
+            del labels
+        if container_baths:
+            new_air = air_index + len(container_baths)
+            owner[owner == air_index] = new_air
+            for number, c in enumerate(container_baths):
+                tris, normals = triangles[id(c)]
+                fill = _bath_fill(c, tris)
+                open_cells = (owner == -1) | (owner == new_air)
+                seeds = _liquid_seed_cells(tris, normals, grid_faces, open_cells, 0.5 * h_mm)
+                region, leaks = _bath_region(open_cells, grid_faces, seeds, fill)
+                if leaks:
+                    raise ThermalError(f"The liquid of '{c['name']}' runs out of its container below "
+                                       f"the fill level (Z = {fill:.4g} mm): close the container, "
+                                       "lower the fill level, or choose 'Large volume'.")
+                if not region.any():
+                    raise ThermalError(f"'{c['name']}' holds no liquid: the fill level (Z = "
+                                       f"{fill:.4g} mm) is below the picked faces, or the space "
+                                       "is thinner than one cell.")
+                cells = np.argwhere(region)
+                owner[region] = air_index + number
+                bath = _bath_body(c, number, origin + cells.min(0) * h_mm,
+                                  origin + (cells.max(0) + 1) * h_mm)
+                bath["fill_z"] = fill
+                bath["liquid_volume"] = len(cells) * (h_mm / 1000.0) ** 3
+                bodies.append(bath)
+            air_index = new_air
     if cavity_cells:
         messages.append(f"Air enclosed in a housing ({cavity_cells * h_mm ** 3 / 1000.0:.4g} cm³) "
                         "conducts heat as still air (no airflow in Conduction mode).")
@@ -2051,6 +4315,20 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
     conn = conn.reshape(n_elements, 8)
     n_nodes = len(nodes_global)
     k_base = np.array([body["k"] for body in bodies] + [[AIR_CONDUCTIVITY] * 3])[element_body]
+    # printed circuit boards: conductivity per element from the layer stack, the copper coverage
+    # and the vias where the element sits
+    for index, body in enumerate(bodies):
+        pcb = body["job"].get("pcb")
+        if pcb is None or not body["cells"]:
+            continue
+        chosen = np.flatnonzero(element_body == index)
+        centre = origin + (np.stack([I[chosen], J[chosen], K[chosen]], axis=1) + 0.5) * h_mm
+        local = pcb_local(body["job"]["pcb_frame"], centre)
+        layer, layers = _column_layers(I[chosen], J[chosen], K[chosen],
+                                       pcb_flipped(body["job"]["pcb_frame"]))
+        k_base[chosen] = pcb_conductivity(pcb, local[:, 0], local[:, 1], np.full(len(chosen), h_mm),
+                                          np.full(len(chosen), h_mm), layer, layers,
+                                          np.full(len(chosen), h_mm))
     k_element = k_base.copy()
     contact_extra = None
     # contacts: half of a contact's resistance goes into each of the two cell layers that touch,
@@ -2087,12 +4365,58 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                     contact_faces[int(index)].append((touching[chosen], other[chosen], axis))
         del padded_owner
         contact_extra = extra
+    # bath bodies: the film on the wetted faces (natural convection in the liquid) is a
+    # resistance 1/h between the liquid cells and the solid cells they touch, split like a
+    # contact resistance; h follows the temperatures (update_film)
+    bath_bodies = [index for index, body in enumerate(bodies) if body.get("bath") is not None]
+    film_groups = {}      # (bath, solid body, orientation) → [(bath elements, solid elements, axis)]
+    film_extra = None
+    if bath_bodies:
+        cell_id = (I.astype(np.int64) * shape[1] + J) * shape[2] + K
+        padded_owner = np.pad(owner, 1, constant_values=-1)
+        is_bath = np.zeros(air_index + 2, bool)
+        is_bath[bath_bodies] = True
+        for direction in range(6):
+            axis, side = divmod(direction, 2)
+            offset = np.zeros(3, int); offset[axis] = 1 if side else -1
+            neighbour = padded_owner[I + 1 + offset[0], J + 1 + offset[1],
+                                     K + 1 + offset[2]].astype(np.int64)
+            wetted = np.isin(element_body, bath_bodies) & (neighbour >= 0) & \
+                (neighbour != air_index) & ~is_bath[np.maximum(neighbour, 0)]
+            touching = np.nonzero(wetted)[0]
+            if not len(touching):
+                continue
+            other = np.searchsorted(cell_id, cell_id[touching] + (offset[0] * shape[1] + offset[1])
+                                    * shape[2] + offset[2])
+            # the solid's face looks towards the liquid: up when the liquid is above it
+            orientation = 0 if axis != 2 else (2 if side == 1 else 1)
+            for bath in np.unique(element_body[touching]):
+                for solid in np.unique(neighbour[touching][element_body[touching] == bath]):
+                    chosen = (element_body[touching] == bath) & (neighbour[touching] == solid)
+                    film_groups.setdefault((int(bath), int(solid), orientation), []).append(
+                        (touching[chosen], other[chosen], axis))
+        del padded_owner
+        film_extra = np.zeros((n_elements, 3))
+        film_h = {key: BATH_FILM_GUESS for key in film_groups}
+
+        def set_film():
+            film_extra[:] = 0.0
+            for key, parts in film_groups.items():
+                half = 0.5 / max(film_h[key], 1e-6)
+                for bath_elements, solid_elements, axis in parts:
+                    np.add.at(film_extra, (bath_elements, axis), half)
+                    np.add.at(film_extra, (solid_elements, axis), half)
+        set_film()
+        for index in bath_bodies:
+            if not any(key[0] == index for key in film_groups):
+                messages.append(f"⚠ The liquid of '{bodies[index]['bath']['name']}' touches no part.")
 
     def effective_k(k, elements=slice(None)):
-        """Conductivities with the contact layers of the elements."""
-        if contact_extra is None:
+        """Conductivities with the contact layers (and bath films) of the elements."""
+        if contact_extra is None and film_extra is None:
             return k
-        extra = contact_extra[elements]
+        extra = (0.0 if contact_extra is None else contact_extra[elements]) + \
+            (0.0 if film_extra is None else film_extra[elements])
         return np.where(extra > 0, h / (h / k + extra), k)
 
     k_element = np.array(effective_k(k_base))        # a copy: k_base stays the 20 °C value
@@ -2143,8 +4467,12 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
     # re-assembled with the conductivity at their mean temperature (the rest stays as it is)
     k_tabled = [index for index, body in enumerate(bodies) if body["k_curve"] is not None and
                 body["cells"]]
-    if k_tabled:
-        tab_elements = np.nonzero(np.isin(element_body, k_tabled))[0]
+    dynamic = bool(k_tabled) or bool(film_groups)     # elements re-assembled during the run
+    if dynamic:
+        film_elements = [np.concatenate([np.r_[a, b] for a, b, _axis in parts])
+                         for parts in film_groups.values()]
+        tab_elements = np.unique(np.concatenate([np.nonzero(np.isin(element_body, k_tabled))[0]]
+                                                + film_elements))
         tab_body = element_body[tab_elements]
         tab_corners = np.ascontiguousarray(conn[tab_elements].T)
         data_static = data_k - matrix_data(nodal_values(tab_elements, k_element[tab_elements],
@@ -2165,10 +4493,55 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         k_element[tab_elements] = k_tab
         data_k = data_static + matrix_data(nodal_values(tab_elements, k_tab, corners=tab_corners))
 
+    # component junctions (two-resistor model): the die is a node joined to the nodes of the
+    # package top by 1/θ top and to those of the board below it by 1/θ board, each node by its
+    # share c_i. Eliminated, it adds diag(c) to the matrix, a load P·c/S and the rank-one term
+    # −c·cᵀ/S (S = Σ c), kept beside the sparse matrix; no node can get hotter than the die
+    junctions = []
+    junction_unit = {}
+    for index, body in enumerate(bodies):
+        junction = body["job"].get("junction")
+        if junction is None or not body["cells"]:
+            continue
+        chosen = np.flatnonzero(element_body == index)
+        k_of = K[chosen]
+        upright = junction.get("side", "top") != "bottom"
+        top_layer = chosen[k_of == (k_of.max() if upright else k_of.min())]
+        board_layer = chosen[k_of == (k_of.min() if upright else k_of.max())]
+
+        def face_weights(elements, high):
+            corners = [c for c in range(8) if _CORNERS[c][2] == (1 if high else 0)]
+            nodes, counts = np.unique(conn[elements][:, corners].ravel(), return_counts=True)
+            return nodes, counts / counts.sum()
+        top_nodes, top_w = face_weights(top_layer, upright)
+        board_nodes, board_w = face_weights(board_layer, not upright)
+        g_top = 1.0 / max(float(junction["theta_top"]), 1e-6)
+        g_board = 1.0 / max(float(junction["theta_board"]), 1e-6)
+        nodes, where = np.unique(np.r_[top_nodes, board_nodes], return_inverse=True)
+        share = np.bincount(where, np.r_[top_w * g_top, board_w * g_board])
+        total = g_top + g_board
+        unit = np.zeros(n_nodes)
+        unit[nodes] = share / total
+        junction_unit[index] = unit
+        junctions.append({"index": index, "name": body["name"], "junction": junction,
+                          "top": (top_nodes, top_w), "board": (board_nodes, board_w),
+                          "g_top": g_top, "g_board": g_board, "nodes": nodes, "share": share,
+                          "total": total})
+    if junctions:
+        rows = np.concatenate([j["nodes"] for j in junctions])
+        cols = np.concatenate([np.full(len(j["nodes"]), n) for n, j in enumerate(junctions)])
+        junction_U = sp.csc_matrix((np.concatenate([j["share"] for j in junctions]), (rows, cols)),
+                                   shape=(n_nodes, len(junctions)))
+        junction_G = np.array([1.0 / j["total"] for j in junctions])
+        junction_diagonal_slots = rows
+        junction_diagonal_values = np.concatenate([j["share"] for j in junctions])
+    body_power_now = {index: body["power"] for index, body in enumerate(bodies)}
     # heat sources: the power of a body is spread evenly over its cells; a source with a time
     # profile or a thermostat gets its own load vector of 1 W, scaled by its power in every
-    # time step (and by the thermostat's on / off state or share of the power)
+    # time step (and by the thermostat's on / off state or share of the power); a package's
+    # power goes in at its junction
     element_power = np.zeros(n_elements)
+    load_junction = np.zeros(n_nodes)
     profiled = []    # [(nodal load of 1 W, profile, nominal W, "source" | "flux", index, slot)]
     controlled = []  # thermostat slots: (name, thermostat, "source" | "flux", index)
     constant_power = 0.0
@@ -2176,18 +4549,22 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         if not body["cells"] or profile_peak_power(body["profile"], body["power"]) <= 0:
             continue
         if body["profile"] is None and body["thermostat"] is None:
-            element_power[element_body == index] = body["power"] / body["cells"]
+            if index in junction_unit:
+                load_junction += body["power"] * junction_unit[index]
+            else:
+                element_power[element_body == index] = body["power"] / body["cells"]
             constant_power += body["power"]
         else:
-            unit = np.bincount(conn[element_body == index].ravel(), minlength=n_nodes) / \
+            unit = junction_unit[index] if index in junction_unit else \
+                np.bincount(conn[element_body == index].ravel(), minlength=n_nodes) / \
                 (8.0 * body["cells"])
             slot = None
             if body["thermostat"] is not None:
                 slot = len(controlled)
                 controlled.append((body["name"], body["thermostat"], "source", index))
             profiled.append((unit, body["profile"], body["power"], "source", index, slot))
-    load_source = np.bincount(conn.ravel(), np.repeat(element_power / 8.0, 8), n_nodes)
-    del element_power
+    load_source = np.bincount(conn.ravel(), np.repeat(element_power / 8.0, 8), n_nodes) + load_junction
+    del element_power, load_junction
 
     # exposed faces (towards outside air)
     padded = np.pad(owner, 1, constant_values=-1)
@@ -2218,7 +4595,7 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                 offset = _offset_index(_CORNERS[corners[q]] - _CORNERS[corners[p]])
                 face_slots[selected, 4 * p + q] = indptr[rows] + rank[offset, rows]
     diagonal_slots = indptr[:-1] + rank[_offset_index((0, 0, 0))]     # heat capacity goes here
-    if not k_tabled:
+    if not dynamic:
         del rank, present
     # staircase correction: the voxel surface of a slanted or curved face is larger than the
     # real one; each body's exposed faces are scaled by (mesh area / voxel surface area)
@@ -2281,11 +4658,15 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
             found = fits[rows, first]
             mesh_face[selected[found]] = tri_face[source[nearest[rows, first]]][found]
         for index, condition in enumerate(conditions):
+            if condition["kind"] == "bath" and condition["bath_mode"] == "container":
+                continue                      # its faces now touch the bath body
             mask = np.zeros(n_faces, bool)
             for b, faces in condition["targets"].items():
                 mask |= (face_body == b) & np.isin(mesh_face, faces)
             face_condition[mask] = index
         for index, condition in enumerate(conditions):
+            if condition["kind"] == "bath" and condition["bath_mode"] == "container":
+                continue
             if condition["targets"] and not (face_condition == index).any():
                 messages.append(f"⚠ Face condition '{condition['name']}' reaches no outside "
                                 "surface (its faces touch another body or are inside a housing).")
@@ -2332,6 +4713,103 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
             fixed_owner[nodes] = index
     fixed_nodes = np.nonzero(np.isfinite(fixed_value))[0]
 
+    # coolant channels and baths of a fixed temperature: their faces exchange heat with the
+    # liquid (h from correlations, liquid temperature along the channel), no radiation
+    liquid_records = []
+    liquid_faces = np.zeros(n_faces, bool)
+    liquid_h = np.zeros(n_faces)
+    for index, condition in enumerate(conditions):
+        if condition["kind"] not in LIQUID_KINDS or \
+                (condition["kind"] == "bath" and condition["bath_mode"] == "container"):
+            continue
+        chosen = np.flatnonzero(face_condition == index)
+        if not len(chosen):
+            continue
+        record = {"index": index, "condition": condition, "faces": chosen}
+        if condition["kind"] == "coolant":
+            step(39, f"Analysing the channel '{condition['name']}'...")
+            geometry = channel_geometry(_condition_triangles(condition, bodies)[0],
+                                        condition["reverse"])
+            s = geometry["s"][cKDTree(geometry["points"]).query(face_centre[chosen])[1]]
+            n_seg = int(np.clip(round(geometry["length_mm"] / h_mm), 8, 400))
+            seg = np.clip((s / max(geometry["length_mm"], 1e-9) * n_seg).astype(int), 0, n_seg - 1)
+            # a curved wall: the area of the picked faces, not of the larger cell staircase (a
+            # picked face partly covered by another part keeps only its open cell faces)
+            face_area[chosen] *= min(1.0, geometry["wall_area_mm2"] * 1e-6 /
+                                     max(float(face_area[chosen].sum()), 1e-30))
+            record.update(geometry=geometry, seg=seg, n_seg=n_seg,
+                          area_seg=np.bincount(seg, face_area[chosen], n_seg), t_face=None)
+        liquid_faces[chosen] = True
+        liquid_records.append(record)
+    channels = _ordered_channels([r for r in liquid_records if r["condition"]["kind"] == "coolant"])
+    face_orientation = np.where(face_dir == 5, 1, np.where(face_dir == 4, 2, 0))
+
+    def update_liquids(T, relax=1.0):
+        """Liquid temperatures and coefficients of the coolant / fixed-bath faces for the nodal
+        temperatures T; returns the largest change of a liquid temperature (K)."""
+        change = 0.0
+        face_t = T[face_nodes].mean(1)
+        for record in channels:
+            chosen = record["faces"]
+            old = face_ambient[chosen].copy()
+            face_ambient[chosen] = _update_channel(record, face_t[chosen], face_area[chosen], relax)
+            liquid_h[chosen] = record["h"]
+            change = max(change, float(np.abs(face_ambient[chosen] - old).max()))
+        for record in liquid_records:
+            c = record["condition"]
+            if c["kind"] != "bath":
+                continue
+            chosen = record["faces"]
+            values = np.zeros(len(chosen))
+            for b in np.unique(face_body[chosen]):
+                for o in (0, 1, 2):
+                    sel = (face_body[chosen] == b) & (face_orientation[chosen] == o)
+                    if not sel.any():
+                        continue
+                    t_mean = float((face_t[chosen][sel] * face_area[chosen][sel]).sum() /
+                                   face_area[chosen][sel].sum())
+                    values[sel] = _liquid_natural_h(c["fluid"], t_mean - c["bath_c"],
+                                                    face_length[chosen][sel], np.array(o),
+                                                    0.5 * (t_mean + c["bath_c"]))
+            liquid_h[chosen] = values if relax >= 1.0 or not record.get("started") else \
+                (1.0 - relax) * liquid_h[chosen] + relax * values
+            record["started"] = True
+            face_ambient[chosen] = c["bath_c"]
+        return change
+
+    # bath bodies: film coefficients from the mean temperatures of the liquid and of the wetted
+    # faces of each part (per orientation); evaporation from the open surface
+    bath_elements = {index: np.flatnonzero(element_body == index) for index in bath_bodies}
+    evaporation_share = np.zeros(air_index + 1)
+    for index in bath_bodies:
+        condition = bodies[index]["bath"]
+        if condition.get("evaporation", True):
+            evaporation_share[index] = (FLUIDS.get(condition["fluid"]) or {}).get("evaporation", 0.0)
+    face_evaporation = evaporation_share[face_body]
+
+    def update_film(T, relax=1.0):
+        """New film coefficients of the bath bodies; returns their largest relative change."""
+        change = 0.0
+        t_bath = {index: float(T[conn[elements]].mean()) for index, elements in bath_elements.items()}
+        for key, parts in film_groups.items():
+            bath, solid, orientation = key
+            solid_elements = np.concatenate([b for _a, b, _axis in parts])
+            t_solid = float(T[conn[solid_elements]].mean())
+            if orientation == 0:
+                length = min(bodies[solid]["extent"][2], bodies[bath]["extent"][2])
+            else:
+                e_s, e_b = bodies[solid]["extent"], bodies[bath]["extent"]
+                length = min(e_s[0] * e_s[1] / (2.0 * (e_s[0] + e_s[1])),
+                             e_b[0] * e_b[1] / (2.0 * (e_b[0] + e_b[1])))
+            fluid = bodies[bath]["bath"]["fluid"]
+            new = float(_liquid_natural_h(fluid, t_solid - t_bath[bath], max(length, 2.0) / 1000.0,
+                                          np.array(orientation), 0.5 * (t_solid + t_bath[bath])))
+            new = (1.0 - relax) * film_h[key] + relax * new
+            change = max(change, abs(new - film_h[key]) / max(film_h[key], 1e-9))
+            film_h[key] = new
+        set_film()
+        return change
+
     def heat_input(t0=None, t1=None, factors=None):
         """(nodal heat load, source power, flux power per condition) — steady state (no times)
         or the mean over the time step t0 … t1; `factors` scale the thermostat-controlled
@@ -2347,6 +4825,7 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                 load = load + unit * power
             if kind == "source":
                 source += power
+                body_power_now[index] = power
             else:
                 flux[index] = power
         return load, source, flux
@@ -2356,6 +4835,8 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
     if not transient and total_in <= 0 and not has_fixed:
         raise ThermalError("The heat sources have no power in steady state (an on / off cycle "
                            "with 0 % on, or a table ending at 0 W). Use a transient run.")
+
+    evaporation_h = np.zeros(n_faces)
 
     def face_coefficients(T):
         """(convection h, radiation h) per exposed face for the nodal temperatures T."""
@@ -2372,10 +4853,20 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         if settings["radiation"]:
             tk = face_t + 273.15
             radiation = face_emissivity * STEFAN_BOLTZMANN * (tk ** 2 + ambient_k ** 2) * (tk + ambient_k)
+        evaporating = face_evaporation > 0
+        if evaporating.any():              # open surface of a bath: evaporation on top
+            extra = np.zeros(len(face_t))
+            extra[evaporating] = face_evaporation[evaporating] * _evaporation_h(
+                face_t[evaporating], ambient, convection[evaporating], 1.0)
+            evaporation_h[:] = extra
+            convection = convection + extra
         if conditions:
             convection = np.where(own_convection, own_h, convection)
             convection[no_exchange] = 0.0
             radiation[no_exchange] = 0.0
+            if liquid_faces.any():
+                convection = np.where(liquid_faces, liquid_h, convection)
+                radiation[liquid_faces] = 0.0
         return convection, radiation
 
     # 4. result surfaces -----------------------------------------------------------------
@@ -2392,6 +4883,8 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
     edge = max(h_mm, math.sqrt(2.0 * total_area / DISPLAY_TRIANGLE_LIMIT))
     surface, tree = {}, None
     for body in bodies:
+        if body.get("synthetic"):                     # the liquid of a bath has no own mesh
+            continue
         vertices, triangles = refine_triangles(body["V"], body["T"], edge)
         index, weights = _surface_weights(vertices, origin, h_mm, shape, nodes_global)
         lost = weights.sum(1) <= 0
@@ -2412,6 +4905,16 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                   for index, body in enumerate(bodies)]
     body_elements = [conn[element_body == index] if body["cells"] else None
                      for index, body in enumerate(bodies)]
+
+    def junction_temperatures(T):
+        """(junction, package top, board) °C of every junction for the nodal temperatures T."""
+        out = []
+        for j in junctions:
+            t_top = float(T[j["top"][0]] @ j["top"][1])
+            t_board = float(T[j["board"][0]] @ j["board"][1])
+            power = float(body_power_now.get(j["index"], 0.0))
+            out.append(((power + float(T[j["nodes"]] @ j["share"])) / j["total"], t_top, t_board))
+        return out
 
     def body_stats(T):
         """(3, bodies): minimum, mean and maximum temperature of every body."""
@@ -2483,6 +4986,8 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         heat load."""
         weight = convection_weight + radiation_weight
         data = data_k + np.bincount(face_slots.ravel(), (weight[:, None] * face_mass[None, :]).ravel(), nnz)
+        if junctions:                     # the junctions' conductances to the package faces
+            np.add.at(data, diagonal_slots[junction_diagonal_slots], junction_diagonal_values)
         outside = (convection_weight * face_ambient + radiation_weight * ambient) / 4.0
         rhs = load + np.bincount(face_nodes.ravel(), np.repeat(outside, 4), n_nodes)
         return data, rhs
@@ -2498,11 +5003,25 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         fixed_vector = np.zeros(n_nodes)
         fixed_vector[fixed_nodes] = fixed_value[fixed_nodes]
 
+    if junctions:
+        junction_free = junction_U.tolil()
+        if len(fixed_nodes):
+            junction_free[fixed_nodes, :] = 0.0
+        junction_free = junction_free.tocsr()
+        junction_diag = -np.asarray(junction_free.multiply(junction_free) @ junction_G).ravel()
+
+    def junction_product(v, free=True):
+        """The junctions' rank-one couplings −c·cᵀ/S applied to the nodal vector v."""
+        U = junction_free if free else junction_U.tocsr()
+        return -(U @ (junction_G * (U.T @ v)))
+
     def constrain(data, rhs):
         if not len(fixed_nodes):
             return data, rhs
         matrix = sp.csr_matrix((data, indices, indptr), shape=(n_nodes, n_nodes))
         rhs = rhs - matrix @ fixed_vector
+        if junctions:
+            rhs = rhs + junction_free @ (junction_G * (junction_U.T @ fixed_vector))
         rhs[fixed_nodes] = fixed_vector[fixed_nodes]
         data = data.copy()
         data[fixed_entries] = 0.0
@@ -2517,10 +5036,21 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
 
     def solve(data, rhs, start, tolerance, refresh=True):
         matrix = sp.csr_matrix((data, indices, indptr), shape=(n_nodes, n_nodes))
-        inverse_diagonal = 1.0 / data[diagonal_slots]
+        diagonal = data[diagonal_slots]
+        if junctions:                         # the matrix plus the junction couplings
+            sparse_matrix = matrix
+            diagonal = diagonal + junction_diag
+            matrix = spla.LinearOperator(sparse_matrix.shape, dtype=float,
+                                         matvec=lambda v: sparse_matrix @ v + junction_product(v))
+        inverse_diagonal = 1.0 / diagonal
         if prolongation is not None:
             if refresh or coarse["lu"] is None:
-                coarse_matrix = (prolongation.T @ matrix @ prolongation).tocsc()
+                if junctions:
+                    PU = prolongation.T @ junction_free
+                    coarse_matrix = (prolongation.T @ sparse_matrix @ prolongation -
+                                     PU @ sp.diags(junction_G) @ PU.T).tocsc()
+                else:
+                    coarse_matrix = (prolongation.T @ matrix @ prolongation).tocsc()
                 coarse["lu"] = spla.splu(coarse_matrix)
             lu = coarse["lu"]
 
@@ -2538,7 +5068,9 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
             raise ThermalError("The solver did not converge (a body may have no way to lose heat).")
         return solution, info, cg_iterations[0]
 
-    nonlinear = settings["convection"] != "fixed" or settings["radiation"] or bool(k_tabled)
+    liquids_present = bool(liquid_records) or bool(film_groups)
+    nonlinear = settings["convection"] != "fixed" or settings["radiation"] or bool(k_tabled) or \
+        liquids_present
     cg_total, solver_short, q_stored = 0, False, 0.0
     flux_now = flux_steady
     factors = None
@@ -2562,20 +5094,24 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         convection_c = radiation_c = ratio_c = None
         change, relaxation, previous_change = float("inf"), 1.0, float("inf")
         iterations = 0
-        for iteration in range(40 if nonlinear else 1):
+        for iteration in range(60 if liquids_present else 40 if nonlinear else 1):
             step(45 + 50 * min(1.0, iteration / 8.0),
                  f"Solving {n_nodes:,} nodes — iteration {iteration + 1}".replace(",", " ") +
                  ("" if not iteration else f", change {change:.3g} K"))
-            convection, radiation = face_coefficients(T)
             if change > previous_change:          # oscillating: damp the coefficient update
                 relaxation = max(0.3, relaxation * 0.6)
             previous_change = change
+            if liquid_records:
+                update_liquids(T, relaxation if iteration else 1.0)
+            if film_groups:
+                update_film(T, relaxation if iteration else 1.0)
+            convection, radiation = face_coefficients(T)
             if convection_c is None:
                 convection_c, radiation_c = convection, radiation
             else:
                 convection_c = (1.0 - relaxation) * convection_c + relaxation * convection
                 radiation_c = (1.0 - relaxation) * radiation_c + relaxation * radiation
-            if k_tabled:
+            if dynamic:
                 ratio = tabled_ratio(T)
                 ratio_c = ratio if ratio_c is None else (1.0 - relaxation) * ratio_c + relaxation * ratio
                 assemble_k(ratio_c)
@@ -2646,9 +5182,15 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
 
         start = ambient if settings["initial_ambient"] else settings["initial_c"]
         T = np.full(n_nodes, float(start))
+        for index, elements in bath_elements.items():      # a bath may start warmer or colder
+            condition = bodies[index]["bath"]
+            if not condition.get("bath_start_auto", True):
+                T[np.unique(conn[elements])] = float(condition["bath_c"])
         T[fixed_nodes] = fixed_value[fixed_nodes]          # held from the start
         node_capacity = capacity_at(T)
         ratio_assembled = None
+        film_assembled = None
+        coolant_series = np.zeros((len(channels), n_steps + 1))
         frame_steps = np.unique(np.round(np.linspace(0, n_steps, min(n_steps, MAX_FRAMES) + 1))
                                 .astype(int))
         frame_of_step = {int(s): f for f, s in enumerate(frame_steps)}
@@ -2665,8 +5207,12 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         power_series = np.zeros(n_steps + 1)
         t_min, t_max = float(T.min()), float(T.max())
 
+        junction_series = np.zeros((len(junctions), n_steps + 1))
+
         def record(step_index, T):
             stats[step_index] = body_stats(T)
+            if junctions:
+                junction_series[:, step_index] = [t[0] for t in junction_temperatures(T)]
             frame = frame_of_step.get(step_index)
             if frame is not None:
                 frames[frame] = T[used]
@@ -2700,30 +5246,51 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                 factors = thermostats.factors(True)
                 switch_series[:, step_index] = factors
             refresh = step_index % 10 == 1
-            if k_tabled:                         # re-assemble when k changed by over 1 %; the
+            film_changed = False
+            if film_groups:                      # bath films: re-assembled when h moved by 1 %
+                update_film(T)
+                film_changed = film_assembled is None or max(
+                    abs(film_h[key] - film_assembled[key]) / max(film_assembled[key], 1e-9)
+                    for key in film_h) > 1e-2
+            if dynamic:                          # re-assemble when k changed by over 1 %; the
                 ratio = tabled_ratio(T)          # coarse preconditioner may lag behind
-                if ratio_assembled is None or float(np.abs(ratio - ratio_assembled).max()) > 1e-2:
+                if ratio_assembled is None or film_changed or \
+                        float(np.abs(ratio - ratio_assembled).max()) > 1e-2:
                     assemble_k(ratio)
                     ratio_assembled = ratio
+                    if film_groups:
+                        film_assembled = dict(film_h)
             if cp_tabled and step_index > 1:
                 node_capacity = capacity_at(T)
+            if liquid_records:
+                update_liquids(T)
             convection, radiation = face_coefficients(T)
             load, total_power, flux_now = heat_input((step_index - 1) * dt, step_index * dt,
                                                      factors)
             power_series[step_index] = total_power + float(flux_now.sum())
-            data, rhs = system(convection * face_area, radiation * face_area, load)
-            data[diagonal_slots] += node_capacity
-            rhs += node_capacity * T
-            last_system = (data, rhs)
-            data, rhs = constrain(data, rhs)
             # start from the linear extrapolation of the last two steps (far fewer iterations)
             guess = T if step_index == 1 else T + (T - previous)
+            T_old = T
             previous = T
-            # the surface coefficients change slowly: the coarse factorisation is renewed now
-            # and then only
-            T, info, steps_used = solve(data, rhs, guess, TRANSIENT_TOLERANCE, refresh=refresh)
-            cg_total += steps_used
-            solver_short |= info > 0
+            for liquid_pass in range(3 if channels else 1):
+                data, rhs = system(convection * face_area, radiation * face_area, load)
+                data[diagonal_slots] += node_capacity
+                rhs += node_capacity * T_old
+                last_system = (data, rhs)
+                data, rhs = constrain(data, rhs)
+                # the surface coefficients change slowly: the coarse factorisation is renewed
+                # now and then only
+                T, info, steps_used = solve(data, rhs, guess, TRANSIENT_TOLERANCE,
+                                            refresh=refresh and liquid_pass == 0)
+                cg_total += steps_used
+                solver_short |= info > 0
+                # coolant: the liquid temperatures again from the new wall temperatures
+                if not channels or liquid_pass == 2 or update_liquids(T) < 0.02:
+                    break
+                convection = np.where(liquid_faces, liquid_h, convection)
+                guess = T
+            for number, channel in enumerate(channels):
+                coolant_series[number, step_index] = channel["t_out"]
             t_min, t_max = min(t_min, float(T.min())), max(t_max, float(T.max()))
             record(step_index, T)
         q_stored = float((node_capacity * (T - previous)).sum())       # W, heat still stored
@@ -2733,6 +5300,9 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                   "mean": stats[:, 1, :].T, "max": stats[:, 2, :].T, "power": power_series}
         if thermostats is not None:
             series["thermostats"] = switch_series
+        if junctions:
+            series["junctions"] = junction_series
+            series["junction_names"] = [j["name"] for j in junctions]
     if solver_short:
         messages.append("⚠ The linear solver stopped before full accuracy; the result may be "
                         "slightly off.")
@@ -2743,17 +5313,21 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
     face_t = T[face_nodes].mean(1)
     convection_flow = convection * face_area * (face_t - face_ambient)       # W per face
     radiation_flow = radiation * face_area * (face_t - ambient)
-    q_convection = float(convection_flow.sum())
+    q_liquid = float(convection_flow[liquid_faces].sum())     # into coolant / fixed baths
+    q_convection = float(convection_flow.sum()) - q_liquid
+    q_evaporation = float((evaporation_h * face_area * (face_t - ambient)).sum())
     q_radiation = float(radiation_flow.sum())
     # heat put in at fixed-temperature nodes to hold them = residual of their rows in the full
     # system (negative: heat leaves the parts there)
     reaction = np.zeros(n_nodes)
     if len(fixed_nodes):
         full = sp.csr_matrix((last_system[0], indices, indptr), shape=(n_nodes, n_nodes))
-        reaction[fixed_nodes] = (full @ T - last_system[1])[fixed_nodes]
+        reaction[fixed_nodes] = (full @ T - last_system[1] +
+                                 (junction_product(T, free=False) if junctions else 0.0))[fixed_nodes]
     q_fixed = -float(reaction.sum())                    # leaving through fixed-temperature faces
-    q_out = q_convection + q_radiation + q_fixed
-    scale = max(total_in, abs(q_convection) + abs(q_radiation) + float(np.abs(reaction).sum()), 1e-9)
+    q_out = q_convection + q_radiation + q_fixed + q_liquid
+    scale = max(total_in, abs(q_convection) + abs(q_radiation) + abs(q_liquid) +
+                float(np.abs(reaction).sum()), 1e-9)
     balance_error = (q_out + q_stored - total_in) / scale
     if abs(balance_error) > (0.05 if transient else 0.02):
         messages.append(f"⚠ Heat balance off by {balance_error:+.1%}; the result is not converged"
@@ -2764,6 +5338,8 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         heat = {"fixed": -float(reaction[fixed_owner == index].sum()),       # + = leaves
                 "flux": float(flux_now[index]),
                 "convection": float(convection_flow[mask].sum()),
+                "coolant": float(convection_flow[mask].sum()),
+                "bath": float(convection_flow[mask].sum()),
                 "insulated": 0.0}[condition["kind"]]
         condition_results.append({"name": condition["name"], "kind": condition["kind"],
                                   "cell_faces": int(mask.sum()), "heat": heat,
@@ -2811,6 +5387,96 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                          ([f"flux {flux_now.sum():.4g} W"] if flux_now.any() else []) +
                          ([f"fixed-temperature faces {fixed_in:.4g} W"] if fixed_in > 1e-9 else []))
     fixed_text = f", fixed-temperature faces {fixed_out:.4g} W" if fixed_out > 1e-9 else ""
+    if abs(q_liquid) > 1e-9:
+        fixed_text += f", liquids {q_liquid:.4g} W"
+    if abs(q_evaporation) > 1e-9:
+        fixed_text += f" (convection includes evaporation {q_evaporation:.4g} W)"
+    # liquids: coolant channels, fixed-temperature baths, baths that fill their container
+    liquid_results = []
+    liquid_lines = []
+    for record in channels:
+        entry, text = channel_summary(record, float(convection_flow[record["faces"]].sum()))
+        liquid_results.append(entry)
+        liquid_lines.append(text)
+        if record["flow_m3s"] <= 0:
+            messages.append(f"⚠ Coolant '{entry['name']}': no flow (the pump cannot overcome the "
+                            "channel), so the liquid takes up no heat.")
+        limit = (FLUIDS.get(entry["fluid"]) or {}).get("limit_c")
+        if entry["wall_max"] is not None and limit is not None and entry["wall_max"] > limit:
+            messages.append(f"⚠ Coolant '{entry['name']}': the channel wall reaches "
+                            f"{entry['wall_max']:.1f} °C; {entry['fluid']} "
+                            f"{FLUIDS[entry['fluid']]['limit_text']}.")
+    for record in liquid_records:
+        c = record["condition"]
+        if c["kind"] != "bath":
+            continue
+        chosen = record["faces"]
+        heat = float(convection_flow[chosen].sum())
+        area = float(face_area[chosen].sum())
+        wall_mean = float((face_t[chosen] * face_area[chosen]).sum() / max(area, 1e-30))
+        wall_max = float(face_t[chosen].max())
+        liquid_results.append({"name": c["name"], "kind": "bath", "mode": "fixed",
+                               "fluid": c["fluid"], "t_liquid": c["bath_c"], "heat": heat,
+                               "h": heat / max(area * (wall_mean - c["bath_c"]), 1e-12),
+                               "wall_max": wall_max})
+        liquid_lines.append(f"Liquid bath '{c['name']}' ({c['fluid']} at {c['bath_c']:g} °C, large "
+                            f"volume): {heat:.4g} W into the liquid over {area * 1e4:.4g} cm², "
+                            f"wetted faces up to {wall_max:.1f} °C")
+        limit = FLUIDS[c["fluid"]]["limit_c"]
+        if wall_max > limit:
+            messages.append(f"⚠ Liquid bath '{c['name']}': wetted faces reach {wall_max:.1f} °C; "
+                            f"{c['fluid']} {FLUIDS[c['fluid']]['limit_text']}.")
+    for index in bath_bodies:
+        body, c = bodies[index], bodies[index]["bath"]
+        elements = bath_elements[index]
+        t_liquid = float(T[conn[elements]].mean())
+        mine = face_body == index
+        lost_convection = float(convection_flow[mine].sum())
+        lost_evaporation = float((evaporation_h[mine] * face_area[mine] *
+                                  (face_t[mine] - ambient)).sum())
+        lost_radiation = float(radiation_flow[mine].sum())
+        stored = 0.0
+        if transient:
+            stored = float((element_capacity[elements] * h ** 3 *
+                            (T[conn[elements]].mean(1) - previous[conn[elements]].mean(1))).sum()) / dt
+        wetted_area, wetted_h, wall_max = 0.0, 0.0, -np.inf
+        for key, parts in film_groups.items():
+            if key[0] != index:
+                continue
+            count = sum(len(a) for a, _b, _axis in parts)
+            wetted_area += count * h * h
+            wetted_h += film_h[key] * count * h * h
+            solid_elements = np.concatenate([b for _a, b, _axis in parts])
+            wall_max = max(wall_max, float(T[conn[solid_elements]].max()))
+        heat_in = lost_convection + lost_radiation + stored
+        open_area = float(face_area[mine].sum())
+        entry = {"name": c["name"], "kind": "bath", "mode": "container", "fluid": c["fluid"],
+                 "t_liquid": t_liquid, "volume_l": body["liquid_volume"] * 1000.0,
+                 "fill_z": body["fill_z"], "heat": heat_in, "open_area_cm2": open_area * 1e4,
+                 "h": wetted_h / max(wetted_area, 1e-30), "wetted_area_cm2": wetted_area * 1e4,
+                 "convection": lost_convection - lost_evaporation, "evaporation": lost_evaporation,
+                 "radiation": lost_radiation, "stored": stored,
+                 "wall_max": wall_max if np.isfinite(wall_max) else None}
+        liquid_results.append(entry)
+        liquid_lines.append(
+            f"Liquid bath '{c['name']}' ({c['fluid']}, {entry['volume_l']:.3g} L up to Z = "
+            f"{body['fill_z']:.4g} mm, well mixed): {t_liquid:.2f} °C; net {heat_in:.4g} W from the "
+            f"wetted faces (warmer parts give, cooler walls take; {entry['wetted_area_cm2']:.4g} cm², "
+            f"film h ≈ {entry['h']:.3g} W/m²K); "
+            + (f"open surface {entry['open_area_cm2']:.4g} cm² gives off {entry['convection']:.4g} W "
+               f"by convection, {lost_evaporation:.4g} W by evaporation, {lost_radiation:.4g} W "
+               "by radiation" if open_area > 0 else "closed container (no open surface)")
+            + (f"; {stored:.4g} W still warming the liquid" if transient else ""))
+        limit = FLUIDS[c["fluid"]]["limit_c"]
+        if entry["wall_max"] is not None and entry["wall_max"] > limit:
+            messages.append(f"⚠ Liquid bath '{c['name']}': wetted faces reach "
+                            f"{entry['wall_max']:.1f} °C; {c['fluid']} "
+                            f"{FLUIDS[c['fluid']]['limit_text']}.")
+    if transient and channels:
+        for number, channel in enumerate(channels):
+            coolant_series[number, 0] = channel["condition"]["inlet_c"]
+        series["coolant"] = coolant_series
+        series["coolant_names"] = [channel["condition"]["name"] for channel in channels]
     if transient:
         summary += [f"Transient: {format_time(duration)} in {n_steps} steps of {format_time(dt)}, "
                     f"start at {start:g} °C",
@@ -2835,6 +5501,8 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         peak = np.array([entry["max"] if entry["max"] is not None else np.nan
                          for entry in body_results])
     for entry in condition_results:
+        if entry["kind"] in LIQUID_KINDS:              # reported in their own lines below
+            continue
         title = CONDITION_KINDS[entry["kind"]][0]
         effect = {"fixed": f"{entry['heat']:.4g} W leave" if entry["heat"] >= 0 else
                            f"{-entry['heat']:.4g} W enter",
@@ -2843,6 +5511,20 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
                   "insulated": "no heat crosses"}[entry["kind"]]
         summary.append(f"Face condition '{entry['name']}' ({title}, {entry['area_mm2']:.4g} mm²): "
                        f"{effect}")
+    summary += liquid_lines
+    junction_results = []
+    for n, (j, (t_j, t_top, t_board)) in enumerate(zip(junctions, junction_temperatures(T))):
+        junction = j["junction"]
+        entry = {"name": j["name"], "package": junction.get("type", "Custom block"), "t_j": t_j,
+                 "t_top": t_top, "t_board": t_board, "power": float(body_power_now.get(j["index"], 0.0)),
+                 "tj_max": float(junction.get("tj_max", 150.0)),
+                 "theta_top": float(junction["theta_top"]), "theta_board": float(junction["theta_board"])}
+        if transient:
+            entry["peak"] = float(junction_series[n].max())
+        junction_results.append(entry)
+    lines, warnings = junction_lines(junction_results, transient)
+    summary += lines
+    messages += warnings
     for entry in contact_results:
         if entry["faces"]:
             summary.append(f"Contact '{entry['name']}' ({entry['text']}, {entry['area_mm2']:.4g} mm²): "
@@ -2865,10 +5547,11 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
         summary += lines
         messages += notes
         thermostat_results = thermostats.results(transient, controlled_nominal)
-    if k_tabled or (transient and cp_tabled):
+    tabled = [i for i in sorted(set(k_tabled) | set(cp_tabled if transient else []))
+              if not bodies[i].get("synthetic")]          # liquids always follow their tables
+    if tabled:
         summary.append("Temperature-dependent material data: " + ", ".join(
-            f"{bodies[i]['name']} ({bodies[i]['material']})"
-            for i in sorted(set(k_tabled) | set(cp_tabled if transient else []))))
+            f"{bodies[i]['name']} ({bodies[i]['material']})" for i in tabled))
     for entry, value in zip(body_results, peak):
         if np.isfinite(value) and entry["max_c"] is not None and value > entry["max_c"]:
             messages.append(f"⚠ '{entry['name']}' reaches {value:.1f} °C, above the "
@@ -2885,7 +5568,8 @@ def solve_thermal(jobs, settings, progress=None, cancelled=None, conditions=(), 
             "q_convection": q_convection, "q_radiation": q_radiation,
             "q_stored": q_stored, "balance_error": balance_error, "iterations": iterations,
             "conditions": condition_results, "contacts": contact_results,
-            "thermostats": thermostat_results,
+            "thermostats": thermostat_results, "liquids": liquid_results, "q_liquid": q_liquid,
+            "junctions": junction_results,
             "volume_frames": volume_frames, "volume_index": volume_index,
             "grid": {"kind": "nodes", "origin": origin, "h_mm": h_mm, "shape": shape,
                      "nodes_global": nodes_global,
@@ -2974,6 +5658,36 @@ def refine_triangles(V, T, max_edge, with_source=False):
     V = np.asarray(V, float)
     T = np.asarray(T, np.int64).reshape(-1, 3)
     P = V[T]
+    source = np.arange(len(T))
+    # long, thin triangles (a tessellated cylinder or pipe) are first cut into strips across
+    # their length, from the corner opposite their shortest edge, so the n² split below stays
+    # near the ideal count instead of splitting them n × n by their long edges
+    lengths = np.linalg.norm(P[:, [1, 2, 0]] - P, axis=2)      # edge i runs from corner i to i+1
+    longest = lengths.max(1)
+    area2 = np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1)
+    shortest = lengths.min(1)
+    thin = (longest > 2.0 * max_edge) & (longest > 3.0 * shortest) & (area2 > 0)
+    if thin.any():
+        chosen = np.flatnonzero(thin)
+        apex = (np.argmin(lengths[chosen], axis=1) + 2) % 3        # corner opposite the shortest
+        order = (np.arange(3)[None, :] + apex[:, None]) % 3        # apex first, orientation kept
+        Q = P[chosen[:, None], order]
+        strips = np.clip(np.ceil(longest[chosen] / max(max_edge, 1e-9)), 2, 4096).astype(np.int64)
+        pieces, piece_source = [P[~thin]], [source[~thin]]
+        for k in np.unique(strips):
+            k = int(k)
+            mine = strips == k
+            A, B, C = Q[mine, 0], Q[mine, 1], Q[mine, 2]
+            f = np.arange(k + 1)[None, :, None] / k
+            Pk = A[:, None] + f * (B - A)[:, None]                  # along A → B
+            Qk = A[:, None] + f * (C - A)[:, None]                  # along A → C
+            first = np.stack([Pk[:, :-1], Pk[:, 1:], Qk[:, 1:]], 2)          # (m, k, 3, 3)
+            second = np.stack([Pk[:, 1:-1], Qk[:, 2:], Qk[:, 1:-1]], 2)      # none at the apex
+            pieces += [first.reshape(-1, 3, 3), second.reshape(-1, 3, 3)]
+            ids = source[chosen[mine]]
+            piece_source += [np.repeat(ids, k), np.repeat(ids, k - 1)]
+        P = np.concatenate(pieces)
+        source = np.concatenate(piece_source)
     longest = np.max(np.linalg.norm(P[:, [1, 2, 0]] - P, axis=2), axis=1)
     counts = np.clip(np.ceil(longest / max(max_edge, 1e-9)), 1, 256).astype(np.int64)
     out_vertices, out_triangles, out_source, offset = [], [], [], 0
@@ -2997,7 +5711,7 @@ def refine_triangles(V, T, max_edge, with_source=False):
         out_vertices.append(points.reshape(-1, 3))
         out_triangles.append((local[None, :, :] + (offset + k * np.arange(len(selected)))[:, None, None])
                              .reshape(-1, 3))
-        out_source.append(np.repeat(chosen, k))
+        out_source.append(np.repeat(source[chosen], k))
         offset += k * len(selected)
     if with_source:
         return np.concatenate(out_vertices), np.concatenate(out_triangles), np.concatenate(out_source)
@@ -3011,15 +5725,17 @@ def _surface_weights(points, origin, h_mm, shape, nodes_global):
     u = (np.asarray(points, float) - origin) / h_mm
     base = np.clip(np.floor(u).astype(np.int64), 0, np.array(shape) - 1)
     frac = np.clip(u - base, 0.0, 1.0)
-    index = np.empty((len(u), 8), np.int64)
+    gid = np.empty((len(u), 8), np.int64)
     weights = np.empty((len(u), 8))
     for c, corner in enumerate(_CORNERS):
         cell = base + corner
-        gid = (cell[:, 0] * ny1 + cell[:, 1]) * nz1 + cell[:, 2]
-        position = np.minimum(np.searchsorted(nodes_global, gid), len(nodes_global) - 1)
-        index[:, c] = position
-        weights[:, c] = np.prod(np.where(corner, frac, 1.0 - frac), axis=1) * \
-            (nodes_global[position] == gid)
+        gid[:, c] = (cell[:, 0] * ny1 + cell[:, 1]) * nz1 + cell[:, 2]
+        weights[:, c] = np.prod(np.where(corner, frac, 1.0 - frac), axis=1)
+    # look up each node id once, in sorted order (far faster than unsorted searches)
+    unique, inverse = np.unique(gid.ravel(), return_inverse=True)
+    position = np.minimum(np.searchsorted(nodes_global, unique), len(nodes_global) - 1)
+    index = position[inverse].reshape(gid.shape)
+    weights *= (nodes_global[position] == unique)[inverse].reshape(gid.shape)
     total = weights.sum(1, keepdims=True)
     weights = np.where(total > 1e-9, weights / np.maximum(total, 1e-12), 0.0)
     return index, weights.astype(np.float32)
@@ -3370,6 +6086,161 @@ def _box_cells(centres, low, high):
     return masks[0][:, None, None] & masks[1][None, :, None] & masks[2][None, None, :]
 
 
+def _slab(axis, start, stop):
+    index = [slice(None)] * 3
+    index[axis] = slice(start, stop)
+    return tuple(index)
+
+
+def _face_heat_split(G, T, source, target):
+    """(W from the cells `source` into the neighbouring cells `target`, W flowing back) through
+    the conductances G of the interior cell faces (airflow grid), each face counted by its sign."""
+    forward, back = 0.0, 0.0
+    for c in range(3):
+        g = G[c][_slab(c, 1, -1)]
+        lo_T, hi_T = T[_slab(c, 0, -1)], T[_slab(c, 1, None)]
+        down = source[_slab(c, 0, -1)] & target[_slab(c, 1, None)]
+        up = target[_slab(c, 0, -1)] & source[_slab(c, 1, None)]
+        flow = np.concatenate([(g * (lo_T - hi_T))[down], (g * (hi_T - lo_T))[up]])
+        forward += float(flow[flow > 0].sum())
+        back -= float(flow[flow < 0].sum())
+    return forward, back
+
+
+def _face_heat(G, T, source, target):
+    """W flowing (net) from the cells `source` into the neighbouring cells `target`."""
+    forward, back = _face_heat_split(G, T, source, target)
+    return forward - back
+
+
+def _airflow_liquid_results(T, owner, solid, bodies, bath_bodies, regions, region_cells,
+                            face_liquids, face_channels, evaporation, G, p, velocity, face_area,
+                            volume, shape, transient, unsteady, capacity, messages):
+    """Result entries and summary lines of the liquids of an airflow run."""
+    entries, lines = [], []
+    flat_T = T.ravel()
+    air = ~solid
+    for region in regions:
+        air &= ~region_cells[regions.index(region)]
+    for record in face_channels:
+        entry, text = channel_summary(record, float(record.get("heat", 0.0)))
+        entries.append(entry)
+        lines.append(text)
+    for record in face_liquids:
+        c = record["condition"]
+        if c["kind"] != "bath":
+            continue
+        heat = float(record.get("heat", 0.0))
+        area = float(record["area"].sum())
+        entries.append({"name": c["name"], "kind": "bath", "mode": "fixed", "fluid": c["fluid"],
+                        "t_liquid": c["bath_c"], "heat": heat,
+                        "h": float((record["h_faces"] * record["area"]).sum() / max(area, 1e-30)),
+                        "wall_max": float(flat_T[record["cells"]].max())})
+        lines.append(f"Liquid bath '{c['name']}' ({c['fluid']} at {c['bath_c']:g} °C, large volume): "
+                     f"{heat:.4g} W into the liquid over {area * 1e4:.4g} cm²")
+    cell_volume = np.broadcast_to(volume, shape)
+
+    def stored(mask):
+        if not transient or unsteady["dt"] is None:
+            return 0.0
+        return float((capacity * (T - unsteady["T"]))[mask].sum()) / unsteady["dt"]
+
+    for b in bath_bodies:
+        body, c = bodies[b], bodies[b]["bath"]
+        mask = owner == b
+        values = T[mask]
+        weights = cell_volume[mask]
+        t_mean = float((values * weights).sum() / weights.sum())
+        to_air = _face_heat(G, T, mask, air) if G is not None else 0.0
+        evap = sum(float(item.get("heat", 0.0))
+                   for item in evaporation if item.get("owner") == ("body", b))
+        heat_in = to_air + evap + stored(mask)
+        near = np.zeros(shape, bool)                  # solid cells the liquid wets
+        for a in range(3):
+            near[_slab(a, 0, -1)] |= mask[_slab(a, 1, None)]
+            near[_slab(a, 1, None)] |= mask[_slab(a, 0, -1)]
+        near &= solid & ~mask
+        entry = {"name": c["name"], "kind": "bath", "mode": "container", "fluid": c["fluid"],
+                 "t_liquid": t_mean, "volume_l": float(weights.sum()) * 1000.0,
+                 "fill_z": body["fill_z"], "heat": heat_in, "to_air": to_air, "evaporation": evap,
+                 "stored": stored(mask), "solved": False,
+                 "wall_max": float(T[near].max()) if near.any() else None}
+        entries.append(entry)
+        gained, given = _face_heat_split(G, T, solid & ~mask, mask) if G is not None else (0.0, 0.0)
+        entry.update(gained=gained, given=given)
+        lines.append(f"Liquid bath '{c['name']}' ({c['fluid']}, {entry['volume_l']:.3g} L up to Z = "
+                     f"{body['fill_z']:.4g} mm, well mixed): {t_mean:.2f} °C; {gained:.4g} W from warmer "
+                     f"wetted faces, {given:.4g} W into cooler ones; to the air above {to_air:.4g} W, "
+                     f"evaporation {evap:.4g} W" +
+                     (f", {entry['stored']:.4g} W still warming it" if transient else ""))
+    for r, region in enumerate(regions):
+        c = region["condition"]
+        mask = region_cells[r]
+        values = T[mask]
+        weights = cell_volume[mask]
+        t_mean = float((values * weights).sum() / weights.sum())
+        centre_speed = np.sqrt(sum((0.5 * (velocity[a][_slab(a, 0, -1)] + velocity[a][_slab(a, 1, None)]))
+                                   ** 2 for a in range(3)))
+        top_speed = float(centre_speed[mask].max())
+        if region["kind"] == "bath":
+            gained, given = _face_heat_split(G, T, solid, mask) if G is not None else (0.0, 0.0)
+            from_walls = gained - given
+            to_air = _face_heat(G, T, mask, air) if G is not None else 0.0
+            evap = sum(float(item.get("heat", 0.0))
+                       for item in evaporation if item.get("owner") == ("region", r))
+            entry = {"name": c["name"], "kind": "bath", "mode": "container", "fluid": c["fluid"],
+                     "t_liquid": t_mean, "t_min": float(values.min()), "t_max": float(values.max()),
+                     "volume_l": float(weights.sum()) * 1000.0, "fill_z": region["fill_z"],
+                     "heat": from_walls, "to_air": to_air, "evaporation": evap,
+                     "stored": stored(mask), "speed_max": top_speed, "solved": True}
+            entries.append(entry)
+            lines.append(f"Liquid bath '{c['name']}' ({c['fluid']}, {entry['volume_l']:.3g} L up to Z = "
+                         f"{region['fill_z']:.4g} mm, flow solved): mean {t_mean:.2f} °C "
+                         f"({entry['t_min']:.2f} … {entry['t_max']:.2f} °C), speeds up to "
+                         f"{top_speed * 1000.0:.3g} mm/s; {gained:.4g} W from warmer wetted faces, "
+                         f"{given:.4g} W into cooler ones; to the air above {to_air:.4g} W, "
+                         f"evaporation {evap:.4g} W" +
+                         (f", {entry['stored']:.4g} W still warming it" if transient else ""))
+            limit = FLUIDS[c["fluid"]]["limit_c"]
+        else:
+            flat_p = p.ravel()
+            t_out = float(region["outlet_weights"] @ flat_T[region["outlet_cells"]])
+            dp = float(region["inlet_weights"] @ flat_p[region["inlet_cells"]] -
+                       region["outlet_weights"] @ flat_p[region["outlet_cells"]])
+            q = region["flow_m3s"]
+            region["t_out"] = t_out
+            t_in = region.get("t_in", c["inlet_c"])
+            correlation = pipe_flow(region["fluid"], q, region["geometry"], 0.5 * (t_in + t_out))
+            entry = {"name": c["name"], "kind": "coolant", "fluid": c["fluid"], "flow_lpm": q * 60000.0,
+                     "velocity": correlation["velocity"], "re": correlation["re"],
+                     "regime": correlation["regime"], "t_in": t_in, "t_out": t_out,
+                     "heat": float(region.get("heat", 0.0)), "dp_pa": dp,
+                     "dp_correlation": correlation["dp"], "nu": correlation["nu"],
+                     "h": correlation["h"], "geometry": channel_text(region["geometry"]),
+                     "speed_max": top_speed, "solved": True, "wall_max": None}
+            entries.append(entry)
+            lines.append(f"Coolant '{c['name']}' ({c['fluid']}, {q * 60000.0:.3g} L/min, "
+                         f"{channel_text(region['geometry'])}, flow solved): Re {correlation['re']:.0f}, "
+                         f"speeds up to {top_speed:.3g} m/s; in {t_in:.2f} °C → out {t_out:.2f} °C, "
+                         f"{entry['heat']:.4g} W taken up, pressure drop {dp / 1000.0:.3g} kPa "
+                         f"(pipe correlation {correlation['dp'] / 1000.0:.3g} kPa)")
+            limit = FLUIDS[c["fluid"]]["limit_c"]
+        near = np.zeros(shape, bool)                  # solid cells next to the liquid
+        for a in range(3):
+            near[_slab(a, 0, -1)] |= mask[_slab(a, 1, None)]
+            near[_slab(a, 1, None)] |= mask[_slab(a, 0, -1)]
+        near &= solid
+        if near.any() and float(T[near].max()) > limit:
+            messages.append(f"⚠ '{c['name']}': wetted faces reach {float(T[near].max()):.1f} °C; "
+                            f"{c['fluid']} {FLUIDS[c['fluid']]['limit_text']}.")
+    for entry in entries:
+        limit = (FLUIDS.get(entry["fluid"]) or {}).get("limit_c")
+        if entry.get("wall_max") is not None and limit is not None and entry["wall_max"] > limit:
+            messages.append(f"⚠ '{entry['name']}': wetted faces reach {entry['wall_max']:.1f} °C; "
+                            f"{entry['fluid']} {FLUIDS[entry['fluid']]['limit_text']}.")
+    return entries, lines
+
+
 def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), contacts=(),
                   flow_items=()):
     """Air flow and temperatures of air and solids together (conjugate heat transfer), steady
@@ -3404,6 +6275,9 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
     conditions = [c for c in conditions if c["kind"] != "convection"]
     _check_thermostats(bodies, conditions)
     transient = settings["analysis"] == "transient"
+    coolants = [c for c in conditions if c["kind"] == "coolant" and c["targets"]]
+    baths = [c for c in conditions if c["kind"] == "bath" and c["targets"]]
+    liquid_sink = bool(coolants) or any(c["bath_mode"] == "fixed" for c in baths)
     has_fixed = any(c["kind"] == "fixed" and c["targets"] for c in conditions) or \
         any("wall_fixed" in pair for pair in side_kind)
     power = [profile_steady_power(body["profile"], body["power"]) for body in bodies]
@@ -3412,7 +6286,7 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         raise ThermalError("No heat source: give a body a power (W), add a heat source, or put a "
                            "heat flux or fixed temperature on faces.")
     closed_box = not any(kind in ("open", "inlet", "wall_fixed") for pair in side_kind for kind in pair)
-    if closed_box and not settings["radiation"] and \
+    if closed_box and not settings["radiation"] and not liquid_sink and \
             not any(c["kind"] == "fixed" and c["targets"] for c in conditions):
         raise ThermalError("The heat cannot leave: all domain sides are closed walls, radiation is "
                            "off and no face has a fixed temperature (Simulation panel → Air domain).")
@@ -3463,8 +6337,66 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             messages.append(f"⚠ '{item['name']}' is not aligned with a grid axis; it acts along "
                             f"{'+' if item['sign'] > 0 else '−'}{'XYZ'[item['axis']]}.")
         devices.append(dict(item, region=region, opened=opened))
+    # liquids: a bath that fills its container is a well-mixed body (correlations) or a liquid
+    # region whose flow is solved; a coolant channel with its flow solved is a liquid region
+    # with an inlet (the pump) and an outlet
+    liquid_region = np.zeros(shape, np.int16)        # 0 = air / solid, r = liquid region r
+    regions = []                                     # the liquid regions (flow solved)
+    bath_bodies = []                                 # well-mixed bath bodies
+    for c in baths:
+        if c["bath_mode"] != "container":
+            continue
+        step(20, f"Filling '{c['name']}'...")
+        tris, normals = _condition_triangles(c, bodies)
+        fill = _bath_fill(c, tris)
+        open_cells = (owner < 0) & (liquid_region == 0)
+        seeds = _liquid_seed_cells(tris, normals, faces_mm, open_cells, 0.5 * h_mm)
+        region, leaks = _bath_region(open_cells, faces_mm, seeds, fill)
+        if leaks:
+            raise ThermalError(f"The liquid of '{c['name']}' runs out of its container below the "
+                               f"fill level (Z = {fill:.4g} mm): close the container, lower the "
+                               "fill level, or choose 'Large volume'.")
+        if not region.any():
+            raise ThermalError(f"'{c['name']}' holds no liquid: the fill level (Z = {fill:.4g} mm) "
+                               "is below the picked faces, or the space is thinner than one cell.")
+        cells = np.argwhere(region)
+        low = np.array([faces_mm[a][cells[:, a].min()] for a in range(3)])
+        high = np.array([faces_mm[a][cells[:, a].max() + 1] for a in range(3)])
+        if c["liquid_model"] == "flow":
+            liquid_region[region] = len(regions) + 1
+            regions.append({"kind": "bath", "condition": c, "fluid": c["fluid"], "fill_z": fill,
+                            "low": low, "high": high})
+        else:
+            index = len(bodies)
+            owner[region] = index
+            bath = _bath_body(c, len(bath_bodies), low, high)
+            bath["fill_z"] = fill
+            bodies.append(bath)
+            power.append(0.0)
+            bath_bodies.append(index)
+    for c in coolants:
+        if c["liquid_model"] != "flow":
+            continue
+        step(20, f"Analysing the channel '{c['name']}'...")
+        geometry = channel_geometry(_condition_triangles(c, bodies)[0], c["reverse"])
+        cells, inlet, outlet = _channel_cells(geometry, faces_mm, (owner < 0) & (liquid_region == 0),
+                                              h_mm)
+        across = geometry["dh_mm"] / h_mm
+        if across < 3.0 or not inlet.any() or not outlet.any() or (inlet & outlet).any():
+            messages.append(f"'{c['name']}': the channel is only {across:.1f} cells wide, too few to "
+                            "solve the liquid flow, so it uses the correlations (cells of "
+                            f"{geometry['dh_mm'] / 4.0:.2g} mm or less at the parts solve it).")
+            c["liquid_model"] = "simple"
+            continue
+        liquid_region[cells] = len(regions) + 1
+        points = np.asarray(geometry["points"], float)
+        regions.append({"kind": "coolant", "condition": c, "fluid": c["fluid"],
+                        "geometry": geometry, "inlet": inlet, "outlet": outlet,
+                        "low": points.min(0), "high": points.max(0)})
     fluid = owner < 0
     solid = ~fluid
+    liquid = liquid_region > 0
+    air_cells = fluid & ~liquid
     if not fluid.any():
         raise ThermalError("There is no air in the domain.")
     cells_of = np.bincount(owner[solid].astype(np.int64), minlength=len(bodies))
@@ -3510,8 +6442,108 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
     k_table = np.array([body["k"] for body in bodies] + [[k_air] * 3])
     owner_index = np.where(solid, owner, len(bodies)).astype(np.int64)
     k_cell = [k_table[owner_index, axis] for axis in range(3)]          # W/(m·K) per axis
+    # fluid properties per cell: air everywhere, liquids in their regions (density constant at a
+    # reference value except in the buoyancy term; cp, viscosity and conductivity follow the
+    # temperature); a face takes the mean of its two cells
+    start_t = ambient if (not transient or settings["initial_ambient"]) else settings["initial_c"]
+    region_cells = [liquid_region == r + 1 for r in range(len(regions))]
+    for r, region in enumerate(regions):
+        c = region["condition"]
+        if region["kind"] == "coolant":
+            region["t_ref"] = float(c["inlet_c"])
+        else:
+            region["t_ref"] = float(c["bath_c"]) if transient and not c.get("bath_start_auto", True) \
+                else float(start_t)
+        region["rho_ref"] = float(fluid_props(region["fluid"], region["t_ref"])["rho"])
+    if regions:
+        rho_cell, cp_cell, mu_cell = np.full(shape, rho), np.full(shape, cp), np.full(shape, mu_air)
+        for r, region in enumerate(regions):
+            rho_cell[region_cells[r]] = region["rho_ref"]
+    else:
+        rho_cell, cp_cell, mu_cell = rho, cp, mu_air
+
+    def to_faces(values):
+        """Cell values → c-face values (mean of the two cells, the cell's own at the sides)."""
+        if np.ndim(values) == 0:
+            return [values] * 3
+        out = []
+        for c in range(3):
+            pad = [(0, 0)] * 3
+            pad[c] = (1, 1)
+            padded = np.pad(values, pad, mode="edge")
+            out.append(0.5 * (padded[sl(c, 0, -1)] + padded[sl(c, 1, None)]))
+        return out
+
+    rho_face = to_faces(rho_cell)
+    rhocp_face = to_faces(rho_cell * cp_cell)
+    mu_face = to_faces(mu_cell)
+    # fluid region of every cell (-1 solid, 0 air, r liquid) and of every face (-1 when its two
+    # cells differ); faces between air and a liquid are closed to the flow (slip, no coupling)
+    cell_region = np.where(fluid, liquid_region, -1).astype(np.int16)
+    region_face = []
+    for c in range(3):
+        values = np.full(tuple(shape[a] + (1 if a == c else 0) for a in range(3)), -1, np.int16)
+        lo_r, hi_r = cell_region[sl(c, 0, -1)], cell_region[sl(c, 1, None)]
+        values[sl(c, 1, -1)] = np.where(lo_r == hi_r, lo_r, -1)
+        values[sl(c, 0, 1)] = cell_region[sl(c, 0, 1)]
+        values[sl(c, -1, None)] = cell_region[sl(c, -1, None)]
+        region_face.append(values)
+
+    def update_liquid_properties():
+        """cp, viscosity and conductivity of the liquid cells at their temperatures."""
+        nonlocal rhocp_face, mu_face
+        for r, region in enumerate(regions):
+            cells = region_cells[r]
+            props = fluid_props(region["fluid"], T[cells])
+            cp_cell[cells] = props["cp"]
+            mu_cell[cells] = props["mu"]
+            for axis in range(3):
+                k_cell[axis][cells] = props["k"]
+            if region["kind"] == "bath":             # buoyancy relative to the mean liquid
+                region["rho_ref"] = float(fluid_density(region["fluid"], float(T[cells].mean())))
+        rhocp_face = to_faces(rho_cell * cp_cell)
+        mu_face = to_faces(mu_cell)
+    # printed circuit boards: conductivity per cell from the layer stack, copper and vias
+    faces_D = [np.diff(f) for f in faces_mm]
+    for index, body in enumerate(bodies):
+        pcb = body["job"].get("pcb")
+        if pcb is None or not body["cells"]:
+            continue
+        cells = np.argwhere(owner == index)
+        centre = np.stack([centres_mm[a][cells[:, a]] for a in range(3)], axis=1)
+        local = pcb_local(body["job"]["pcb_frame"], centre)
+        layer, layers = _column_layers(cells[:, 0], cells[:, 1], cells[:, 2],
+                                       pcb_flipped(body["job"]["pcb_frame"]))
+        k = pcb_conductivity(pcb, local[:, 0], local[:, 1], faces_D[0][cells[:, 0]],
+                             faces_D[1][cells[:, 1]], layer, layers, faces_D[2][cells[:, 2]])
+        for axis in range(3):
+            k_cell[axis][tuple(cells.T)] = k[:, axis]
+    # component junctions (two-resistor model): an unknown each, joined to the cells of the
+    # package top by 1/θ top and to those of its bottom (on the board) by 1/θ board
+    junctions = []
+    for index, body in enumerate(bodies):
+        junction = body["job"].get("junction")
+        if junction is None or not body["cells"]:
+            continue
+        cells = np.argwhere(owner == index)
+        upright = junction.get("side", "top") != "bottom"
+        top_k = cells[:, 2].max() if upright else cells[:, 2].min()
+        board_k = cells[:, 2].min() if upright else cells[:, 2].max()
+        parts_of = []
+        for layer_k, theta in ((top_k, junction["theta_top"]), (board_k, junction["theta_board"])):
+            chosen = cells[cells[:, 2] == layer_k]
+            area = faces_D[0][chosen[:, 0]] * faces_D[1][chosen[:, 1]]
+            parts_of.append((np.ravel_multi_index(tuple(chosen.T), shape),
+                             area / area.sum() / max(float(theta), 1e-6)))
+        flat = np.concatenate([p[0] for p in parts_of])
+        conductance = np.concatenate([p[1] for p in parts_of])
+        junctions.append({"index": index, "name": body["name"], "junction": junction,
+                          "cells": flat, "G": conductance, "top": parts_of[0], "board": parts_of[1],
+                          "power": 0.0, "t_j": float(ambient)})
+    junction_of = {j["index"]: j for j in junctions}
     # heat sources in W per cell; a source with a time profile or a thermostat is kept as its
-    # distribution of 1 W and scaled in every time step (or by its thermostat)
+    # distribution of 1 W and scaled in every time step (or by its thermostat); a package's
+    # power goes in at its junction
     volume_flat = np.broadcast_to(volume, shape).ravel()
     owner_flat = owner.ravel()
     constant_source = np.zeros(N)
@@ -3523,9 +6555,13 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             continue
         cells = np.flatnonzero(owner_flat == index)
         weights = volume_flat[cells] / volume_flat[cells].sum()
+        if index in junction_of:
+            cells, weights = cells[:0], weights[:0]
         if body["profile"] is None and body["thermostat"] is None:
             constant_source[cells] += body["power"] * weights
             constant_power += body["power"]
+            if index in junction_of:
+                junction_of[index]["power"] = junction_of[index]["constant"] = body["power"]
         else:
             slot = None
             if body["thermostat"] is not None:
@@ -3543,7 +6579,12 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                      for index in set(k_tabled) | set(cp_tabled)}
 
     # fluid regions connected to the open air (radiation goes from their surfaces)
-    labels, _count = ndi.label(fluid)
+    labels, _count = ndi.label(air_cells)
+    offset = int(labels.max())
+    for r in range(len(regions)):
+        piece, pieces = ndi.label(region_cells[r])
+        labels[piece > 0] = piece[piece > 0] + offset
+        offset += pieces
     border = set()
     for axis in range(3):
         for side in (0, 1):
@@ -3553,7 +6594,7 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
     border.discard(0)
     outer_air = np.isin(labels, list(border)) if border else np.zeros(shape, bool)
     region_labels = labels
-    cavities = int(((labels > 0) & ~outer_air).sum())
+    cavities = int((air_cells & ~outer_air).sum())
     if cavities:
         messages.append(f"Closed air spaces ({cavities:,} cells) have their own internal air "
                         "flow; no air is exchanged with the outside.".replace(",", " "))
@@ -3564,7 +6605,8 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         Sc = list(shape); Sc[c] += 1
         act = np.zeros(Sc, bool)
         val = np.zeros(Sc)
-        act[sl(c, 1, -1)] = fluid[sl(c, 0, -1)] & fluid[sl(c, 1, None)]
+        act[sl(c, 1, -1)] = fluid[sl(c, 0, -1)] & fluid[sl(c, 1, None)] & \
+            (cell_region[sl(c, 0, -1)] == cell_region[sl(c, 1, None)])
         for side, index in ((0, 0), (1, shape[c])):
             kind = side_kind[c][side]
             cell = fluid[sl(c, 0, 1)] if side == 0 else fluid[sl(c, -1, None)]
@@ -3652,13 +6694,16 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                 mesh_face = np.where(found, tri_face[src[nearest[rows, first]]], -1)
                 for index, condition in enumerate(conditions):
                     faces = condition["targets"].get(b)
-                    if not faces:
+                    if not faces or (condition["kind"] == "bath" and
+                                     condition["bath_mode"] == "container"):
                         continue
                     hit = np.isin(mesh_face, faces)
                     if hit.any():
                         sel = tuple(arr[hit] for arr in fi)
                         face_condition[c][sel] = index
         for index, condition in enumerate(conditions):
+            if condition["kind"] == "bath" and condition["bath_mode"] == "container":
+                continue
             if condition["targets"] and not any((fc == index).any() for fc in face_condition):
                 messages.append(f"⚠ Face condition '{condition['name']}' reaches no surface next "
                                 "to air.")
@@ -3712,6 +6757,8 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                 profile_mean_power(profile, nominal, t0, t1)
             if slot is not None and factors is not None:
                 value *= float(factors[slot])
+            if kind == "source" and index in junction_of:
+                junction_of[index]["power"] = value
             if value:
                 values[cells] += value * weights
             if kind == "source":
@@ -3742,6 +6789,215 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             contact_resistance_grid[c][sl(c, 1, -1)] = table[lo, hi]
             contact_id[c][sl(c, 1, -1)] = number[lo, hi]
 
+    # liquid faces (coolant channels with correlations, baths of a fixed temperature): the solid
+    # cell at each face exchanges heat with the liquid over half a cell and the film 1/h; the
+    # air side of the face is closed
+    face_liquids = []
+    closed_faces = [np.zeros(active[c].shape, bool) for c in range(3)]
+    for index, condition in enumerate(conditions):
+        simple_coolant = condition["kind"] == "coolant" and condition["liquid_model"] == "simple"
+        fixed_bath = condition["kind"] == "bath" and condition["bath_mode"] == "fixed"
+        if not (simple_coolant or fixed_bath):
+            continue
+        cells, faces, areas, centres, halves, axes, orientation = [], [], [], [], [], [], []
+        for c in range(3):
+            mask = face_condition[c] == index
+            if not mask.any():
+                continue
+            closed_faces[c] |= mask
+            idx = np.nonzero(mask)
+            below = list(idx)
+            below[c] = np.maximum(idx[c] - 1, 0)
+            solid_below = solid[tuple(below)] & (idx[c] > 0)
+            cell = list(idx)
+            cell[c] = np.where(solid_below, idx[c] - 1, idx[c])
+            cell = tuple(cell)
+            cells.append(np.ravel_multi_index(cell, shape))
+            faces.append((c, idx))
+            areas.append(np.broadcast_to(face_area[c], mask.shape)[mask])
+            centre = np.stack([centres_mm[a][cell[a]] for a in range(3)], axis=1)
+            centre[:, c] = faces_mm[c][idx[c]]
+            centres.append(centre)
+            halves.append(D[c][cell[c]] / 2.0)
+            axes.append(np.full(len(idx[0]), c))
+            orientation.append(np.zeros(len(idx[0]), int) if c != 2 else
+                               np.where(solid_below, 1, 2))     # the solid face looks up / down
+        if not cells:
+            continue
+        record = {"index": index, "condition": condition, "cells": np.concatenate(cells),
+                  "faces": faces, "area": np.concatenate(areas), "centre": np.concatenate(centres),
+                  "half": np.concatenate(halves), "axis": np.concatenate(axes),
+                  "orientation": np.concatenate(orientation)}
+        record["owner"] = owner_flat[record["cells"]].astype(np.int64)
+        tris = _condition_triangles(condition, bodies)[0]
+        if simple_coolant:
+            geometry = channel_geometry(tris, condition["reverse"])
+            s = geometry["s"][cKDTree(geometry["points"]).query(record["centre"])[1]]
+            n_seg = int(np.clip(round(geometry["length_mm"] / h_mm), 8, 400))
+            seg = np.clip((s / max(geometry["length_mm"], 1e-9) * n_seg).astype(int), 0, n_seg - 1)
+            record["area"] = record["area"] * min(1.0, geometry["wall_area_mm2"] * 1e-6 /
+                                                  max(float(record["area"].sum()), 1e-30))
+            record.update(geometry=geometry, seg=seg, n_seg=n_seg,
+                          area_seg=np.bincount(seg, record["area"], n_seg), t_face=None)
+            record["h_faces"] = np.full(len(record["cells"]), 1000.0)
+            record["t_liquid"] = np.full(len(record["cells"]), float(condition["inlet_c"]))
+        else:
+            wall = float(_mesh_area(tris.reshape(-1, 3), np.arange(3 * len(tris)).reshape(-1, 3)))
+            record["area"] = record["area"] * min(3.0, max(0.3, wall * 1e-6 / record["area"].sum()))
+            record["h_faces"] = np.full(len(record["cells"]), BATH_FILM_GUESS)
+            record["t_liquid"] = np.full(len(record["cells"]), float(condition["bath_c"]))
+        record["G"] = np.zeros(len(record["cells"]))
+        face_liquids.append(record)
+    face_channels = _ordered_channels([r for r in face_liquids if r["condition"]["kind"] == "coolant"])
+    # flow-solved coolant: the pump feeds the first cell layer, the last one lets the liquid out
+    mass_source = np.zeros(shape)
+    for r, region in enumerate(regions):
+        if region["kind"] != "coolant":
+            continue
+        c = region["condition"]
+        for key in ("inlet", "outlet"):
+            cells = np.flatnonzero(region[key].ravel())
+            region[key + "_cells"] = cells
+            region[key + "_weights"] = volume_flat[cells] / volume_flat[cells].sum()
+        region["flow_m3s"] = c["flow_lpm"] / 60000.0 if c["flow_mode"] == "fixed" else \
+            0.5 * float(pump_curve(c)[0][-1])
+        region["dp"] = 0.0
+    closed_caps = [np.zeros(active[c].shape, bool) for c in range(3)]   # channel ends: no heat
+    for c in range(3):
+        lo_r, hi_r = cell_region[sl(c, 0, -1)], cell_region[sl(c, 1, None)]
+        ends = (lo_r >= 0) & (hi_r >= 0) & (lo_r != hi_r)
+        for r, region in enumerate(regions):
+            if region["kind"] == "coolant":
+                closed_caps[c][sl(c, 1, -1)] |= ends & ((lo_r == r + 1) | (hi_r == r + 1))
+
+    def liquid_inlet_t(name, own):
+        """Inlet temperature of a coolant: its own, or the outlet of the channel feeding it."""
+        for record in face_channels:
+            if name and record["condition"]["name"] == name and "t_out" in record:
+                return float(record["t_out"])
+        for region in regions:
+            if name and region["kind"] == "coolant" and region["condition"]["name"] == name and \
+                    "t_out" in region:
+                return float(region["t_out"])
+        return float(own)
+
+    def set_mass_sources():
+        mass_source[...] = 0.0
+        flat = mass_source.reshape(-1)
+        for region in regions:
+            if region["kind"] != "coolant":
+                continue
+            region["mdot"] = region["flow_m3s"] * region["rho_ref"]
+            flat[region["inlet_cells"]] += region["mdot"] * region["inlet_weights"]
+            flat[region["outlet_cells"]] -= region["mdot"] * region["outlet_weights"]
+
+    set_mass_sources()
+    # well-mixed bath bodies: the film on the wetted faces is a resistance 1/h between the bath
+    # cells and the solid cells they touch (natural convection in the liquid)
+    film_grid = [np.zeros(active[c].shape) for c in range(3)] if bath_bodies else None
+    film_groups = {}
+    for c in range(3) if bath_bodies else ():
+        lo_o, hi_o = owner_index[sl(c, 0, -1)], owner_index[sl(c, 1, None)]
+        for b in bath_bodies:
+            for bath_low in (True, False):
+                bath_side, other = (lo_o, hi_o) if bath_low else (hi_o, lo_o)
+                touching = (bath_side == b) & (other < len(bodies)) & ~np.isin(other, bath_bodies)
+                if not touching.any():
+                    continue
+                idx = np.nonzero(touching)
+                face = list(idx)
+                face[c] = idx[c] + 1
+                solid_cell = list(idx)
+                if bath_low:
+                    solid_cell[c] = idx[c] + 1
+                orientation = 0 if c != 2 else (2 if bath_low else 1)
+                for s_body in np.unique(other[touching]):
+                    chosen = other[touching] == s_body
+                    film_groups.setdefault((b, int(s_body), orientation), []).append(
+                        (c, tuple(f[chosen] for f in face), tuple(s[chosen] for s in solid_cell)))
+    film_h = {key: BATH_FILM_GUESS for key in film_groups}
+
+    def update_bath_films():
+        for key, parts in film_groups.items():
+            b, s_body, orientation = key
+            t_bath = float(T[owner == b].mean())
+            t_solid = float(np.mean(np.concatenate([T[cell] for _c, _f, cell in parts])))
+            if orientation == 0:
+                length = min(bodies[s_body]["extent"][2], bodies[b]["extent"][2])
+            else:
+                e_s, e_b = bodies[s_body]["extent"], bodies[b]["extent"]
+                length = min(e_s[0] * e_s[1] / (2.0 * (e_s[0] + e_s[1])),
+                             e_b[0] * e_b[1] / (2.0 * (e_b[0] + e_b[1])))
+            new = float(_liquid_natural_h(bodies[b]["bath"]["fluid"], t_solid - t_bath,
+                                          max(length, 2.0) / 1000.0, np.array(orientation),
+                                          0.5 * (t_solid + t_bath)))
+            film_h[key] = 0.5 * film_h[key] + 0.5 * new
+            for c, face, _cell in parts:
+                film_grid[c][face] = 1.0 / max(film_h[key], 1e-6)
+
+    if film_groups:
+        for key, parts in film_groups.items():
+            for c, face, _cell in parts:
+                film_grid[c][face] = 1.0 / BATH_FILM_GUESS
+    # open liquid surfaces: evaporation (water and its mixtures) as a heat sink of the top cells
+    evaporating = []          # (flat cells, area m², share of water evaporation, length m)
+    for r, region in enumerate(regions):
+        if region["kind"] == "bath" and region["condition"].get("evaporation", True):
+            top = np.zeros(shape, bool)
+            top[:, :, :-1] = region_cells[r][:, :, :-1] & air_cells[:, :, 1:]
+            evaporating.append((top, FLUIDS[region["fluid"]]["evaporation"], region, ("region", r)))
+    for b in bath_bodies:
+        if bodies[b]["bath"].get("evaporation", True):
+            top = np.zeros(shape, bool)
+            top[:, :, :-1] = (owner[:, :, :-1] == b) & air_cells[:, :, 1:]
+            evaporating.append((top, FLUIDS[bodies[b]["bath"]["fluid"]]["evaporation"], bodies[b],
+                                ("body", b)))
+    evaporation = []
+    for top, share, item, key in evaporating:
+        cells = np.flatnonzero(top.ravel())
+        if not len(cells) or share <= 0:
+            continue
+        area = np.broadcast_to(along(D[0], 0) * along(D[1], 1), shape).ravel()[cells]
+        extent = np.asarray(item["high"], float) - np.asarray(item["low"], float)
+        length = max(extent[0] * extent[1] / (2.0 * (extent[0] + extent[1]) + 1e-9), 2.0) / 1000.0
+        evaporation.append({"cells": cells, "area": area, "share": share, "length": length,
+                            "h": np.zeros(len(cells)), "owner": key, "ambient": ambient})
+
+    def update_face_liquids():
+        """Liquid temperatures and film coefficients of the coolant / fixed-bath faces."""
+        flat_T = T.ravel()
+        for record in face_channels + [r for r in face_liquids if r["condition"]["kind"] == "bath"]:
+            c = record["condition"]
+            t_cell = flat_T[record["cells"]]
+            k_solid = np.choose(record["axis"], [k_cell[a].ravel()[record["cells"]] for a in range(3)])
+            r_half = record["half"] / np.maximum(k_solid, 1e-9)
+            film = 1.0 / np.maximum(record["h_faces"], 1e-9)
+            wall = record["t_liquid"] + (t_cell - record["t_liquid"]) * film / (r_half + film)
+            if c["kind"] == "coolant":            # flow and h; the liquid temperatures along
+                c_in = dict(c)                    # the channel are unknowns of the energy solve
+                c_in["inlet_c"] = liquid_inlet_t(c.get("inlet_from") or "", c["inlet_c"])
+                record["condition"] = c_in
+                record["upstream"] = None
+                _channel_flow(record, wall, record["area"])
+                record["condition"] = c
+                record["h_faces"][:] = record["h"]
+            else:
+                values = np.zeros(len(t_cell))
+                for o in (0, 1, 2):
+                    for b in np.unique(record["owner"]):
+                        sel = (record["orientation"] == o) & (record["owner"] == b)
+                        if not sel.any():
+                            continue
+                        extent = bodies[b]["extent"]
+                        length = extent[2] if o == 0 else \
+                            extent[0] * extent[1] / (2.0 * (extent[0] + extent[1]))
+                        t_mean = float((wall[sel] * record["area"][sel]).sum() / record["area"][sel].sum())
+                        values[sel] = _liquid_natural_h(c["fluid"], t_mean - c["bath_c"],
+                                                        max(length, 2.0) / 1000.0, np.array(o),
+                                                        0.5 * (t_mean + c["bath_c"]))
+                record["h_faces"] = 0.5 * record["h_faces"] + 0.5 * values
+                record["t_liquid"][:] = c["bath_c"]
+
     # 5. linear-system helpers -------------------------------------------------------------
     cell_index = np.stack(np.unravel_index(np.arange(N), shape), axis=1)
     prolongation = _coarse_space(cell_index, COARSE_BLOCK)
@@ -3761,12 +7017,35 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         any(kind == "inlet" for pair in side_kind for kind in pair)
     turbulent = settings["turbulence"] == "mixing" or (settings["turbulence"] == "auto" and forced)
     flow_model = "turbulent (mixing length)" if turbulent else "laminar"
+    # liquid regions: a channel is turbulent above Re 2300 (unless the flow is set laminar), a
+    # bath stays laminar
+    turbulent_cells = air_cells.copy() if turbulent else np.zeros(shape, bool)
+    for r, region in enumerate(regions):
+        if region["kind"] == "coolant":
+            c = region["condition"]
+            q = c["flow_lpm"] / 60000.0 if c["flow_mode"] == "fixed" else 0.5 * pump_curve(c)[0][-1]
+            region["re_estimate"] = pipe_flow(region["fluid"], q, region["geometry"],
+                                              region["t_ref"])["re"]
+            if settings["turbulence"] == "mixing" or (settings["turbulence"] == "auto" and
+                                                      region["re_estimate"] > 2300.0):
+                turbulent_cells |= region_cells[r]
+    any_turbulent = bool(turbulent_cells.any())
     mu_t = np.zeros(shape)
-    if turbulent:
+    if any_turbulent:
         spacing = [float(np.median(d)) for d in D]
-        wall_distance = ndi.distance_transform_edt(fluid, sampling=spacing)
-        reference = max(float(max(np.ptp(body["V"], axis=0).max() for body in bodies)) / 1000.0, 0.01)
+        if regions:
+            wall_distance = np.maximum(ndi.distance_transform_edt(air_cells, sampling=spacing),
+                                       ndi.distance_transform_edt(liquid, sampling=spacing))
+        else:
+            wall_distance = ndi.distance_transform_edt(fluid, sampling=spacing)
+        extents = [np.ptp(body["V"], axis=0).max() for body in bodies if len(body["V"])]
+        reference = max(float(max(extents or [10.0])) / 1000.0, 0.01)
         mixing = np.minimum(MIXING_KAPPA * wall_distance, 0.09 * reference)
+        for r, region in enumerate(regions):
+            if region["kind"] == "coolant":
+                cells = region_cells[r]
+                mixing[cells] = np.minimum(MIXING_KAPPA * wall_distance[cells],
+                                           0.07 * region["geometry"]["dh_mm"] / 1000.0)
 
     def cell_velocity():
         return [0.5 * (velocity[c][sl(c, 0, -1)] + velocity[c][sl(c, 1, None)]) for c in range(3)]
@@ -3780,22 +7059,22 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             for j in range(3):
                 s = 0.5 * (grads[i][j] + grads[j][i])
                 strain = strain + 2.0 * s * s
-        new = rho * mixing ** 2 * np.sqrt(strain)
-        new[solid] = 0.0
-        mu_t[:] = 0.5 * mu_t + 0.5 * np.minimum(new, 1000.0 * mu_air)
+        new = rho_cell * mixing ** 2 * np.sqrt(strain)
+        new[~turbulent_cells] = 0.0
+        mu_t[:] = 0.5 * mu_t + 0.5 * np.minimum(new, 1000.0 * mu_cell)
 
     # momentum ---------------------------------------------------------------------------------
     def momentum(c):
         """Assemble and solve the c-momentum equation; returns d (pressure-correction factors)."""
         Sc = active[c].shape
         U = velocity[c]
-        mu = mu_air + mu_t
+        mu = mu_cell + mu_t
         aP = np.zeros(Sc)
         b = np.zeros(Sc)
         nb = {}
         # neighbours along c (through the cell centres)
         area_c = face_area[c]
-        Fc = rho * 0.5 * (U[sl(c, 0, -1)] + U[sl(c, 1, None)]) * area_c
+        Fc = rho_cell * 0.5 * (U[sl(c, 0, -1)] + U[sl(c, 1, None)]) * area_c
         Dc = mu * area_c / along(D[c], c)
         weight = _power_law(Dc, Fc)
         east = np.zeros(Sc); west = np.zeros(Sc)
@@ -3812,7 +7091,10 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             padded = np.pad(inner, pad, mode="edge")
             vd = 0.5 * (padded[sl(c, 0, -1)] + padded[sl(c, 1, None)])   # at the c-faces
             area = along(cv_length[c], c) * along(D[e], e)
-            Fd = rho * vd * area
+            rho_d = rho_face[c]
+            if np.ndim(rho_d):
+                rho_d = 0.5 * (rho_d[sl(d, 0, -1)] + rho_d[sl(d, 1, None)])
+            Fd = rho_d * vd * area
             mu_pad = np.pad(mu, pad, mode="edge")
             mu_c = 0.5 * (mu_pad[sl(c, 0, -1)] + mu_pad[sl(c, 1, None)])
             mu_d = 0.5 * (mu_c[sl(d, 0, -1)] + mu_c[sl(d, 1, None)])
@@ -3827,7 +7109,21 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             wall_plus[sl(d, 0, -1)] = ~active[c][sl(d, 1, None)] & (fixed[c][sl(d, 1, None)] == 0)
             wall_minus[sl(d, 1, None)] = ~active[c][sl(d, 0, -1)] & (fixed[c][sl(d, 0, -1)] == 0)
             half = np.broadcast_to(along(D[d], d) / 2.0, Sc)
-            wall_coefficient = mu_air * area_full / half
+            wall_coefficient = mu_face[c] * area_full / half
+            if regions:
+                # a neighbour face in another fluid region (air above a liquid): no coupling
+                # and no wall, i.e. free slip
+                rf = region_face[c]
+                cut_plus = np.zeros(Sc, bool)
+                cut_minus = np.zeros(Sc, bool)
+                lo_f, hi_f = rf[sl(d, 0, -1)], rf[sl(d, 1, None)]
+                differ = (lo_f >= 0) & (hi_f >= 0) & (lo_f != hi_f)
+                cut_plus[sl(d, 0, -1)] = differ
+                cut_minus[sl(d, 1, None)] = differ
+                wall_plus &= ~cut_plus
+                wall_minus &= ~cut_minus
+                north[cut_plus] = 0.0
+                south[cut_minus] = 0.0
             aP += np.where(wall_plus, wall_coefficient, 0.0) + np.where(wall_minus, wall_coefficient, 0.0)
             north[wall_plus] = 0.0
             south[wall_minus] = 0.0
@@ -3835,7 +7131,7 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             for side, index in ((0, 0), (1, shape[d] - 1)):
                 if side_kind[d][side] in ("wall", "wall_fixed", "inlet"):
                     edge = sl(d, index, index + 1)
-                    aP[edge] += (mu_air * area_full / half)[edge]
+                    aP[edge] += (np.broadcast_to(mu_face[c], Sc) * area_full / half)[edge]
             nb[(d, 1)], nb[(d, -1)] = north, south
         total = sum(nb.values())
         aP += total
@@ -3862,7 +7158,12 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             T_pad = np.pad(T, pad, mode="edge")
             T_face = 0.5 * (T_pad[sl(2, 0, -1)] + T_pad[sl(2, 1, None)])
             cv = np.broadcast_to(along(cv_length[2], 2) * face_area[2], Sc)
-            b += rho * GRAVITY * beta * (T_face - ambient) * cv
+            buoyancy = rho * GRAVITY * beta * (T_face - ambient)
+            for r, region in enumerate(regions):      # liquids: density from the table
+                mine = region_face[2] == r + 1
+                buoyancy[mine] = GRAVITY * (region["rho_ref"] -
+                                            fluid_density(region["fluid"], T_face[mine]))
+            b += buoyancy * cv
         # fans with a curve: pressure jump; vents: pressure loss
         for device in devices:
             if device["axis"] != c or not device.get("area"):
@@ -3875,11 +7176,11 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                 aP[mask] += zeta * 0.5 * rho * np.abs(U[mask]) * area_face[mask]
         # pseudo time step (inertia ρ·V/Δt with Δt = cell / velocity scale) plus under-relaxation:
         # keeps the first iterations, with large buoyancy and no flow yet, from overshooting
-        inertia = rho * area_face * velocity_scale[0]
+        inertia = rho_face[c] * area_face * velocity_scale[0]
         aP = aP + inertia
         b += inertia * U
         if unsteady["dt"] is not None:              # time step: ρ·V/Δt · (U − U_old)
-            mass = rho * np.broadcast_to(along(cv_length[c], c) * face_area[c], Sc) / unsteady["dt"]
+            mass = rho_face[c] * np.broadcast_to(along(cv_length[c], c) * face_area[c], Sc) / unsteady["dt"]
             aP = aP + mass
             b += mass * unsteady["velocity"][c]
         aP_relaxed = aP / FLOW_RELAX_U
@@ -3923,24 +7224,27 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         imbalance = np.zeros(shape)
         for c in range(3):
             area_face = np.broadcast_to(face_area[c], active[c].shape)
-            flow = rho * velocity[c] * area_face                   # kg/s through every c-face
+            flow = rho_face[c] * velocity[c] * area_face           # kg/s through every c-face
             imbalance += flow[sl(c, 1, None)] - flow[sl(c, 0, -1)]
-            coefficient = rho * d[c] * area_face
+            coefficient = rho_face[c] * d[c] * area_face
             aP += coefficient[sl(c, 1, None)] + coefficient[sl(c, 0, -1)]
             east = coefficient[sl(c, 1, None)].copy()
             west = coefficient[sl(c, 0, -1)].copy()
             east[sl(c, -1, None)] = 0.0                       # the open side: ghost p' = 0
             west[sl(c, 0, 1)] = 0.0
             nb[(c, 1)], nb[(c, -1)] = east, west
+        if regions:
+            imbalance -= mass_source                 # pump inlets and outlets of the liquids
         rhs = -imbalance.ravel()
         diagonal = aP.ravel().copy()
         empty = diagonal <= 0
         diagonal[empty] = 1.0
         rhs[empty] = 0.0
+        big = 1e6 * max(float(diagonal.max()), 1e-30)     # once: many pins must not compound
         for cell in pin:
-            diagonal[cell] += 1e6 * max(float(diagonal.max()), 1e-30)
+            diagonal[cell] += big
         matrix = _seven_point(sp, shape, diagonal, nb)
-        mass_scale = max(float(np.abs(imbalance).sum()), 1e-300)
+        mass_scale = max(float((np.abs(imbalance) / rho_cell).sum()), 1e-300)   # m³/s
         correction, _info = spla.cg(matrix, rhs, rtol=0.05, atol=0.0, maxiter=200,
                                     M=two_level(matrix, "pressure", refresh))
         correction = correction.reshape(shape)
@@ -3957,17 +7261,37 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
     run_length = np.array([[max((body["extent"].sum() - body["extent"][axis]) / 2.0, 2.0) / 1000.0
                             for axis in range(3)] for body in bodies] + [[1.0] * 3])
     solid_face = []                     # per interior c-face: 1 solid → air, 2 air → solid
+    wall_like = solid | liquid          # (a liquid surface is a wall for the air above it)
     for c in range(3):
-        lo_solid, hi_solid = solid[sl(c, 0, -1)], solid[sl(c, 1, None)]
-        kind = np.zeros(lo_solid.shape, np.int8)
-        kind[lo_solid & ~hi_solid] = 1
-        kind[~lo_solid & hi_solid] = 2
+        lo_wall, hi_wall = wall_like[sl(c, 0, -1)], wall_like[sl(c, 1, None)]
+        lo_air, hi_air = air_cells[sl(c, 0, -1)], air_cells[sl(c, 1, None)]
+        kind = np.zeros(lo_wall.shape, np.int8)
+        kind[lo_wall & hi_air] = 1
+        kind[lo_air & hi_wall] = 2
         solid_face.append(kind)
+    # the liquid side of a wetted solid face: a wall function in baths and turbulent channels
+    liquid_face = []
+    wall_function_liquid = np.zeros(shape, bool)
+    for r, region in enumerate(regions):
+        if region["kind"] == "bath" or bool((turbulent_cells & region_cells[r]).any()):
+            wall_function_liquid |= region_cells[r]
+    for c in range(3):
+        lo_s, hi_s = solid[sl(c, 0, -1)], solid[sl(c, 1, None)]
+        lo_l, hi_l = wall_function_liquid[sl(c, 0, -1)], wall_function_liquid[sl(c, 1, None)]
+        kind = np.zeros(lo_s.shape, np.int8)
+        kind[lo_s & hi_l] = 1
+        kind[lo_l & hi_s] = 2
+        liquid_face.append(kind)
+    run_length = np.vstack([run_length] + [
+        [[max((float(np.sum(region["high"] - region["low"])) - float(region["high"][a] -
+                                                                    region["low"][a])) / 2.0,
+              2.0) / 1000.0 for a in range(3)]] for region in regions])
+    wall_index = owner_index + liquid_region.astype(np.int64)     # liquid r → row of region r
 
     def conductances():
         """(G per c-face array, G_half per cell for each side) with turbulent conductivity."""
         nonlocal k_eff
-        k_turbulent = cp * mu_t / 0.9
+        k_turbulent = cp_cell * mu_t / 0.9
         k_eff = [k_cell[c] + np.where(fluid, k_turbulent, 0.0) for c in range(3)]
         centre = cell_velocity()
         G = []
@@ -3980,15 +7304,29 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             # wall function: the air side of a solid face conducts at least as well as a flat
             # plate in the local air speed (coarse cells cannot resolve thin boundary layers)
             kind = solid_face[c]                     # 1: solid below / air above, 2: the reverse
-            if kind.any():
+            if kind.any() or liquid_face[c].any():
                 parallel = np.sqrt(sum(centre[a] ** 2 for a in range(3) if a != c))
+            if kind.any():
                 speed_air = np.where(kind == 1, parallel[sl(c, 1, None)], parallel[sl(c, 0, -1)])
-                body_side = np.where(kind == 1, owner_index[sl(c, 0, -1)], owner_index[sl(c, 1, None)])
+                body_side = np.where(kind == 1, wall_index[sl(c, 0, -1)], wall_index[sl(c, 1, None)])
                 film = 1.0 / np.maximum(_forced_h(speed_air, run_length[body_side, c]), 1e-12)
                 lo_half = np.where(kind == 2, np.minimum(lo_half, film), lo_half)
                 hi_half = np.where(kind == 1, np.minimum(hi_half, film), hi_half)
-            g[sl(c, 1, -1)] = area[sl(c, 1, -1)] / (lo_half + hi_half +
-                                                    contact_resistance_grid[c][sl(c, 1, -1)])
+            kind = liquid_face[c]                    # 1: solid below / liquid above
+            if kind.any():
+                pick = lambda values: np.where(kind == 1, values[sl(c, 1, None)], values[sl(c, 0, -1)])
+                nu_l = pick(mu_cell / rho_cell)
+                pr_l = pick(mu_cell * cp_cell / np.maximum(k_cell[c], 1e-9))
+                k_l = pick(k_cell[c])
+                body_side = np.where(kind == 1, owner_index[sl(c, 0, -1)], owner_index[sl(c, 1, None)])
+                film = 1.0 / np.maximum(_forced_h(pick(parallel), run_length[body_side, c], nu_l,
+                                                  pr_l, k_l), 1e-12)
+                lo_half = np.where(kind == 2, np.minimum(lo_half, film), lo_half)
+                hi_half = np.where(kind == 1, np.minimum(hi_half, film), hi_half)
+            extra = contact_resistance_grid[c][sl(c, 1, -1)]
+            if film_grid is not None:
+                extra = extra + film_grid[c][sl(c, 1, -1)]
+            g[sl(c, 1, -1)] = area[sl(c, 1, -1)] / (lo_half + hi_half + extra)
             G.append(g)
         return G
 
@@ -4008,6 +7346,7 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             for index, condition in enumerate(conditions):
                 if condition["kind"] in ("insulated", "fixed"):
                     insulated |= face_condition[c] == index
+            insulated |= closed_faces[c]
             lo = solid[sl(c, 0, -1)] & outer_air[sl(c, 1, None)] & ~insulated[sl(c, 1, -1)]
             hi = outer_air[sl(c, 0, -1)] & solid[sl(c, 1, None)] & ~insulated[sl(c, 1, -1)]
             radiating[sl(c, 0, -1)] += np.where(lo, area[sl(c, 1, -1)], 0.0)
@@ -4021,24 +7360,29 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
     unsteady = {"dt": None, "velocity": None, "T": None}
     capacity = (np.array([body["props"]["density"] * body["props"]["cp"] for body in bodies] +
                          [rho * cp])[owner_index] * np.broadcast_to(volume, shape))   # J/K per cell
+    for r, region in enumerate(regions):
+        capacity[region_cells[r]] = (rho_cell * cp_cell * np.broadcast_to(volume, shape))[region_cells[r]]
 
     def energy(refresh):
         G = conductances()
         aP = np.zeros(shape)
         b = source.copy()
         nb = {}
+        net_out = np.zeros(shape) if regions else None       # net convective outflow, W/K
         fixed_heat = []                 # (cells, G_half, T_fixed, condition index)
         for c in range(3):
             Sc = active[c].shape
             area = np.broadcast_to(face_area[c], Sc)
-            flow = rho * cp * velocity[c] * area                     # W/K, + along +c
+            flow = rhocp_face[c] * velocity[c] * area                # W/K, + along +c
+            if regions:
+                net_out += flow[sl(c, 1, None)] - flow[sl(c, 0, -1)]
             g = G[c]
             insulated = np.zeros(Sc, bool)
             for index, condition in enumerate(conditions):
                 if condition["kind"] == "insulated":
                     insulated |= face_condition[c] == index
             fixed_faces = np.isfinite(face_fixed_value[c])
-            g = np.where(insulated | fixed_faces, 0.0, g)
+            g = np.where(insulated | fixed_faces | closed_faces[c] | closed_caps[c], 0.0, g)
             weight = _power_law(g, flow)
             east = np.zeros(shape); west = np.zeros(shape)
             east[...] = (weight + np.maximum(-flow, 0.0))[sl(c, 1, None)]
@@ -4086,6 +7430,43 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                     np.add.at(b, cell, g_half * condition["temperature_c"])
                     fixed_heat.append((cell, g_half, condition["temperature_c"], index))
             nb[(c, 1)], nb[(c, -1)] = east, west
+        flat_aP, flat_b = aP.reshape(-1), b.reshape(-1)
+        # coolant (correlations) and fixed-temperature bath faces: solid cell ↔ liquid
+        for record in face_liquids:
+            k_solid = np.choose(record["axis"], [k_cell[a].ravel()[record["cells"]] for a in range(3)])
+            record["G"] = record["area"] / (record["half"] / np.maximum(k_solid, 1e-9) +
+                                            1.0 / np.maximum(record["h_faces"], 1e-9))
+            np.add.at(flat_aP, record["cells"], record["G"])
+            if record["condition"]["kind"] != "coolant":     # channels: coupled below
+                np.add.at(flat_b, record["cells"], record["G"] * record["t_liquid"])
+        # flow-solved coolant: the pump brings liquid at the inlet temperature, the outlet takes
+        # it out at the cell temperature
+        for region in regions:
+            if region["kind"] != "coolant":
+                continue
+            c = region["condition"]
+            t_in = liquid_inlet_t(c.get("inlet_from") or "", c["inlet_c"])
+            cp_in = float(fluid_props(region["fluid"], t_in)["cp"])
+            region["t_in"] = t_in
+            flat_b[region["inlet_cells"]] += region["mdot"] * region["inlet_weights"] * cp_in * t_in
+            flat_aP[region["inlet_cells"]] += region["mdot"] * region["inlet_weights"] * cp_in
+        if regions:
+            # liquid cells: a_P = Σ a_nb (+ the inflow of a pump inlet) instead of including the
+            # net outflow — the same at convergence, and bounded while the flow and the mass
+            # sources do not balance yet (the outlet's outflow is the net inflow it receives)
+            flat_aP[liquid.ravel()] -= net_out.ravel()[liquid.ravel()]
+        # evaporation from open liquid surfaces: q = h_e·(T − T_room) with h_e from the chord
+        # of the steep evaporation curve, moved only part of the way each iteration (the energy
+        # equation is solved partly per iteration; a full update makes the bath swing)
+        flat_T = T.ravel()
+        for item in evaporation:
+            t_top = flat_T[item["cells"]]
+            q0 = _evaporation_q(t_top, ambient, item["length"], item["share"])
+            chord = q0 / np.maximum(t_top - ambient, 0.5)
+            item["h"] = chord if not item.get("started") else 0.7 * item["h"] + 0.3 * chord
+            item["started"] = True
+            np.add.at(flat_aP, item["cells"], item["h"] * item["area"])
+            np.add.at(flat_b, item["cells"], item["h"] * item["area"] * ambient)
         # radiation to the ambient (linearised with the last temperatures)
         if settings["radiation"]:
             tk = T + 273.15
@@ -4099,24 +7480,99 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             b = b + stored * unsteady["T"]
         aP_relaxed = aP / FLOW_RELAX_T
         b = b + (aP_relaxed - aP) * T
+        # a cell cut off from everything (no conductance, no flow) keeps its temperature
+        isolated = aP_relaxed <= 1e-20
+        if isolated.any():
+            aP_relaxed = np.where(isolated, 1.0, aP_relaxed)
+            b = np.where(isolated, T, b)
+            for key in nb:
+                nb[key] = np.where(isolated, 0.0, nb[key])
         aP_relaxed = np.maximum(aP_relaxed, 1e-30)
         # absolute tolerance in watts, tied to the heat that flows: a relative tolerance would
         # be dominated by the stiff metal cells, and their tiny temperature errors are large
         # heat errors
         matrix = _seven_point(sp, shape, aP_relaxed, nb)
+        rhs = b.ravel()
+        start = T.ravel()
+        key = "energy"
+        if face_channels or junctions:
+            # coolant channels with correlations: the liquid temperature of every segment is an
+            # unknown, ṁc·(T_i − T_i−1) = Σ G·(T_cell − T_i), coupled with the solid cells;
+            # junctions: S·T_j − Σ G·T_cell = P, with G added to the cells' diagonals
+            rows, cols, values = [], [], []
+            extra_rhs, extra_start = [], []
+            offset = N
+            for j in junctions:
+                rows += [j["cells"], np.full(len(j["cells"]), offset), j["cells"], [offset]]
+                cols += [np.full(len(j["cells"]), offset), j["cells"], j["cells"], [offset]]
+                values += [-j["G"], -j["G"], j["G"], [float(j["G"].sum())]]
+                extra_rhs.append(np.array([float(j["power"])]))
+                extra_start.append(np.array([float(j["t_j"])]))
+                j["unknown"] = offset
+                offset += 1
+            for record in face_channels:
+                n, seg, cells, conductance = record["n_seg"], record["seg"], record["cells"], record["G"]
+                mdot_cp = max(record.get("mdot_cp", 0.0), 1e-9)
+                unknown = offset + seg
+                rows += [cells, unknown]
+                cols += [unknown, cells]
+                values += [-conductance, -conductance]
+                diagonal = mdot_cp + np.bincount(seg, conductance, n) + 1e-12
+                rows += [offset + np.arange(n), offset + np.arange(1, n)]
+                cols += [offset + np.arange(n), offset + np.arange(n - 1)]
+                values += [diagonal, np.full(n - 1, -mdot_cp)]
+                first = np.zeros(n)
+                first[0] = mdot_cp * record.get("t_in", record["condition"]["inlet_c"])
+                extra_rhs.append(first)
+                extra_start.append(record["t_face"] if record.get("t_face") is not None
+                                   else np.full(n, float(record["condition"]["inlet_c"])))
+                record["unknowns"] = (offset, offset + n)
+                offset += n
+            size = offset
+            coupling = sp.csr_matrix((np.concatenate(values), (np.concatenate(rows),
+                                                               np.concatenate(cols))),
+                                     shape=(size, size))
+            matrix = (sp.bmat([[matrix, None], [None, sp.csr_matrix((size - N, size - N))]])
+                      + coupling).tocsr()
+            rhs = np.concatenate([rhs] + extra_rhs)
+            start = np.concatenate([start] + extra_start)
+            key = "energy_channels"
+            if coarse.get("channels_size") != size:
+                coarse["channels_size"] = size
+                coarse["channels_P"] = sp.block_diag((prolongation, sp.identity(size - N))).tocsr()
+                coarse[key] = None
         # inner tolerance: 1 % of the starting residual (the outer iterations change the
         # coefficients anyway), never looser than needed for the final heat balance
-        start = T.ravel()
-        initial = float(np.linalg.norm(b.ravel() - matrix @ start))
+        initial = float(np.linalg.norm(rhs - matrix @ start))
         tolerance = max(1e-6 * max(heat_scale[0], 1e-12) / math.sqrt(N), 0.01 * initial)
-        solution, _info = spla.bicgstab(matrix, b.ravel(), x0=start, rtol=0.0,
-                                        atol=tolerance, maxiter=1000,
-                                        M=two_level(matrix, "energy", refresh))
+        if face_channels or junctions:
+            P_ext = coarse["channels_P"]
+            inverse = 1.0 / matrix.diagonal()
+            if refresh or coarse.get(key) is None:
+                coarse[key] = spla.splu((P_ext.T @ matrix @ P_ext).tocsc())
+            lu = coarse[key]
+            preconditioner = spla.LinearOperator(matrix.shape, dtype=float, matvec=lambda v: inverse * v + P_ext @ lu.solve(P_ext.T @ v))
+        else:
+            preconditioner = two_level(matrix, "energy", refresh)
+        solution, _info = spla.bicgstab(matrix, rhs, x0=start, rtol=0.0, atol=tolerance,
+                                        maxiter=1000, M=preconditioner)
         if not np.all(np.isfinite(solution)):
             raise ThermalError("The temperatures did not converge.")
+        for j in junctions:
+            j["t_j"] = float(solution[j["unknown"]])
+        for record in face_channels:                  # the liquid along each channel
+            lo, hi = record["unknowns"]
+            t_seg = solution[lo:hi]
+            record["t_face"] = record["t_after"] = t_seg
+            record["t_out"] = float(t_seg[-1])
+            record["t_liquid"] = t_seg[record["seg"]]
+            filled = record["area_seg"] > 0
+            if "wall" in record:
+                record["mode"] = wall_mode_of(record["area_seg"][filled], record["wall"][filled],
+                                              t_seg[filled])
         energy_parts["fixed"] = fixed_heat
         energy_parts["G"] = G
-        return solution.reshape(shape)
+        return solution[:N].reshape(shape)
 
     def heat_balance():
         """(in W, out by air W, radiation W, fixed faces / walls W, per-condition heat)."""
@@ -4145,8 +7601,29 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             per_condition[index] += float(heat.sum())
             fixed_out += float(heat.sum())
             gross += float(np.abs(heat).sum())
+        flat_T = T.ravel()
+        liquids = 0.0
+        for record in face_liquids:
+            heat = record["G"] * (flat_T[record["cells"]] - record["t_liquid"])
+            record["heat"] = float(heat.sum())
+            liquids += record["heat"]
+            gross += float(np.abs(heat).sum())
+        for region in regions:
+            if region["kind"] == "coolant" and "t_in" in region:
+                out_cells = region["outlet_cells"]
+                cp_out = np.broadcast_to(cp_cell, shape).ravel()[out_cells]
+                cp_in = float(fluid_props(region["fluid"], region["t_in"])["cp"])
+                region["heat"] = float(region["mdot"] * ((region["outlet_weights"] * cp_out *
+                                                         flat_T[out_cells]).sum() - cp_in * region["t_in"]))
+                liquids += region["heat"]
+                gross += abs(region["heat"])
+        for item in evaporation:
+            item["heat"] = float((_evaporation_q(flat_T[item["cells"]], ambient, item["length"],
+                                                 item["share"]) * item["area"]).sum())
+            liquids += item["heat"]
+            gross += abs(item["heat"])
         heat_scale[0] = max(power_now[0], gross, 1e-12)
-        return out_air, radiation, walls, fixed_out, per_condition
+        return out_air, radiation, walls, fixed_out, per_condition, liquids
 
     def stored_heat():
         """W going into heat storage during the time step (0 in steady state)."""
@@ -4158,12 +7635,15 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
     step(21, "Preparing the result surfaces...")
     grid = {"kind": "cells", "xc": centres_mm[0], "yc": centres_mm[1], "zc": centres_mm[2],
             "faces": faces_mm, "shape": shape, "solid": solid.ravel(), "h_mm": h_mm,
-            "owner": owner.ravel().copy()}             # body per cell, -1 = air
+            "owner": owner.ravel().copy(),             # body per cell, -1 = air
+            "liquid": liquid_region.ravel().copy() if regions else None}
     # result surfaces of the bodies: trilinear between solid cells
     total_area = sum(body["area"] for body in bodies)
-    edge = max(h_mm, math.sqrt(2.0 * total_area / DISPLAY_TRIANGLE_LIMIT))
+    edge = max(h_mm, math.sqrt(2.0 * max(total_area, 1e-9) / DISPLAY_TRIANGLE_LIMIT))
     surface = {}
     for body in bodies:
+        if body.get("synthetic"):
+            continue
         vertices, triangles = refine_triangles(body["V"], body["T"], edge)
         index, weights = _cell_weights(vertices, grid, grid["solid"])
         surface[body["job"]["key"]] = {"vertices": vertices.astype(np.float32),
@@ -4179,9 +7659,12 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
     q_stored = 0.0
     speeds = [settings["inlet_speed"] if any(k == "inlet" for pair in side_kind for k in pair) else 0.0]
     speeds += [device.get("speed", 0.0) for device in devices]
+    for region in regions:
+        if region["kind"] == "coolant":
+            speeds.append(region["flow_m3s"] / max(region["geometry"]["area_mm2"] * 1e-6, 1e-12))
     length = max(float(np.max(plan["size"])) / 1000.0 * 0.3, 0.01)
     speeds.append(math.sqrt(GRAVITY * beta * 10.0 * length))
-    mass_reference = rho * max(speeds) * length ** 2
+    mass_reference = max(speeds) * length ** 2
     velocity_scale = [max(speeds)]
     history = []
     converged = False
@@ -4213,10 +7696,27 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         hottest_now = float(T[solid].max()) if solid.any() else float(T.max())
         velocity_scale[0] = max(math.sqrt(GRAVITY * beta * max(hottest_now - ambient, 0.5) * length),
                                 max(speeds[:-1] + [0.0]), 0.01)
-        if turbulent and number % 3 == 1:
+        if regions:
+            update_liquid_properties()
+        if any_turbulent and number % 3 == 1:
             update_turbulence()
         previous_velocity = [v.copy() for v in velocity]
         d = [momentum(c) for c in range(3)]
+        # pumps on a curve: the flow follows the pressure difference from inlet to outlet
+        moved = False
+        for region in regions:
+            if region["kind"] != "coolant" or region["condition"]["flow_mode"] != "pump":
+                continue
+            flows, pressures = pump_curve(region["condition"])
+            flat_p = p.ravel()
+            dp = float(region["inlet_weights"] @ flat_p[region["inlet_cells"]] -
+                       region["outlet_weights"] @ flat_p[region["outlet_cells"]])
+            target = float(np.interp(max(dp, 0.0), pressures[::-1], flows[::-1]))
+            region["flow_m3s"] = 0.8 * region["flow_m3s"] + 0.2 * target
+            region["dp"] = dp
+            moved = True
+        if moved:
+            set_mass_sources()
         # fan curves: the pressure jump follows the flow through the fan (under-relaxed)
         for device in devices:
             if device["kind"] != "fan" or device["flow"]["flow_mode"] != "curve" or not device.get("area"):
@@ -4232,18 +7732,23 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         imbalance = pressure_correction(d, refresh)
         top_speed = max(float(np.abs(v).max()) for v in velocity)
         # residuals relative to the flow that is there (a weak flow converges to its own scale)
-        reference_flow = rho * max(top_speed, 1e-3 * max(speeds)) * length ** 2
+        reference_flow = max(top_speed, 1e-3 * max(speeds)) * length ** 2
         mass = imbalance / max(min(mass_reference, reference_flow), 1e-300)
         change = max(float(np.abs(v - w).max()) for v, w in zip(velocity, previous_velocity)) / \
             max(top_speed, 1e-9)
+        if face_liquids:
+            update_face_liquids()
+        if film_groups and number % 5 == 1:
+            update_bath_films()
         T_new = energy(refresh)
         dT = float(np.abs(T_new - T).max())
         T = T_new
         return mass, change, dT
 
     def balance():
-        out_air, radiation, walls, fixed_out, _per = heat_balance()
-        return (out_air + radiation + walls + fixed_out + stored_heat() - power_now[0]) / heat_scale[0]
+        out_air, radiation, walls, fixed_out, _per, liquids = heat_balance()
+        return (out_air + radiation + walls + fixed_out + liquids + stored_heat() - power_now[0]) / \
+            heat_scale[0]
 
     # thermostat sensors on the cell field: a probe (trilinear between solid cells when it sits
     # in a part, else between air cells), or the hottest / mean cell of the heated bodies
@@ -4338,6 +7843,12 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         inner_limit = int(settings["flow_step_iterations"])
         start = ambient if settings["initial_ambient"] else settings["initial_c"]
         T[...] = float(start)
+        for b in bath_bodies:                   # a bath may start warmer or colder
+            if not bodies[b]["bath"].get("bath_start_auto", True):
+                T[owner == b] = float(bodies[b]["bath"]["bath_c"])
+        for r, region in enumerate(regions):
+            if region["kind"] == "bath":
+                T[region_cells[r]] = region["t_ref"]
         if cp_tabled:
             update_capacity()
         frame_steps = np.unique(np.round(np.linspace(0, n_steps, min(n_steps, MAX_FRAMES) + 1))
@@ -4359,8 +7870,12 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         solid_cells = np.flatnonzero(solid.ravel())
         extremes = [np.inf, -np.inf]
 
+        junction_series = np.zeros((len(junctions), n_steps + 1))
+
         def record(step_index):
             flat = T.ravel()
+            for n, j in enumerate(junctions):
+                junction_series[n, step_index] = j["t_j"] if step_index else float(start)
             for index, cells in enumerate(body_cells):
                 if len(cells):
                     values = flat[cells]
@@ -4434,6 +7949,9 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                   "mean": stats[:, 1, :].T, "max": stats[:, 2, :].T, "power": power_series}
         if thermostats is not None:
             series["thermostats"] = switch_series
+        if junctions:
+            series["junctions"] = junction_series
+            series["junction_names"] = [j["name"] for j in junctions]
         if unsettled:
             when = format_time(unsettled[0]) if len(unsettled) == 1 else \
                 f"{format_time(unsettled[0])} … {format_time(unsettled[-1])}"
@@ -4453,8 +7971,8 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
 
     # 7. results -----------------------------------------------------------------------------
     step(97, "Evaluating results...")
-    out_air, q_radiation, q_walls, q_fixed, per_condition = heat_balance()
-    out = out_air + q_radiation + q_walls + q_fixed
+    out_air, q_radiation, q_walls, q_fixed, per_condition, q_liquid = heat_balance()
+    out = out_air + q_radiation + q_walls + q_fixed + q_liquid
     total_in = power_now[0]
     balance_error = (out + q_stored - total_in) / heat_scale[0]
     centre_velocity = cell_velocity()
@@ -4534,7 +8052,7 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             if side_kind[c][side] in ("open", "inlet"):
                 f = (velocity[c] * area)[sl(c, face, face + 1)] * (1.0 if side == 0 else -1.0)
                 open_flow += float(np.maximum(f, 0.0).sum())
-    air_T = T[fluid]
+    air_T = T[air_cells] if air_cells.any() else T[fluid]
     device_text = []
     for device in devices:
         if not device.get("area"):
@@ -4565,10 +8083,17 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                f"; out with the air {out_air:.4g} W, radiation {q_radiation:.4g} W" +
                (f", fixed-temperature walls {q_walls:.4g} W" if abs(q_walls) > 1e-9 else "") +
                (f", fixed-temperature faces {q_fixed:.4g} W" if abs(q_fixed) > 1e-9 else "") +
+               (f", liquids {q_liquid:.4g} W" if abs(q_liquid) > 1e-9 else "") +
                (f", still stored {q_stored:.4g} W" if transient else "") +
                f" (difference {balance_error:+.2%})" + (" at the end" if transient else ""),
                air_text]
+    liquid_results, liquid_lines = _airflow_liquid_results(
+        T, owner, solid, bodies, bath_bodies, regions, region_cells, face_liquids, face_channels,
+        evaporation, energy_parts.get("G"), p, velocity, face_area, volume, shape, transient,
+        unsteady, capacity, messages)
     for entry in condition_results:
+        if entry["kind"] in LIQUID_KINDS:
+            continue
         title = CONDITION_KINDS[entry["kind"]][0]
         effect = {"fixed": f"{entry['heat']:.4g} W leave" if entry["heat"] >= 0 else
                   f"{-entry['heat']:.4g} W enter", "flux": f"{entry['heat']:.4g} W enter",
@@ -4581,6 +8106,23 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
                            f"{abs(entry['heat']):.4g} W" +
                            (f", temperature step ≈ {abs(entry['jump']):.3g} K"
                             if entry["kind"] != "bonded" else ""))
+    summary += liquid_lines
+    junction_results = []
+    for n, j in enumerate(junctions):
+        flat_T = T.ravel()
+        t_top = float(flat_T[j["top"][0]] @ j["top"][1] / j["top"][1].sum())
+        t_board = float(flat_T[j["board"][0]] @ j["board"][1] / j["board"][1].sum())
+        entry = {"name": j["name"], "package": j["junction"].get("type", "Custom block"),
+                 "t_j": j["t_j"], "t_top": t_top, "t_board": t_board, "power": float(j["power"]),
+                 "tj_max": float(j["junction"].get("tj_max", 150.0)),
+                 "theta_top": float(j["junction"]["theta_top"]),
+                 "theta_board": float(j["junction"]["theta_board"])}
+        if transient:
+            entry["peak"] = float(junction_series[n].max())
+        junction_results.append(entry)
+    lines, warnings = junction_lines(junction_results, transient)
+    summary += lines
+    messages += warnings
     # Rayleigh / Reynolds estimate and model hint
     solid_max = float(T[solid].max()) if solid.any() else ambient
     rayleigh = GRAVITY * beta * max(solid_max - ambient, 0.1) * length ** 3 / \
@@ -4597,10 +8139,10 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
         summary += lines
         messages += notes
         thermostat_results = thermostats.results(transient, controlled_nominal)
-    if k_tabled or cp_tabled:
+    tabled = [i for i in sorted(set(k_tabled) | set(cp_tabled)) if not bodies[i].get("synthetic")]
+    if tabled:
         summary.append("Temperature-dependent material data: " + ", ".join(
-            f"{bodies[i]['name']} ({bodies[i]['material']})"
-            for i in sorted(set(k_tabled) | set(cp_tabled))))
+            f"{bodies[i]['name']} ({bodies[i]['material']})" for i in tabled))
     peaks = [float(np.nanmax(series["max"][i])) if series is not None and
              np.isfinite(series["max"][i]).any() else entry["max"]
              for i, entry in enumerate(body_results)]
@@ -4620,7 +8162,8 @@ def solve_airflow(jobs, settings, progress=None, cancelled=None, conditions=(), 
             "q_fixed": q_fixed, "q_convection": out_air, "q_radiation": q_radiation,
             "q_stored": q_stored, "balance_error": balance_error, "iterations": iteration,
             "conditions": condition_results, "contacts": contact_results,
-            "thermostats": thermostat_results,
+            "thermostats": thermostat_results, "liquids": liquid_results, "q_liquid": q_liquid,
+            "junctions": junction_results,
             "volume_frames": volume_frames, "volume_index": volume_index,
             "velocity_frames": velocity_frames, "velocity_index": velocity_index,
             "grid": grid, "velocity": np.stack(centre_velocity, axis=-1).astype(np.float32),
@@ -4648,6 +8191,8 @@ SWEEP_PARAMETERS = {   # kind: (title, unit, target: "body" | "part" | "flux" | 
     "h": ("Convection coefficient h (fixed)", "W/m²K", None),
     "air_speed": ("Air speed (forced air)", "m/s", None),
     "fan_flow": ("Volume flow of a fan", "m³/h", "fan"),
+    "coolant_flow": ("Flow rate of a coolant channel", "L/min", "coolant"),
+    "coolant_inlet": ("Inlet temperature of a coolant channel", "°C", "coolant"),
     "inlet_speed": ("Inlet speed (airflow)", "m/s", None),
     "cell": ("Cell size (mesh study)", "mm", None),
 }
@@ -4722,6 +8267,7 @@ def sweep_title(study, sweep):
               "emissivity": f"Emissivity of {name}", "setpoint": f"Thermostat setpoint of {name}",
               "position": f"Position {'XYZ'[sweep['axis']]} of {name}",
               "flux": f"Heat flux '{name}'", "fan_flow": f"Volume flow of {name}",
+              "coolant_flow": f"Flow rate of '{name}'", "coolant_inlet": f"Inlet temperature of '{name}'",
               "contact": f"Contact '{name}' " + ("thickness" if sweep_unit(study, sweep) == "mm"
                                                   else "resistance")}
     title = titles.get(kind, SWEEP_PARAMETERS[kind][0])
@@ -4788,6 +8334,17 @@ def sweep_apply(study, sweep, value):
         if condition is None:
             raise ThermalError(f"The heat-flux condition '{target}' is not in the study (any more).")
         condition["power_w" if condition["flux_mode"] == "total" else "flux_w_m2"] = max(0.0, float(value))
+    elif kind in ("coolant_flow", "coolant_inlet"):
+        condition = next((c for c in copy_["conditions"] if c["name"] == target and
+                          c["kind"] == "coolant"), None)
+        if condition is None:
+            raise ThermalError(f"The coolant channel '{target}' is not in the study (any more).")
+        if kind == "coolant_flow":
+            condition["flow_mode"] = "fixed"
+            condition["flow_lpm"] = max(0.0, float(value))
+        else:
+            condition["inlet_from"] = ""
+            condition["inlet_c"] = float(value)
     elif kind == "contact":
         contact = next((c for c in copy_["contacts"] if c["name"] == target), None)
         if contact is None:
@@ -5414,6 +8971,7 @@ class ThermalView3D(cad.AssemblyView3D):
         self.section_caps = []          # [(entry or None, vertices, triangles, rgb or per-vertex rgb)]
         self.section_arrows = None      # (segments (n, 2, 3), colours (n, 3)) of air velocities
         self.streamlines = []           # [(points (n, 3), colours (n, 3))]
+        self.channel_arrows = []        # [(start, unit direction, length mm, label)] coolant in / out
         self.flow_markers = []          # [(entry, axis vector, label)] of fans / vents
 
     def set_pick_mode(self, mode):
@@ -5797,11 +9355,40 @@ class ThermalView3D(cad.AssemblyView3D):
         finally:
             gl.glPopAttrib()
 
+    def _draw_channel_arrows(self):
+        """Arrows where the liquid of a coolant channel enters and leaves."""
+        if not self.channel_arrows:
+            return
+        gl.glPushAttrib(gl.GL_ENABLE_BIT | gl.GL_CURRENT_BIT | gl.GL_LINE_BIT)
+        try:
+            gl.glDisable(gl.GL_LIGHTING)
+            gl.glDisable(gl.GL_DEPTH_TEST)
+            gl.glLineWidth(3.0)
+            font = QFont("Arial", 9, QFont.Bold)
+            for start, direction, length, label in self.channel_arrows:
+                start = np.asarray(start, float)
+                axis = np.asarray(direction, float)
+                axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+                tip = start + axis * length
+                side = np.cross(axis, np.eye(3)[int(np.argmin(np.abs(axis)))])
+                side = side / max(float(np.linalg.norm(side)), 1e-12) * length * 0.2
+                gl.glColor3f(0.2, 0.7, 1.0)
+                gl.glBegin(gl.GL_LINES)
+                for a, b in ((start, tip), (tip, tip - axis * length * 0.35 + side),
+                             (tip, tip - axis * length * 0.35 - side)):
+                    gl.glVertex3f(*[float(x) for x in a]); gl.glVertex3f(*[float(x) for x in b])
+                gl.glEnd()
+                gl.glColor3f(0.75, 0.9, 1.0)
+                self.renderText(float(tip[0]), float(tip[1]), float(tip[2]), " " + label, font)
+        finally:
+            gl.glPopAttrib()
+
     def paintGL(self):
         super().paintGL()
         if self._mvp is not None:
             self._draw_face_overlays()
             self._draw_probe_markers()
+            self._draw_channel_arrows()
         if not self.result_mode or self.hot_marker is None or self._mvp is None:
             return
         point, label = self.hot_marker
@@ -7009,6 +10596,8 @@ class SweepDialog(QDialog):
             out = [(c["name"], c["name"]) for c in study["components"] if c.get("kind") == "fan"]
         elif target == "flux":
             out = [(c["name"], c["name"]) for c in study.get("conditions", []) if c["kind"] == "flux"]
+        elif target == "coolant":
+            out = [(c["name"], c["name"]) for c in study.get("conditions", []) if c["kind"] == "coolant"]
         elif target == "contact":
             out = [(c["name"], c["name"]) for c in study.get("contacts", [])]
         return out
@@ -7052,6 +10641,10 @@ class SweepDialog(QDialog):
             contact = next((c for c in study["contacts"] if c["name"] == target), None)
             return None if contact is None else (contact["thickness_mm"] if contact["kind"] == "layer"
                                                  else contact["resistance"])
+        if kind in ("coolant_flow", "coolant_inlet"):
+            condition = next((c for c in study["conditions"] if c["name"] == target), None)
+            return None if condition is None else \
+                condition["flow_lpm" if kind == "coolant_flow" else "inlet_c"]
         return None
 
     def _apply(self, sweep):
@@ -7343,6 +10936,333 @@ class SweepWorker(QThread):
 
 
 # ── Thermal window ──────────────────────────────────────────────────────
+def study_add_pcb(study, pcb, name="PCB", position=(0.0, 0.0, 0.0)):
+    """A board in the study (component kind "pcb"): its outline extruded, conductivity from the
+    stack and the copper (see pcb_conductivity)."""
+    vertices, triangles, faces = pcb_board_mesh(pcb)
+    material = PCB_CORES.get(pcb.get("core"), PCB_CORES["FR-4"])["material"]
+    body = thermal_body(name, vertices, triangles, faces, PCB_COLOR, material=material,
+                        power_w=float(pcb.get("background_w", 0.0)))
+    component = cad.assembly_add_component(study, name, "pcb", [body],
+                                           source=f"Board from {pcb.get('source') or 'a file'}")
+    body["name"] = component["name"]
+    component["pivot"] = [0.0, 0.0, 0.0]
+    component["position"] = [float(v) for v in position]
+    component["pcb"] = pcb
+    return component
+
+
+def study_add_package(study, package, name, x, y, board_top, board_bottom, power_w, size=None,
+                      angle=0.0):
+    """A component package (block with a junction, two-resistor model) on a board side."""
+    entry = PACKAGES.get(package["type"], PACKAGES["Custom block"])
+    length, width, height = size or entry[:3]
+    top_side = package.get("side", "top") != "bottom"
+    z = board_top + height / 2.0 if top_side else board_bottom - height / 2.0
+    component = study_add_primitive(study, "block", {"size": [length, width, height]}, name,
+                                    [x, y, z], power_w, PACKAGE_MATERIAL, rotation=[0.0, 0.0, angle])
+    component["bodies"][0]["color"] = (0.22, 0.22, 0.25)
+    component["package"] = dict(package)
+    component["source"] = f"Package {package['type']}"
+    return component
+
+
+class PcbImportDialog(QDialog):
+    """Import a printed circuit board: KiCad board or Gerber files, board set-up, and the power
+    components to place (KiCad footprints)."""
+
+    PREFIXES = "Q U D L"
+
+    def __init__(self, parent, start_directory):
+        super().__init__(parent)
+        self.setWindowTitle("Import PCB")
+        self.resize(980, 720)
+        self._start = start_directory
+        self.desc = None
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.ed_path = QLineEdit()
+        self.ed_path.setReadOnly(True)
+        self.ed_path.setPlaceholderText("KiCad board (.kicad_pcb), Gerber job (.gbrjob) or a folder "
+                                        "of Gerber and drill files")
+        row.addWidget(self.ed_path, 1)
+        board_button = QPushButton("Board file…")
+        board_button.clicked.connect(self._choose_file)
+        row.addWidget(board_button)
+        folder_button = QPushButton("Gerber folder…")
+        folder_button.clicked.connect(self._choose_folder)
+        row.addWidget(folder_button)
+        layout.addLayout(row)
+        self.lbl_info = _hint("Choose a board to import.")
+        self.lbl_info.setWordWrap(True)
+        layout.addWidget(self.lbl_info)
+        # board set-up
+        layout.addWidget(_header("Board"))
+        form = QGridLayout()
+        self.cb_core = QComboBox()
+        for key, core in PCB_CORES.items():
+            self.cb_core.addItem(core["title"], key)
+        self.cb_core.currentIndexChanged.connect(self._core_changed)
+        form.addWidget(QLabel("Core:"), 0, 0)
+        form.addWidget(self.cb_core, 0, 1)
+        self.sp_plating = _spin(0.0, 100.0, " µm", 5.0, decimals=0)
+        self.sp_plating.setValue(PCB_DEFAULT_PLATING_UM)
+        self.sp_plating.setToolTip("Copper plating of the holes (vias and through-hole pads)")
+        form.addWidget(QLabel("Hole plating:"), 0, 2)
+        form.addWidget(self.sp_plating, 0, 3)
+        self.sp_ims_mm = _spin(0.02, 1.0, " mm", 0.01, decimals=3)
+        self.sp_ims_mm.setValue(0.1)
+        self.sp_ims_k = _spin(0.1, 20.0, " W/m·K", 0.1, decimals=2)
+        self.sp_ims_k.setValue(2.0)
+        self.lbl_ims = QLabel("IMS dielectric:")
+        form.addWidget(self.lbl_ims, 1, 0)
+        form.addWidget(self.sp_ims_mm, 1, 1)
+        form.addWidget(self.sp_ims_k, 1, 2)
+        self.sp_background = _spin(0.0, 1000.0, " W", 0.1, decimals=2)
+        self.sp_background.setToolTip("Heat of all components that are not placed, spread evenly "
+                                      "over the board")
+        form.addWidget(QLabel("Other parts:"), 1, 3)
+        form.addWidget(self.sp_background, 1, 4)
+        form.setColumnStretch(5, 1)
+        layout.addLayout(form)
+        self.tbl_stack = QTableWidget(0, 2)
+        self.tbl_stack.setHorizontalHeaderLabels(["Layer", "Thickness"])
+        self.tbl_stack.verticalHeader().hide()
+        self.tbl_stack.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tbl_stack.setFixedHeight(150)
+        layout.addWidget(self.tbl_stack)
+        # components
+        layout.addWidget(_header("Components to place (power parts; the rest can go into "
+                                 "'Other parts')"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Select by reference:"))
+        self.ed_prefix = QLineEdit(self.PREFIXES)
+        self.ed_prefix.setFixedWidth(160)
+        row.addWidget(self.ed_prefix)
+        select = QPushButton("Select these")
+        select.clicked.connect(self._select_prefixes)
+        row.addWidget(select)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.tbl_parts = QTableWidget(0, 9)
+        self.tbl_parts.setHorizontalHeaderLabels(["", "Ref", "Value", "Footprint", "Package", "Power W",
+                                                  "θ top K/W", "θ board K/W", "Tj max °C"])
+        self.tbl_parts.verticalHeader().hide()
+        header = self.tbl_parts.horizontalHeader()
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        for column in (0, 1, 2, 4, 5, 6, 7, 8):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        layout.addWidget(self.tbl_parts, 1)
+        layout.addWidget(_hint("θ top: junction to the package top (θJC top); θ board: junction to the "
+                               "board (θJB, or θJC of an exposed pad or tab). Typical values are "
+                               "filled in — datasheet values are better."))
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        self.btn_ok = buttons.button(QDialogButtonBox.Ok)
+        self.btn_ok.setEnabled(False)
+        layout.addWidget(buttons)
+        self._core_changed()
+
+    # loading ---------------------------------------------------------------------------------
+    def _choose_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import a PCB", self._start,
+            "PCB files (*.kicad_pcb *.gbrjob *.gbr *.gtl *.gbl *.cmp *.sol);;All files (*)")
+        if path:
+            self.load(path)
+
+    def _choose_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Folder with Gerber and drill files", self._start)
+        if path:
+            self.load(path)
+
+    def load(self, path):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.desc = read_board_file(path)
+        except Exception as ex:
+            QApplication.restoreOverrideCursor()
+            self.desc = None
+            self.btn_ok.setEnabled(False)
+            QMessageBox.critical(self, "Import PCB", f"Could not read\n{path}\n\n{ex}")
+            return
+        QApplication.restoreOverrideCursor()
+        desc = self.desc
+        self.ed_path.setText(path)
+        kind = "KiCad board" if desc["format"] == "kicad" else "Gerber files"
+        text = (f"{kind}: {len(desc['copper_layers'])} copper layer"
+                f"{'s' if len(desc['copper_layers']) != 1 else ''}, "
+                f"{'outline found' if desc['loops'] else 'no outline (the box around the copper)'}, "
+                f"{len(desc['plated'])} plated holes, {len(desc['footprints'])} footprints.")
+        self.lbl_info.setText(text + ("\n" + "\n".join(desc["messages"]) if desc["messages"] else ""))
+        # stack: copper and dielectric rows
+        self.tbl_stack.setRowCount(0)
+        for index, name in enumerate(desc["copper_layers"]):
+            self._stack_row(f"Copper {name}", desc["copper_um"][index], " µm", "copper")
+            if index < len(desc["copper_layers"]) - 1:
+                self._stack_row("Dielectric", desc["dielectric_mm"][index], " mm", "dielectric")
+        # components
+        self.tbl_parts.setRowCount(len(desc["footprints"]))
+        for row, fp in enumerate(desc["footprints"]):
+            check = QTableWidgetItem()
+            check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            check.setCheckState(Qt.Unchecked)
+            self.tbl_parts.setItem(row, 0, check)
+            for column, text in ((1, fp["reference"]), (2, fp["value"]), (3, fp["footprint"])):
+                item = QTableWidgetItem(text)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.tbl_parts.setItem(row, column, item)
+            combo = QComboBox()
+            for name in PACKAGES:
+                combo.addItem(name, name)
+            guess = guess_package(fp["footprint"])
+            combo.setCurrentIndex(max(0, combo.findData(guess)))
+            combo.currentIndexChanged.connect(lambda _i, r=row: self._package_changed(r))
+            self.tbl_parts.setCellWidget(row, 4, combo)
+            self.tbl_parts.setItem(row, 5, QTableWidgetItem("0"))
+            self._package_changed(row)
+        self._select_prefixes()
+        self.btn_ok.setEnabled(True)
+
+    def _stack_row(self, title, value, suffix, kind):
+        row = self.tbl_stack.rowCount()
+        self.tbl_stack.insertRow(row)
+        item = QTableWidgetItem(title)
+        item.setFlags(Qt.ItemIsEnabled)
+        item.setData(Qt.UserRole, kind)
+        self.tbl_stack.setItem(row, 0, item)
+        spin = _spin(0.001, 10000.0, suffix, 1.0 if kind == "copper" else 0.05,
+                     decimals=0 if kind == "copper" else 3)
+        spin.setValue(float(value))
+        if kind == "copper":
+            spin.setToolTip("18 µm = ½ oz, 35 µm = 1 oz, 70 µm = 2 oz, 105 µm = 3 oz")
+        self.tbl_stack.setCellWidget(row, 1, spin)
+
+    def _package_changed(self, row):
+        name = self.tbl_parts.cellWidget(row, 4).currentData()
+        entry = PACKAGES.get(name, PACKAGES["Custom block"])
+        for column, value in ((6, entry[3]), (7, entry[4]), (8, entry[5])):
+            self.tbl_parts.setItem(row, column, QTableWidgetItem(f"{value:g}"))
+
+    def _select_prefixes(self):
+        prefixes = [p.strip().upper() for p in self.ed_prefix.text().replace(",", " ").split() if p.strip()]
+        for row in range(self.tbl_parts.rowCount()):
+            reference = self.tbl_parts.item(row, 1).text().upper()
+            letters = "".join(ch for ch in reference if ch.isalpha())
+            chosen = letters in prefixes or any(reference.startswith(p) for p in prefixes if p.endswith("*"))
+            self.tbl_parts.item(row, 0).setCheckState(Qt.Checked if chosen else Qt.Unchecked)
+
+    def _core_changed(self, *_args):
+        ims = self.cb_core.currentData() == "IMS"
+        for widget in (self.lbl_ims, self.sp_ims_mm, self.sp_ims_k):
+            widget.setVisible(ims)
+
+    # result ----------------------------------------------------------------------------------
+    def _number(self, row, column, default):
+        item = self.tbl_parts.item(row, column)
+        try:
+            return float(item.text().replace(",", ".")) if item is not None else default
+        except ValueError:
+            return default
+
+    def _accept(self):
+        if self.desc is None:
+            return
+        try:
+            self.values()
+        except Exception as ex:
+            QMessageBox.critical(self, "Import PCB", str(ex))
+            return
+        self.accept()
+
+    def values(self):
+        """(pcb, [(name, package, power W, x, y, angle, size)], messages)."""
+        if hasattr(self, "_values"):
+            return self._values
+        copper, dielectric = [], []
+        for row in range(self.tbl_stack.rowCount()):
+            value = self.tbl_stack.cellWidget(row, 1).value()
+            (copper if self.tbl_stack.item(row, 0).data(Qt.UserRole) == "copper" else dielectric).append(value)
+        pcb, place, messages = pcb_from_description(
+            self.desc, core=self.cb_core.currentData(), copper_um=copper, dielectric_mm=dielectric,
+            plating_um=self.sp_plating.value(), ims_dielectric_mm=self.sp_ims_mm.value(),
+            ims_k=self.sp_ims_k.value())
+        pcb["background_w"] = float(self.sp_background.value())
+        parts = []
+        for row, fp in enumerate(self.desc["footprints"]):
+            if self.tbl_parts.item(row, 0).checkState() != Qt.Checked:
+                continue
+            name = self.tbl_parts.cellWidget(row, 4).currentData()
+            package = package_new(name, fp["reference"])
+            package["theta_top"] = max(1e-3, self._number(row, 6, package["theta_top"]))
+            package["theta_board"] = max(1e-3, self._number(row, 7, package["theta_board"]))
+            package["tj_max"] = self._number(row, 8, package["tj_max"])
+            package["side"] = fp["side"]
+            entry = PACKAGES[name]
+            length, width, height = entry[:3]
+            pads_w, pads_h = fp["pads_size"]
+            if name == "Custom block":
+                length, width = max(pads_w, 1.0), max(pads_h, 1.0)
+            elif (length >= width) != (pads_w >= pads_h):     # along the pads' long side
+                length, width = width, length
+            x, y = place(fp["pads_centre"])
+            angle = fp["angle"] if fp["side"] == "top" else -fp["angle"]
+            parts.append((fp["reference"] or name, package, max(0.0, self._number(row, 5, 0.0)),
+                          x, y, angle, (length, width, height)))
+        self._values = (pcb, parts, messages)
+        return self._values
+
+
+class PackageDialog(QDialog):
+    """Place a component package (two-resistor model) by hand."""
+
+    def __init__(self, parent, name):
+        super().__init__(parent)
+        self.setWindowTitle("Component package")
+        form = QFormLayout(self)
+        self.ed_name = QLineEdit(name)
+        form.addRow("Name:", self.ed_name)
+        self.cb_type = QComboBox()
+        for package in PACKAGES:
+            self.cb_type.addItem(package, package)
+        self.cb_type.currentIndexChanged.connect(self._type_changed)
+        form.addRow("Package:", self.cb_type)
+        self.sp_power = _spin(0.0, 10000.0, " W", 0.1)
+        self.sp_power.setValue(1.0)
+        form.addRow("Power:", self.sp_power)
+        self.sp_top = _spin(0.001, 10000.0, " K/W", 1.0, decimals=2)
+        form.addRow("θ junction → top:", self.sp_top)
+        self.sp_board = _spin(0.001, 10000.0, " K/W", 1.0, decimals=2)
+        form.addRow("θ junction → board:", self.sp_board)
+        self.sp_tj = _spin(-50.0, 400.0, " °C", 5.0, decimals=0)
+        form.addRow("Tj max:", self.sp_tj)
+        self.cb_side = QComboBox()
+        self.cb_side.addItem("On the top of the board", "top")
+        self.cb_side.addItem("Under the board", "bottom")
+        form.addRow("Side:", self.cb_side)
+        form.addRow(_hint("Placed on the selected board (else at the origin); move it with the "
+                          "arrows. Typical θ values are filled in — datasheet values are better."))
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.cb_type.setCurrentIndex(max(0, self.cb_type.findData("DPAK (TO-252)")))
+        self._type_changed()
+
+    def _type_changed(self, *_args):
+        entry = PACKAGES[self.cb_type.currentData()]
+        self.sp_top.setValue(entry[3])
+        self.sp_board.setValue(entry[4])
+        self.sp_tj.setValue(entry[5])
+
+    def values(self):
+        package = package_new(self.cb_type.currentData(), self.ed_name.text().strip())
+        package.update(theta_top=self.sp_top.value(), theta_board=self.sp_board.value(),
+                       tj_max=self.sp_tj.value(), side=self.cb_side.currentData())
+        return self.ed_name.text().strip() or package["type"], package, self.sp_power.value()
+
+
 _VIEWS = (("view_isometric.png", "Isometric", -54.735610317245346, -135.0),
           ("view_top.png", "Top (XY)", 0.0, 0.0),
           ("view_front.png", "Front (XZ)", -90.0, 0.0),
@@ -7452,6 +11372,8 @@ class ThermalDialog(QDialog):
         self.import_menu.addSeparator()
         self.import_menu.addAction("Assembly of the open project", self._import_project_assembly)
         self.import_menu.addAction("Parts of the open project…", self._import_project_parts)
+        self.import_menu.addSeparator()
+        self.import_menu.addAction("PCB (KiCad board or Gerber files)…", self._import_pcb)
         self.act_import = action(
             "import.png", "Import", "Import — STEP, STL or OBJ files, a SimpleCAD project, an "
             "assembly, or parts of the open project", lambda: None)
@@ -7498,6 +11420,7 @@ class ThermalDialog(QDialog):
         self.heat_menu.addAction("Block…", lambda: self._add_heat_source("block"))
         self.heat_menu.addAction("Cylinder…", lambda: self._add_heat_source("cylinder"))
         self.heat_menu.addAction("Extrusion on a face…", self._start_extrusion)
+        self.heat_menu.addAction("Component package (junction model)…", self._add_package)
         self.heat_menu.addSeparator()
         self.heat_menu.addAction("Power of the selected body…", self._focus_power)
         self.act_heat = action(
@@ -7511,8 +11434,8 @@ class ThermalDialog(QDialog):
             self.condition_menu.addAction(f"{title}…", lambda k=kind: self._add_condition(k))
         self.act_condition = action(
             "heat_convection.png", "Face Condition",
-            "Face Condition — fixed temperature, heat flux, own convection or insulation on faces "
-            "you click in the view", lambda: None)
+            "Face Condition — fixed temperature, heat flux, own convection, insulation, a coolant "
+            "channel or a liquid bath on faces you click in the view", lambda: None)
         self.act_condition.setMenu(self.condition_menu)
         self.contact_menu = QMenu("&Contacts", self)
         self.contact_menu.setIcon(_icon("fit_together.png"))
@@ -7752,6 +11675,36 @@ class ThermalDialog(QDialog):
         self.thermostat_body = ThermostatEditor(label_width, value_width)
         self.thermostat_body.changed.connect(self._on_body_thermostat_changed)
         body_add(self.thermostat_body, span=True)
+        # a component package: the junction between the package top and the board
+        self.w_package = QWidget()
+        package_grid = QGridLayout(self.w_package)
+        package_grid.setContentsMargins(0, 0, 0, 0)
+        package_grid.setColumnMinimumWidth(0, label_width)
+        self.lbl_package = value_label()
+        self.sp_theta_top = _spin(0.001, 10000.0, " K/W", 1.0, decimals=2)
+        self.sp_theta_top.setToolTip("Junction to the top of the package (θJC top)")
+        self.sp_theta_board = _spin(0.001, 10000.0, " K/W", 0.5, decimals=2)
+        self.sp_theta_board.setToolTip("Junction to the board below (θJB, or θJC of an exposed pad "
+                                       "or tab soldered to the board)")
+        self.sp_tj_max = _spin(-50.0, 400.0, " °C", 5.0, decimals=0)
+        for r, (caption, widget) in enumerate((("Package:", self.lbl_package),
+                                               ("θ to top:", self.sp_theta_top),
+                                               ("θ to board:", self.sp_theta_board),
+                                               ("Tj max:", self.sp_tj_max))):
+            label = QLabel(caption)
+            label.setFixedWidth(label_width)
+            package_grid.addWidget(label, r, 0)
+            package_grid.addWidget(widget, r, 1, Qt.AlignLeft)
+        package_hint = _hint("The power above goes in at the junction (two-resistor model); the "
+                             "results give the junction temperature.")
+        package_hint.setFixedWidth(span_width)
+        package_grid.addWidget(package_hint, 4, 0, 1, 2)
+        for spin in (self.sp_theta_top, self.sp_theta_board, self.sp_tj_max):
+            spin.valueChanged.connect(self._on_package_edited)
+        body_add(self.w_package, span=True)
+        self.lbl_board = _hint("")
+        self.lbl_board.setFixedWidth(span_width)
+        body_add(self.lbl_board, span=True)
         self.chk_emissivity = QCheckBox("Own surface emissivity")
         self.chk_emissivity.setToolTip("e.g. 0.8 for anodised or painted metal; unticked = the "
                                        "material's value")
@@ -7827,6 +11780,65 @@ class ThermalDialog(QDialog):
         put_row(self.chk_condition_fluid, span=True)
         self._condition_rows["convection"] += [self.chk_condition_fluid, self.sp_condition_fluid,
                                                put_row(self.sp_condition_fluid, "Air:")]
+        # coolant channel and liquid bath
+        def combo(items):
+            box = QComboBox()
+            for key, title in items:
+                box.addItem(title, key)
+            box.setFixedWidth(value_width)
+            return box
+        self.cb_liquid_fluid = combo([(name, name) for name in FLUIDS])
+        self.cb_bath_mode = combo(list(BATH_MODES.items()))
+        self.cb_liquid_model = combo(list(LIQUID_MODELS.items()))
+        self.cb_liquid_model.setToolTip(
+            "Correlations: heat transfer from pipe-flow / natural-convection formulas (fast, both "
+            "solvers).\nLiquid flow solved: in Airflow mode the liquid itself is simulated (needs "
+            "about 4 or more cells across the channel).")
+        self.cb_flow_mode = combo([("fixed", "Fixed flow rate"), ("pump", "Pump curve")])
+        self.sp_flow_lpm = _spin(0.0, 1000.0, " L/min", 0.1, decimals=3)
+        self.sp_pump_max_lpm = _spin(0.001, 1000.0, " L/min", 0.5, decimals=2)
+        self.sp_pump_max_lpm.setToolTip("Flow of the pump without any resistance")
+        self.sp_pump_max_kpa = _spin(0.0, 10000.0, " kPa", 1.0, decimals=1)
+        self.sp_pump_max_kpa.setToolTip("Pressure of the pump at zero flow")
+        self.cb_inlet_from = QComboBox()
+        self.cb_inlet_from.setFixedWidth(value_width)
+        self.cb_inlet_from.setToolTip("The liquid comes in at its own temperature, or from the "
+                                      "outlet of another coolant channel (channels in series)")
+        self.sp_inlet_c = _spin(-50.0, 200.0, " °C", 1.0, decimals=1)
+        self.chk_reverse = QCheckBox("Liquid enters at the other end")
+        self.lbl_channel = value_label()
+        self.lbl_channel.setWordWrap(True)
+        self.lbl_channel.setFixedWidth(value_width)
+        self.chk_fill_auto = QCheckBox("Fill level at the top of the picked faces")
+        self.sp_fill_z = _spin(-1e5, 1e5, " mm", 1.0, decimals=2, prefix="Z ")
+        self.sp_bath_c = _spin(-50.0, 300.0, " °C", 1.0, decimals=1)
+        self.chk_bath_start_auto = QCheckBox("Liquid starts at the run's start temperature")
+        self.chk_evaporation = QCheckBox("Open surface loses heat by evaporation")
+        self._condition_rows["liquid"] = [self.cb_liquid_fluid, put_row(self.cb_liquid_fluid, "Liquid:")]
+        self._condition_rows["bath"] = [self.cb_bath_mode, put_row(self.cb_bath_mode, "Volume:")]
+        self._cap_liquid_model = put_row(self.cb_liquid_model, "Model:")
+        self._condition_rows["liquid"] += [self.cb_liquid_model, self._cap_liquid_model]
+        self._cap_flow_mode = put_row(self.cb_flow_mode, "Flow:")
+        self._cap_flow_lpm = put_row(self.sp_flow_lpm, "Flow rate:")
+        self._cap_pump_lpm = put_row(self.sp_pump_max_lpm, "Free flow:")
+        self._cap_pump_kpa = put_row(self.sp_pump_max_kpa, "Shut-off:")
+        self._cap_inlet_from = put_row(self.cb_inlet_from, "Inlet:")
+        self._cap_inlet_c = put_row(self.sp_inlet_c, "Inlet at:")
+        put_row(self.chk_reverse, span=True)
+        self._cap_channel = put_row(self.lbl_channel, "Channel:")
+        self._condition_rows["coolant"] = [
+            self.cb_flow_mode, self._cap_flow_mode, self.sp_flow_lpm, self._cap_flow_lpm,
+            self.sp_pump_max_lpm, self._cap_pump_lpm, self.sp_pump_max_kpa, self._cap_pump_kpa,
+            self.cb_inlet_from, self._cap_inlet_from, self.sp_inlet_c, self._cap_inlet_c,
+            self.chk_reverse, self.lbl_channel, self._cap_channel]
+        put_row(self.chk_fill_auto, span=True)
+        self._cap_fill_z = put_row(self.sp_fill_z, "Fill level:")
+        self._cap_bath_c = put_row(self.sp_bath_c, "Liquid at:")
+        put_row(self.chk_bath_start_auto, span=True)
+        put_row(self.chk_evaporation, span=True)
+        self._condition_rows["bath"] += [self.chk_fill_auto, self.sp_fill_z, self._cap_fill_z,
+                                         self.sp_bath_c, self._cap_bath_c, self.chk_bath_start_auto,
+                                         self.chk_evaporation]
         self.lbl_condition_hint = _hint("")
         self.lbl_condition_hint.setFixedWidth(span_width)
         put_row(self.lbl_condition_hint, span=True)
@@ -7853,8 +11865,16 @@ class ThermalDialog(QDialog):
         self.cb_flux_mode.currentIndexChanged.connect(self._on_condition_edited)
         self.chk_condition_fluid.toggled.connect(self._on_condition_edited)
         for spin in (self.sp_condition_temperature, self.sp_condition_power, self.sp_condition_flux,
-                     self.sp_condition_h, self.sp_condition_fluid):
+                     self.sp_condition_h, self.sp_condition_fluid, self.sp_flow_lpm,
+                     self.sp_pump_max_lpm, self.sp_pump_max_kpa, self.sp_inlet_c, self.sp_fill_z,
+                     self.sp_bath_c):
             spin.valueChanged.connect(self._on_condition_edited)
+        for box in (self.cb_liquid_fluid, self.cb_bath_mode, self.cb_liquid_model, self.cb_flow_mode,
+                    self.cb_inlet_from):
+            box.currentIndexChanged.connect(self._on_condition_edited)
+        for check in (self.chk_reverse, self.chk_fill_auto, self.chk_bath_start_auto,
+                      self.chk_evaporation):
+            check.toggled.connect(self._on_condition_edited)
 
         # probe page
         probe_page, put_row, finish = page_form()
@@ -8495,7 +12515,9 @@ class ThermalDialog(QDialog):
 
     def _update_title(self):
         path = self._window._thermal_file
-        name = os.path.basename(path) if path else THERMAL_DEFAULT_NAME
+        entry = self._bound_entry()             # its entry in the Objects explorer, else the file
+        name = entry["name"] if entry is not None else \
+            os.path.basename(path) if path else THERMAL_DEFAULT_NAME
         self.setWindowTitle(f"Thermal — {name}" + (" *" if self.has_unsaved_changes() else ""))
 
     def has_unsaved_changes(self):
@@ -8588,6 +12610,12 @@ class ThermalDialog(QDialog):
                     del self._history[0]
                     self._history_index -= 1
             self._update_history_actions()
+            # a study that is not a file of its own appears in the Objects explorer as soon
+            # as it has parts (any import, heat source or block), like an Assembly
+            if self.study["components"] and not self._window._thermal_file:
+                note = self._keep_in_project()
+                if note:
+                    self._set_status(self.status.text() + note)
         self._update_title()
         self._update_estimate()
 
@@ -8699,6 +12727,19 @@ class ThermalDialog(QDialog):
                 if entry is not None:
                     overlays.append((entry, ref["face"], color, strong))
         self.view.face_overlays = overlays
+        arrows = []
+        for index, condition in enumerate(self.study["conditions"]):
+            if condition["kind"] != "coolant" or not condition["faces"] or \
+                    (not condition.get("enabled", True) and index != self._selected_condition):
+                continue
+            geometry = self._channel_geometry(condition)
+            if geometry is None:
+                continue
+            length = max(3.0 * geometry["dh_mm"], 8.0)
+            arrows.append((geometry["inlet"] - geometry["inlet_dir"] * length, geometry["inlet_dir"],
+                           length, f"{condition['name']}: in"))
+            arrows.append((geometry["outlet"], geometry["outlet_dir"], length, "out"))
+        self.view.channel_arrows = arrows
         markers = []
         values = self._probe_frame_values()
         for index, probe in enumerate(self.study["probes"]):
@@ -8781,10 +12822,9 @@ class ThermalDialog(QDialog):
         self._loading = True
         try:
             self.tree.clear()
-            root_item = QTreeWidgetItem([self.study["name"]])
-            font = root_item.font(0); font.setBold(True); root_item.setFont(0, font)
-            root_item.setIcon(0, _icon("thermal_sim.png"))
-            self.tree.addTopLevelItem(root_item)
+            # the parts are the top-level rows (no study-name row above them, as in the
+            # Assembly window; the name is in the window title)
+            root_item = self.tree.invisibleRootItem()
             selected_item = None
             heat_icon = _icon("heat_source_extrusion.png")
             flow_icon = _icon("air_flow_on.png")
@@ -8910,6 +12950,14 @@ class ThermalDialog(QDialog):
                  ("" if not c.get("thermostat") else ", " + thermostat_text(c["thermostat"], short=True)),
                  "convection": lambda c: f"h {c['h']:g}" + ("" if c["fluid_ambient"]
                                                            else f", air {c['fluid_c']:g} °C"),
+                 "coolant": lambda c: f"{c['fluid']}, " + (
+                     f"{c['flow_lpm']:g} L/min" if c["flow_mode"] == "fixed" else "pump") +
+                 f", in {c['inlet_from'] or format(c['inlet_c'], 'g') + ' °C'}" +
+                 (", flow solved" if c["liquid_model"] == "flow" else ""),
+                 "bath": lambda c: f"{c['fluid']}, " + (
+                     f"{c['bath_c']:g} °C" if c["bath_mode"] == "fixed" else
+                     "fills to the faces" if c["fill_auto"] else f"fill to Z {c['fill_z']:g} mm") +
+                 (", flow solved" if c["liquid_model"] == "flow" and c["bath_mode"] != "fixed" else ""),
                  "insulated": lambda c: ""}[kind](condition)
         count = len(condition["faces"])
         return (f"{condition['name']}   [{CONDITION_KINDS[kind][0]}" + (f", {value}" if value else "")
@@ -9079,8 +13127,8 @@ class ThermalDialog(QDialog):
                         if found is not None:
                             return found
                     return None
-                root_item = self.tree.topLevelItem(0)
-                item = find(root_item) if root_item is not None and component is not None else None
+                root_item = self.tree.invisibleRootItem()
+                item = find(root_item) if component is not None else None
                 if item is not None:
                     self.tree.setCurrentItem(item)
             finally:
@@ -9173,6 +13221,8 @@ class ThermalDialog(QDialog):
             for widget in (self.cb_material, self.sp_power, self.chk_emissivity, self.profile_body,
                            self.thermostat_body):
                 widget.setEnabled(body is not None)
+            self.w_package.setVisible(False)
+            self.lbl_board.setVisible(False)
             if body is None or flow_item:
                 self.lbl_body.setText("Select a body of the part" if component is not None else "—")
                 self.cb_material.setCurrentIndex(0)
@@ -9209,6 +13259,21 @@ class ThermalDialog(QDialog):
                                        f"{volume / 1000.0:.4g} cm³")
             else:
                 self.lbl_power.setText("No heat source" if power <= 0 else "")
+            package = component.get("package") if component is not None else None
+            self.w_package.setVisible(package is not None)
+            if package is not None:
+                self.lbl_package.setText(package["type"] + ("  (under the board)"
+                                                            if package.get("side") == "bottom" else ""))
+                self.sp_theta_top.setValue(package["theta_top"])
+                self.sp_theta_board.setValue(package["theta_board"])
+                self.sp_tj_max.setValue(package["tj_max"])
+                self.lbl_power.setText("Power at the junction" if power > 0 else "No power")
+            pcb = component.get("pcb") if component is not None else None
+            self.lbl_board.setVisible(pcb is not None)
+            if pcb is not None:
+                self.lbl_board.setText("Board: " + pcb_summary(pcb) + ". Its conductivity follows the "
+                                       "copper of every layer and the plated holes; the power is "
+                                       "the heat of the parts not placed.")
             own = body.get("emissivity") is not None
             self.chk_emissivity.setChecked(own)
             self.sp_emissivity.setEnabled(own)
@@ -9217,6 +13282,61 @@ class ThermalDialog(QDialog):
                                         props["emissivity"] if props else 0.9)
         finally:
             self._loading = False
+
+    def _on_package_edited(self, *_args):
+        component = self._selected
+        if self._loading or component is None or component.get("package") is None:
+            return
+        component["package"].update(theta_top=float(self.sp_theta_top.value()),
+                                    theta_board=float(self.sp_theta_board.value()),
+                                    tj_max=float(self.sp_tj_max.value()))
+        self._changed()
+
+    def _import_pcb(self):
+        if self._worker is not None:
+            return
+        dialog = PcbImportDialog(self, self._start_directory())
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        pcb, parts, messages = dialog.values()
+        name = os.path.splitext(pcb.get("source") or "PCB")[0] or "PCB"
+        board = study_add_pcb(self.study, pcb, name)
+        top, bottom = pcb["thickness_mm"], 0.0
+        added = [board]
+        for reference, package, power, x, y, angle, size in parts:
+            added.append(study_add_package(self.study, package, reference, x, y, top, bottom, power,
+                                           size, angle))
+        self._added(added[:1], f"Imported the board {pcb_summary(pcb)}" +
+                    (f" and {len(parts)} component{'s' if len(parts) != 1 else ''}" if parts else ""))
+        self._after_components_changed(select=board)
+        self.view.fit_all()
+        for message in messages:
+            self._append_note(message)
+
+    def _add_package(self):
+        if self._worker is not None:
+            return
+        number = 1 + sum(1 for c in self.study["components"] if c.get("package") is not None)
+        dialog = PackageDialog(self, f"U{number}")
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        name, package, power = dialog.values()
+        board = self._selected if self._selected is not None and self._selected.get("pcb") else \
+            next((c for c in self.study["components"] if c.get("pcb") is not None), None)
+        if board is not None:
+            box = cad.assembly_bounds(board)
+            x, y = (box[0][0] + box[1][0]) / 2, (box[0][1] + box[1][1]) / 2
+            top, bottom = box[1][2], box[0][2]
+        else:
+            x = y = top = bottom = 0.0
+        component = study_add_package(self.study, package, name, x, y, top, bottom, power)
+        self._after_components_changed(select=component)
+        self._set_status(f"Placed {component['name']} ({package_text(package)}, {power:g} W) — move it "
+                         "with the arrows or the position fields")
+
+    def _append_note(self, text):
+        notes = self.txt_messages.toPlainText().strip()
+        self.txt_messages.setPlainText((notes + "\n" if notes else "") + text)
 
     def _on_placement_edited(self, _value=None):
         component = self._selected
@@ -9864,6 +13984,8 @@ class ThermalDialog(QDialog):
         condition = condition_new(kind, f"{title} {number}")
         condition["temperature_c"] = float(self.study["settings"]["ambient_c"])
         condition["fluid_c"] = float(self.study["settings"]["ambient_c"])
+        condition["inlet_c"] = float(self.study["settings"]["ambient_c"])
+        condition["bath_c"] = float(self.study["settings"]["ambient_c"])
         self.study["conditions"].append(condition)
         self._select_condition(len(self.study["conditions"]) - 1)
         self._changed()
@@ -9891,7 +14013,10 @@ class ThermalDialog(QDialog):
             for rows_kind, widgets in self._condition_rows.items():
                 for widget in widgets:
                     if widget is not None:
-                        widget.setVisible(rows_kind == kind)
+                        widget.setVisible(rows_kind == kind or
+                                          (rows_kind == "liquid" and kind in LIQUID_KINDS))
+            if kind in LIQUID_KINDS:
+                self._show_liquid(condition)
             if kind == "flux":
                 total = condition["flux_mode"] == "total"
                 for widget in (self.sp_condition_power,
@@ -9940,10 +14065,106 @@ class ThermalDialog(QDialog):
         if condition["kind"] == "flux":
             condition["profile"] = self.profile_condition.profile()
             condition["thermostat"] = self.thermostat_condition.thermostat()
+        if condition["kind"] in LIQUID_KINDS:
+            condition["fluid"] = self.cb_liquid_fluid.currentData()
+            condition["liquid_model"] = self.cb_liquid_model.currentData()
+            if condition["kind"] == "coolant":
+                condition["flow_mode"] = self.cb_flow_mode.currentData()
+                condition["flow_lpm"] = float(self.sp_flow_lpm.value())
+                condition["pump_max_lpm"] = float(self.sp_pump_max_lpm.value())
+                condition["pump_max_kpa"] = float(self.sp_pump_max_kpa.value())
+                condition["inlet_from"] = self.cb_inlet_from.currentData() or ""
+                condition["inlet_c"] = float(self.sp_inlet_c.value())
+                condition["reverse"] = self.chk_reverse.isChecked()
+            else:
+                condition["bath_mode"] = self.cb_bath_mode.currentData()
+                condition["fill_auto"] = self.chk_fill_auto.isChecked()
+                condition["fill_z"] = float(self.sp_fill_z.value())
+                condition["bath_c"] = float(self.sp_bath_c.value())
+                condition["bath_start_auto"] = self.chk_bath_start_auto.isChecked()
+                condition["evaporation"] = self.chk_evaporation.isChecked()
         self._show_condition()
         self._rebuild_tree()
         self._refresh_overlays()
         self._changed()
+
+    def _channel_geometry(self, condition):
+        """Shape of a coolant channel from its picked faces (cached), or None."""
+        cache = self.__dict__.setdefault("_channel_cache", {})
+        components = {c["name"]: c for c in self.study["components"]}
+        used = sorted({ref["component"] for ref in condition["faces"]})
+        key = repr(([(r["component"], r["body"], r["face"]) for r in condition["faces"]],
+                    bool(condition.get("reverse")),
+                    [(name, components[name].get("position"), components[name].get("rotation"),
+                      components[name].get("pivot")) for name in used if name in components]))
+        if key not in cache:
+            if len(cache) > 32:
+                cache.clear()
+            try:
+                tris = condition_world_triangles(self.study, condition)
+                cache[key] = channel_geometry(tris, condition.get("reverse", False)) if len(tris) else None
+            except Exception as ex:                       # odd faces: say so in the panel
+                cache[key] = str(ex)
+        value = cache[key]
+        return value if isinstance(value, dict) else None
+
+    def _show_liquid(self, condition):
+        """The coolant / bath rows of the condition page (inside _show_condition)."""
+        kind = condition["kind"]
+        self.cb_liquid_fluid.setCurrentIndex(max(0, self.cb_liquid_fluid.findData(condition["fluid"])))
+        self.cb_liquid_model.setCurrentIndex(max(0, self.cb_liquid_model.findData(condition["liquid_model"])))
+        if kind == "coolant":
+            pump = condition["flow_mode"] == "pump"
+            self.cb_flow_mode.setCurrentIndex(1 if pump else 0)
+            self.sp_flow_lpm.setValue(condition["flow_lpm"])
+            self.sp_pump_max_lpm.setValue(condition["pump_max_lpm"])
+            self.sp_pump_max_kpa.setValue(condition["pump_max_kpa"])
+            for widget in (self.sp_flow_lpm, self._cap_flow_lpm):
+                widget.setVisible(not pump)
+            for widget in (self.sp_pump_max_lpm, self._cap_pump_lpm, self.sp_pump_max_kpa,
+                           self._cap_pump_kpa):
+                widget.setVisible(pump)
+            self.cb_inlet_from.clear()
+            self.cb_inlet_from.addItem("Own temperature", "")
+            for other in self.study["conditions"]:
+                if other is not condition and other["kind"] == "coolant":
+                    self.cb_inlet_from.addItem(f"Outlet of '{other['name']}'", other["name"])
+            self.cb_inlet_from.setCurrentIndex(max(0, self.cb_inlet_from.findData(condition["inlet_from"])))
+            self.sp_inlet_c.setValue(condition["inlet_c"])
+            for widget in (self.sp_inlet_c, self._cap_inlet_c):
+                widget.setVisible(not condition["inlet_from"])
+            self.chk_reverse.setChecked(condition["reverse"])
+            if not condition["faces"]:
+                self.lbl_channel.setText("pick the inner faces of the channel")
+            else:
+                geometry = self._channel_geometry(condition)
+                if geometry is None:
+                    cache = self.__dict__.get("_channel_cache", {})
+                    problem = next((v for v in cache.values() if isinstance(v, str)), "")
+                    self.lbl_channel.setText(problem or "the faces do not form a channel")
+                else:
+                    inlet = geometry["inlet"]
+                    self.lbl_channel.setText(f"{channel_text(geometry)}; inlet at ({inlet[0]:.1f}, "
+                                             f"{inlet[1]:.1f}, {inlet[2]:.1f}) mm")
+        else:
+            container = condition["bath_mode"] == "container"
+            self.cb_bath_mode.setCurrentIndex(0 if container else 1)
+            for widget in (self.cb_liquid_model, self._cap_liquid_model, self.chk_fill_auto,
+                           self.sp_fill_z, self._cap_fill_z, self.chk_bath_start_auto,
+                           self.chk_evaporation):
+                widget.setVisible(container)
+            self.chk_fill_auto.setChecked(condition["fill_auto"])
+            top = condition_world_triangles(self.study, condition)
+            self.sp_fill_z.setValue(float(top[:, :, 2].max()) if condition["fill_auto"] and len(top)
+                                    else condition["fill_z"])
+            self.sp_fill_z.setEnabled(not condition["fill_auto"])
+            self.chk_bath_start_auto.setChecked(condition["bath_start_auto"])
+            self.chk_evaporation.setChecked(condition["evaporation"])
+            self.sp_bath_c.setValue(condition["bath_c"])
+            self._cap_bath_c.setText("Liquid at:" if not container else "Starts at:")
+            show_temperature = not container or not condition["bath_start_auto"]
+            for widget in (self.sp_bath_c, self._cap_bath_c):
+                widget.setVisible(show_temperature)
 
     def _clear_condition_faces(self):
         condition = self._condition()
@@ -10125,6 +14346,10 @@ class ThermalDialog(QDialog):
                     if thermostat and thermostat["sensor"] == "probe" and \
                             thermostat["probe"] == item["name"]:
                         thermostat["probe"] = name
+            if items is self.study["conditions"]:       # channels fed by this one follow
+                for other in self.study["conditions"]:
+                    if other.get("inlet_from") == item["name"]:
+                        other["inlet_from"] = name
             item["name"] = name
             self._rebuild_tree()
             self._show_properties()
@@ -10318,7 +14543,9 @@ class ThermalDialog(QDialog):
         self._show_properties()
         self._changed()
 
-    def _added(self, components, text):
+    def _added(self, components, text, keep=False):
+        """keep: parts of the open project were added - the study is kept in the project (a
+        "Thermal" item of the Objects explorer, _keep_in_project)."""
         if not components:
             return
         self._after_components_changed(select=components[-1])
@@ -10327,6 +14554,8 @@ class ThermalDialog(QDialog):
                       if not body.get("material") and not body.get("fused"))
         if missing:
             text += f" — {missing} bod{'y needs' if missing == 1 else 'ies need'} a material (⚠)"
+        if keep:
+            text += self._keep_in_project()
         self._set_status(text)
 
     @staticmethod
@@ -10398,7 +14627,7 @@ class ThermalDialog(QDialog):
                             labels)
         added = [self._to_thermal(cad.assembly_add_project_component(self.study, roots[row], objects),
                                   f"Project object {roots[row]['name']}") for row in rows]
-        self._added(added, f"Added {', '.join(c['name'] for c in added)}")
+        self._added(added, f"Added {', '.join(c['name'] for c in added)}", keep=True)
 
     def _import_project_assembly(self):
         assembly = getattr(self._window, "_assembly", None)
@@ -10406,7 +14635,8 @@ class ThermalDialog(QDialog):
             QMessageBox.information(self, "Assembly of the open project",
                                     "The open project has no assembly yet (Assembly window).")
             return
-        self._import_assembly(assembly, "of the project", objects=self._window.state["objects"])
+        self._import_assembly(assembly, "of the project", objects=self._window.state["objects"],
+                              keep=True)
 
     def _import_assembly_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -10424,7 +14654,7 @@ class ThermalDialog(QDialog):
             return
         self._import_assembly(assembly, os.path.basename(path), objects=self._window.state["objects"])
 
-    def _import_assembly(self, assembly, label, objects=None):
+    def _import_assembly(self, assembly, label, objects=None, keep=False):
         """Every assembly component becomes a study part at its assembly placement, with the
         component's own source (project object or file). Bodies without a stored material take
         it from the project object of the same name."""
@@ -10456,7 +14686,8 @@ class ThermalDialog(QDialog):
                     component[key] = copy.deepcopy(item[key])
             self.study["components"].append(component)
             added.append(component)
-        self._added(added, f"Imported {len(added)} assembly part{'s' if len(added) != 1 else ''}")
+        self._added(added, f"Imported {len(added)} assembly part{'s' if len(added) != 1 else ''}",
+                    keep=keep)
 
     def _add_heat_source(self, kind):
         anchor = None
@@ -10609,7 +14840,41 @@ class ThermalDialog(QDialog):
             self._changed()
 
     # ── files ─────────────────────────────────────────────────────────────────
+    def _bound_entry(self):
+        """The "Thermal" entry of the Objects explorer this study is kept in, or None."""
+        finder = getattr(self._window, "_bound_thermal_entry", None)
+        return finder() if finder is not None else None
+
+    def _keep_in_project(self):
+        """The study is kept in the project: it gets a "Thermal" item of its own in the Objects
+        explorer (like an Assembly). Called when parts of the open project are imported (also
+        into a study opened from a file - Save then stores it in the item, Save As still
+        writes files) and when a study without a file gets its first parts. Returns the status
+        note."""
+        if self._bound_entry() is not None or \
+                getattr(self._window, "_create_thermal_entry", None) is None:
+            return ""
+        entry = self._window._create_thermal_entry(study_to_data(self.study))
+        self._mark_saved()
+        return f" — stored as {entry['name']} in the Objects explorer"
+
     def _save(self, save_as=False):
+        """Save: a study kept in a "Thermal" entry of the Objects explorer is stored there
+        (written to disk with the project); otherwise in its .thermal file (the first time a
+        file dialog asks for it). Save As always writes a file (and keeps the entry up to
+        date)."""
+        entry = self._bound_entry()
+        if entry is None and not save_as and self._window._thermal_file:
+            # opened from a file: Save keeps it in the open project (a "Thermal" item);
+            # Save As still writes files
+            self._keep_in_project()
+            entry = self._bound_entry()
+        if entry is not None and not save_as:
+            self._window._store_thermal_in_entry(entry, study_to_data(self.study))
+            self._mark_saved()
+            self._set_status(f"Thermal study saved in {entry['name']} — it is written to disk "
+                             "with the project (File → Save)")
+            return True
         path = None if save_as else self._window._thermal_file
         if not path:
             start = self._window._thermal_file or os.path.join(
@@ -10620,12 +14885,18 @@ class ThermalDialog(QDialog):
                 return False
         if not path.lower().endswith(THERMAL_EXTENSION):
             path = os.path.splitext(path)[0] + THERMAL_EXTENSION
-        self.study["name"] = os.path.splitext(os.path.basename(path))[0]
+        if entry is None:
+            self.study["name"] = os.path.splitext(os.path.basename(path))[0]
         try:
             study_save_file(self.study, path)
         except (OSError, ValueError) as ex:
             QMessageBox.critical(self, "Save failed", f"Could not save\n{path}\n\n{ex}")
             return False
+        if entry is not None:                     # Save As of a kept study: the entry too
+            self._window._store_thermal_in_entry(entry, study_to_data(self.study))
+            self._mark_saved()
+            self._set_status(f"Thermal study written to {path} (and kept in {entry['name']})")
+            return True
         self._window._thermal_file = path
         self._rebuild_tree()
         self._mark_saved()
@@ -10647,6 +14918,7 @@ class ThermalDialog(QDialog):
         set_active_study(self.study)
         self._forget_sweep()
         self._window._thermal_file = None
+        self._window._thermal_entry = None      # a new study gets its own entry on import
         self._selected, self._selected_body = None, None
         self._selected_condition = self._selected_probe = self._selected_contact = None
         self._set_pick_mode(None)
@@ -10679,11 +14951,17 @@ class ThermalDialog(QDialog):
         except (OSError, ValueError, KeyError, TypeError) as ex:
             QMessageBox.critical(self, "Open failed", f"Could not open\n{path}\n\n{ex}")
             return
+        self._window._thermal_file = path
+        self._window._thermal_entry = None      # an opened file belongs to its file
+        self.load_study(loaded, f"Opened {path}")
+
+    def load_study(self, loaded, status=""):
+        """Show another study in this window (an opened file, or a "Thermal" entry of the
+        Objects explorer opened by double-click / Edit)."""
         self.study.clear()
         self.study.update(loaded)
         set_active_study(self.study)
         self._forget_sweep()
-        self._window._thermal_file = path
         self._selected, self._selected_body = None, None
         self._selected_condition = self._selected_probe = self._selected_contact = None
         self._set_pick_mode(None)
@@ -10699,7 +14977,8 @@ class ThermalDialog(QDialog):
         self._sync_section_ui()
         self._update_section()
         self.view.fit_all()
-        self._set_status(f"Opened {path}")
+        if status:
+            self._set_status(status)
 
     # ── simulation ────────────────────────────────────────────────────────────
     def _start_simulation(self):
@@ -11092,6 +15371,16 @@ class ThermalDialog(QDialog):
                           "Sensor °C at the end"]]
             rows += [[t["name"], number(t["setpoint"]), f"{t['share']:.4f}", t["switches"],
                       number(t["sensor"])] for t in result["thermostats"]]
+        if result.get("liquids"):
+            header, liquid = liquid_rows(result, number)
+            rows += [[], header] + liquid
+        if result.get("junctions"):
+            rows += [[], ["Junction of", "Package", "Power W", "Tj °C", "Highest Tj °C", "Tj max °C",
+                          "Package top °C", "Board below °C", "θ top K/W", "θ board K/W"]]
+            rows += [[j["name"], j["package"], number(j["power"]), number(j["t_j"]),
+                      number(j.get("peak", j["t_j"])), number(j["tj_max"]), number(j["t_top"]),
+                      number(j["t_board"]), number(j["theta_top"]), number(j["theta_board"])]
+                     for j in result["junctions"]]
         rows += [[], ["Summary"]] + [[line] for line in result["summary"]]
         if result["messages"]:
             rows += [[], ["Messages"]] + [[line] for line in result["messages"]]
@@ -11119,12 +15408,22 @@ class ThermalDialog(QDialog):
             if values is not None:
                 probes.append(np.interp(times, result["frame_times"], values))
                 header.append(f"Probe {probe['name']} °C")
+        outlets = series.get("coolant")
+        if outlets is not None:
+            header += [f"Coolant {name} outlet °C" for name in series.get("coolant_names", [])]
+        junctions = series.get("junctions")
+        if junctions is not None:
+            header += [f"Junction {name} °C" for name in series.get("junction_names", [])]
         rows = [header]
         for k, t in enumerate(times):
             row = [f"{t:.6g}", f"{series['power'][k]:.6g}"]
             row += [f"{series['max'][i, k]:.5g}" for i in range(len(result["bodies"]))]
             row += [f"{series['mean'][i, k]:.5g}" for i in range(len(result["bodies"]))]
             row += [f"{values[k]:.5g}" for values in probes]
+            if outlets is not None:
+                row += [f"{outlets[i, k]:.5g}" for i in range(len(outlets))]
+            if junctions is not None:
+                row += [f"{junctions[i, k]:.5g}" for i in range(len(junctions))]
             rows.append(row)
         try:
             write_csv(path, rows)
@@ -11310,6 +15609,22 @@ class ThermalDialog(QDialog):
                                  (["Highest °C"] if transient else []),
                                  [[name, part, c(end, 2)] + ([c(top, 2)] if transient else [])
                                   for name, part, end, top in probes], numeric_from=2))
+            if result.get("liquids"):
+                header, liquid = liquid_rows(
+                    result, lambda v: "" if v is None or not np.isfinite(v) else f"{v:.4g}")
+                out.append("<p><b>Coolant channels and liquid baths</b></p>")
+                out.append(table(header, liquid, numeric_from=3))
+            if result.get("junctions"):
+                out.append("<p><b>Component junctions</b> (two-resistor model)</p>")
+                rows_j = []
+                for j in result["junctions"]:
+                    peak = j.get("peak", j["t_j"])
+                    over = peak > j["tj_max"]
+                    rows_j.append([j["name"], j["package"], f"{j['power']:.3g}", c(j["t_j"]),
+                                   (c(peak), "hot" if over else ""), f"{j['tj_max']:g}",
+                                   ("over the limit" if over else "ok", "hot" if over else "")])
+                out.append(table(["Junction of", "Package", "W", "Tj °C", "Highest Tj °C", "Tj max °C",
+                                  "Status"], rows_j, numeric_from=2))
             out.append("<p><b>Summary of the run</b></p><p class='note'>" +
                        "<br>".join(esc(line) for line in result["summary"]) + "</p>")
             if result["messages"]:
@@ -11469,7 +15784,9 @@ class ThermalDialog(QDialog):
                 if column >= 2:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.tbl_results.setItem(row, column, item)
-            self.tbl_results.item(row, 0).setText(body["name"])
+            junction = next((j for j in result.get("junctions") or [] if j["name"] == body["name"]), None)
+            self.tbl_results.item(row, 0).setText(body["name"] + (
+                f"  — junction {junction['t_j']:.1f} °C" if junction is not None else ""))
             self.tbl_results.item(row, 1).setText(body["material"] or "")
             self.tbl_results.item(row, 2).setText(f"{body['power']:g}")
         self.tbl_results.blockSignals(False)

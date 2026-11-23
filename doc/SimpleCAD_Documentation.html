@@ -1,0 +1,995 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleCAD Documentation</title>
+<link rel="icon" href="../icons/cad_app_dark.png">
+<style>
+:root{
+  --bg:#f7f8fa; --panel:#ffffff; --text:#1d2330; --muted:#5b6475; --line:#dfe3ea;
+  --accent:#2f6fdb; --accent-soft:#e7efff; --code:#eef1f6; --note:#fff7e0; --note-line:#e9c45a;
+  --tip:#e8f7ee; --tip-line:#4caf72;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#16181d; --panel:#1e2128; --text:#e3e6ec; --muted:#9aa3b2; --line:#2e333d;
+    --accent:#6ea2ff; --accent-soft:#22304a; --code:#272b34; --note:#33301f; --note-line:#a68b32;
+    --tip:#1f3327; --tip-line:#3f9a62;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#16181d; --panel:#1e2128; --text:#e3e6ec; --muted:#9aa3b2; --line:#2e333d;
+  --accent:#6ea2ff; --accent-soft:#22304a; --code:#272b34; --note:#33301f; --note-line:#a68b32;
+  --tip:#1f3327; --tip-line:#3f9a62;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:15.5px/1.6 "Segoe UI",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+code,kbd{font-family:Consolas,"Cascadia Mono",Menlo,monospace;font-size:.9em}
+code{background:var(--code);padding:.1em .35em;border-radius:4px}
+kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px;
+  border-radius:4px;padding:.05em .4em;white-space:nowrap}
+pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto}
+pre code{background:none;padding:0}
+
+.layout{display:grid;grid-template-columns:270px minmax(0,1fr);min-height:100vh}
+nav{position:sticky;top:0;height:100vh;overflow-y:auto;background:var(--panel);
+  border-right:1px solid var(--line);padding:20px 16px 40px}
+nav .brand{display:flex;align-items:center;gap:10px;margin-bottom:18px}
+nav .brand img{width:36px;height:36px}
+nav .brand b{font-size:1.15em} nav .brand span{display:block;color:var(--muted);font-size:.8em}
+nav ol{list-style:none;margin:0;padding:0}
+nav li a{display:block;padding:4px 8px;border-radius:6px;color:var(--text);font-size:.93em}
+nav li a:hover{background:var(--accent-soft);text-decoration:none}
+nav li li a{padding-left:22px;color:var(--muted);font-size:.87em}
+nav .theme{margin-top:18px;width:100%;padding:6px;border:1px solid var(--line);
+  background:var(--bg);color:var(--text);border-radius:6px;cursor:pointer}
+
+main{padding:36px 48px 80px;max-width:1040px}
+header.hero h1{font-size:2.2em;margin:0 0 4px}
+header.hero p{color:var(--muted);margin:0 0 20px;font-size:1.05em}
+h2{font-size:1.55em;margin:56px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line);scroll-margin-top:16px}
+h3{font-size:1.18em;margin:30px 0 8px;scroll-margin-top:16px}
+h4{margin:20px 0 6px}
+figure{margin:18px 0}
+figure img{max-width:100%;border-radius:8px;border:1px solid var(--line);display:block}
+figcaption{color:var(--muted);font-size:.88em;margin-top:6px}
+
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:.94em}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}
+th{background:var(--accent-soft)}
+.table-wrap{overflow-x:auto}
+td img.ic{width:26px;height:26px;vertical-align:middle}
+
+.note,.tip{border-left:4px solid var(--note-line);background:var(--note);padding:10px 14px;border-radius:6px;margin:14px 0}
+.tip{border-color:var(--tip-line);background:var(--tip)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin:14px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card img{width:30px;height:30px;float:left;margin:0 10px 4px 0}
+.card b{display:block}
+.card span{color:var(--muted);font-size:.88em}
+ol.steps li{margin-bottom:6px}
+
+@media (max-width:860px){
+  .layout{grid-template-columns:1fr}
+  nav{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+  main{padding:24px 16px 60px}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav>
+  <div class="brand"><img src="../icons/cad_app_dark.png" alt=""><div><b>SimpleCAD</b><span>User documentation · v2.1b · Thermal 2.2</span></div></div>
+  <ol>
+    <li><a href="#intro">Introduction</a></li>
+    <li><a href="#install">Installation &amp; start</a></li>
+    <li><a href="#ui">User interface</a>
+      <ol><li><a href="#ui-3d">3-D view navigation</a></li><li><a href="#ui-selection">Selecting</a></li><li><a href="#ui-tree">Objects explorer</a></li><li><a href="#ui-props">Properties panel</a></li></ol></li>
+    <li><a href="#workflow">Basic workflow</a></li>
+    <li><a href="#sketcher">Sketcher</a>
+      <ol><li><a href="#sk-plane">Starting a sketch</a></li><li><a href="#sk-modes">Modes</a></li><li><a href="#sk-draw">Drawing tools</a></li><li><a href="#sk-edit">Editing geometry</a></li><li><a href="#sk-group">Groups &amp; arrays</a></li><li><a href="#sk-constraints">Constraints</a></li><li><a href="#sk-references">References &amp; Sketch Explorer</a></li><li><a href="#sk-finish">Accepting a sketch</a></li></ol></li>
+    <li><a href="#features">3-D features</a>
+      <ol><li><a href="#f-surface">Surface</a></li><li><a href="#f-cutsurface">Cut Surface</a></li><li><a href="#f-extrude">Extrusion</a></li><li><a href="#f-ring">Ring Extrusion</a></li><li><a href="#f-draft">Angle Extrusion</a></li><li><a href="#f-bridge">Bridge / Merge</a></li><li><a href="#f-chamfer">Chamfer &amp; Fillet</a></li><li><a href="#f-gear">Gear generator</a></li><li><a href="#f-thread">Thread generator</a></li><li><a href="#f-measure">Measure</a></li></ol></li>
+    <li><a href="#manage">Managing objects</a></li>
+    <li><a href="#io">Import &amp; export</a></li>
+    <li><a href="#drawing">Technical Drawing</a></li>
+    <li><a href="#assembly">Assembly</a></li>
+    <li><a href="#thermal">Thermal add-on</a>
+      <ol><li><a href="#th-window">Window layout</a></li><li><a href="#th-steps">Step by step</a></li><li><a href="#th-parts">Parts &amp; bodies</a></li><li><a href="#th-sources">Heat sources</a></li><li><a href="#th-profiles">Power profiles</a></li><li><a href="#th-thermostat">Thermostats</a></li><li><a href="#th-conditions">Face conditions</a></li><li><a href="#th-contacts">Contacts</a></li><li><a href="#th-airflow">Fans &amp; vents</a></li><li><a href="#th-liquid">Liquid cooling</a></li><li><a href="#th-pcb">PCB import &amp; packages</a></li><li><a href="#th-materials">Materials</a></li><li><a href="#th-settings">Simulation settings</a></li><li><a href="#th-solvers">How the solvers work</a></li><li><a href="#th-results">Results</a></li><li><a href="#th-sweep">Parameter sweep</a></li><li><a href="#th-export">Export</a></li><li><a href="#th-example">Example</a></li><li><a href="#th-trouble">Messages &amp; accuracy</a></li></ol></li>
+    <li><a href="#shortcuts">Keyboard &amp; mouse</a></li>
+    <li><a href="#settings">Settings &amp; troubleshooting</a></li>
+    <li><a href="#files">File formats</a></li>
+    <li><a href="#dev">Developer notes</a></li>
+  </ol>
+  <button class="theme" id="themeBtn" type="button">Toggle light / dark</button>
+</nav>
+
+<main>
+<header class="hero">
+  <h1>SimpleCAD</h1>
+  <p>An open-source, sketch-based 3-D construction tool with assembly, technical drawing and thermal simulation, focused on keeping things simple.</p>
+</header>
+
+<!-- ───────────────────────── Introduction ───────────────────────── -->
+<section id="intro">
+<h2>Introduction</h2>
+<p>SimpleCAD is a parametric construction tool written in Python (PyQt5 + OpenGL). Every object
+starts from a <b>sketch</b>. A sketch is extruded into a solid, and any face of that solid can carry another
+sketch. Because of this the object tree always shows how the parts depend on each other:</p>
+<pre><code>sketch01 → extrusion01 → sketch02 (on a face) → extrusion02 → …</code></pre>
+<p>All dimensions are in <b>millimetres</b>.</p>
+<figure><img src="scad_construction.png" alt="SimpleCAD main window with a 3-D construction"><figcaption>The main window: objects explorer (left), 3-D view, properties panel.</figcaption></figure>
+
+<h3>Feature overview</h3>
+<div class="cards">
+  <div class="card"><img src="../icons/sketch.png" alt=""><b>Sketcher</b><span>2-D drawing with constraints, SVG/DXF import, groups and arrays</span></div>
+  <div class="card"><img src="../icons/extrusion.png" alt=""><b>Extrusion</b><span>Add or remove material, from sketches or straight from faces</span></div>
+  <div class="card"><img src="../icons/ring_extrusion.png" alt=""><b>Ring Extrusion</b><span>Revolve a profile around an axis, optionally as a helix</span></div>
+  <div class="card"><img src="../icons/draft.png" alt=""><b>Angle Extrusion</b><span>Angled (drafted) shapes</span></div>
+  <div class="card"><img src="../icons/merge_extrusions.png" alt=""><b>Bridge</b><span>Connect faces of two bodies, e.g. flat to round</span></div>
+  <div class="card"><img src="../icons/chamfer.png" alt=""><b>Chamfer / Fillet</b><span>Edge features that follow tangent chains</span></div>
+  <div class="card"><img src="../icons/gear.png" alt=""><b>Gears</b><span>Spur, ring, planetary, bevel, helical, rack, pulley, worm …</span></div>
+  <div class="card"><img src="../icons/thread.png" alt=""><b>Threads</b><span>Metric / imperial standards or custom threads</span></div>
+  <div class="card"><img src="../icons/view_section.png" alt=""><b>Cut Surface</b><span>Clip a body at a plane to look inside</span></div>
+  <div class="card"><img src="../icons/measurement.png" alt=""><b>Measure</b><span>Edges, corners, distances, angles</span></div>
+  <div class="card"><img src="../icons/technical_drawing.png" alt=""><b>Technical Drawing</b><span>DIN/ISO drawings → PDF, SVG, DXF</span></div>
+  <div class="card"><img src="../icons/assembly.png" alt=""><b>Assembly</b><span>Place and align parts, STEP/STL/OBJ</span></div>
+  <div class="card"><img src="../icons/thermal_sim.png" alt=""><b>Thermal (add-on)</b><span>Heat conduction, airflow, liquid cooling, PCBs with junction temperatures</span></div>
+</div>
+</section>
+
+<!-- ───────────────────────── Installation ───────────────────────── -->
+<section id="install">
+<h2>Installation &amp; start</h2>
+<h3>Requirements</h3>
+<ul>
+  <li>Python 3.10 (developed on Windows; Linux is supported through <code>run.sh</code>)</li>
+  <li>PyQt5 5.15, numpy, PyOpenGL 3.1, qt-modern-style, ezdxf (DXF import), svgpathtools, manifold3d</li>
+  <li>CadQuery / OCP for STEP import and export</li>
+  <li>scipy, only for the optional Thermal add-on</li>
+</ul>
+<h3>Setting up with <code>build.py</code></h3>
+<pre><code>python build.py --venv        # create .venv and install all dependencies
+python build.py --exe         # build a single-file executable with PyInstaller
+python build.py --shortcut    # create a desktop shortcut / launcher with icon
+python build.py --platform linux --venv</code></pre>
+<p>If <code>simplecad_thermal.py</code> is in the same folder, <code>build.py</code> adds its extra dependencies and bundles it into the executable.</p>
+<h3>Starting</h3>
+<ul>
+  <li>Windows: <code>run.bat</code> (activates <code>.venv</code> and runs <code>SimpleCAD.py</code>)</li>
+  <li>Linux: <code>./run.sh</code></li>
+  <li>Manually: <code>python SimpleCAD.py</code></li>
+</ul>
+</section>
+
+<!-- ───────────────────────── UI ───────────────────────── -->
+<section id="ui">
+<h2>User interface</h2>
+<ul>
+  <li><b>Menu bar</b>: File, Edit, View, Help.</li>
+  <li><b>Toolbars</b>: the 1st row has Undo / Redo. The 2nd row has the modelling tools (New Sketch, Surface, Cut Surface, Extrude, Ring Extrusion, Angle Extrusion, Bridge, Chamfer, Fillet, Gear, Thread, Measure, Technical Drawing, Assembly, Thermal). In sketch mode the 2nd row switches to the sketch tools.</li>
+  <li><b>Objects explorer</b> (left dock): the object tree with visibility checkboxes.</li>
+  <li><b>Properties panel</b>: information about the selected object, plus colour, transparency, material and position.</li>
+  <li><b>Right-hand panels</b>: these depend on the tool, e.g. Sketch Status, the extrude settings, or Measurement.</li>
+  <li><b>Status bar</b>: hints for the current tool and measurement results.</li>
+</ul>
+
+<h3 id="ui-3d">3-D view navigation</h3>
+<table>
+<tr><th>Action</th><th>Mouse</th></tr>
+<tr><td>Rotate</td><td>Left mouse button drag</td></tr>
+<tr><td>Pan</td><td>Middle mouse button drag</td></tr>
+<tr><td>Zoom</td><td>Mouse wheel</td></tr>
+<tr><td>Select hovered object</td><td>Left click without dragging</td></tr>
+<tr><td>Deselect</td><td>Right click</td></tr>
+<tr><td>Standard views</td><td>View → Isometric, Top (XY), Front (XZ), Right (YZ), Left (YZ); Fit All <kbd>Ctrl</kbd>+<kbd>F</kbd></td></tr>
+</table>
+<p>The hovered axis, plane or solid face is highlighted (light green). Selected faces turn dark green. The origin axes are labelled x, y, z and can be hidden with the origin button.</p>
+
+<h3 id="ui-selection">Selecting in the 3-D view</h3>
+<table>
+<tr><th>Click</th><th>Result</th></tr>
+<tr><td>Click</td><td>Selects that <b>surface</b> only</td></tr>
+<tr><td><kbd>Ctrl</kbd>+click</td><td>Adds / removes surfaces</td></tr>
+<tr><td><kbd>Shift</kbd>+click</td><td>Selects the whole extrusion / imported part (same as clicking it in the explorer)</td></tr>
+<tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+click</td><td>Adds / removes further whole objects (e.g. to export several)</td></tr>
+</table>
+<p>Selecting an extrusion highlights all non-cut extrusions connected to it through sketch links.</p>
+
+<h3 id="ui-tree">Objects explorer</h3>
+<ul>
+  <li>Sketches, extrusions, surfaces, cut surfaces, features, technical drawings and assemblies form a tree. Each child sits under the object it depends on. Imported models are root entries.</li>
+  <li>The <b>checkbox</b> toggles the visibility of that one object only. The context menu has extra actions that also show or hide children.</li>
+  <li><kbd>Shift</kbd>/<kbd>Ctrl</kbd>+click selects several objects.</li>
+  <li>Right-click opens the context menu: Edit, Rename (<kbd>F2</kbd>), Delete (<kbd>Del</kbd>), visibility actions, and for sketches <i>Copy to face / surface…</i>.</li>
+  <li>Double-click a technical drawing or assembly entry to open it.</li>
+</ul>
+
+<h3 id="ui-props">Properties panel</h3>
+<ul>
+  <li><b>Colour</b> and <b>Transparency</b> (0 % = solid) are set per object, without an edit mode. If several bodies are selected, the values apply to all of them (not to cut tools, sketches, assemblies or drawings).</li>
+  <li><b>Material</b> picks a density from a list (aluminium, steel, brass, copper, ABS, PLA, PET, FR-4, G10, CFK, woods …). The panel also shows the <b>volume</b>.</li>
+  <li>Imported models have <b>XYZ position</b> and <b>XYZ rotation</b> fields. STEP models also have a <i>Fixed</i> checkbox.</li>
+</ul>
+<div class="tip">If you type a comma into any decimal field, it is converted to a dot.</div>
+</section>
+
+<!-- ───────────────────────── Workflow ───────────────────────── -->
+<section id="workflow">
+<h2>Basic workflow</h2>
+<ol class="steps">
+  <li><b>New Sketch</b> <img src="../icons/sketch.png" alt="" width="20">: click a base plane (XY / XZ / YZ), a flat face of a solid, or a Surface.</li>
+  <li><b>Draw</b> the profile with lines, rectangles, circles, arcs …</li>
+  <li><b>Constrain</b> it with dimensions and geometric constraints until DOF = 0 (the profile turns green).</li>
+  <li><b>Accept</b> the sketch (it needs a closed profile). You return to the 3-D view.</li>
+  <li>Select the sketch and click <b>Extrude</b>. Set the direction and extent, optionally tick <i>Remove material</i>, then OK.</li>
+  <li>Sketch on the faces of the new solid and repeat. Then add chamfers, fillets, threads and so on.</li>
+  <li><b>Save</b> the project (<code>.obj</code>). Export to STEP / STL, or create a technical drawing.</li>
+</ol>
+</section>
+
+<!-- ───────────────────────── Sketcher ───────────────────────── -->
+<section id="sketcher">
+<h2>Sketcher</h2>
+<figure><img src="scad_sketcher.png" alt="The SimpleCAD sketcher"><figcaption>Sketch mode: grouped sketch tools in the toolbar, Sketch Status panel on the right.</figcaption></figure>
+
+<h3 id="sk-plane">Starting a sketch</h3>
+<ul>
+  <li>Click <b>New Sketch</b>, then a base plane, a flat face of an extrusion, a planar face of an imported STEP model, or a Surface. Or select a Surface first and then click New Sketch. <kbd>Esc</kbd> or right-click cancels picking.</li>
+  <li>The view switches to an orthographic top view of the plane. On side faces world +Z points up, on horizontal faces world +Y points up. An indicator at the bottom left shows the world axes.</li>
+  <li>On a face, the <b>face outline</b> appears as fixed white reference geometry. It shows the face as it really is after cuts and fillets. It cannot be deleted or trimmed, but you can use it for constraints.</li>
+  <li>While you sketch on an attached Surface, the supporting solid is shown as a shaded silhouette underneath. This is for display only.</li>
+</ul>
+
+<h3 id="sk-modes">Modes</h3>
+<div class="table-wrap"><table>
+<tr><th></th><th>Mode</th><th>Purpose</th></tr>
+<tr><td><img class="ic" src="../icons/select.png" alt=""></td><td>Select (default)</td><td>Rubber-band select, drag geometry or dimensions, double-click to edit, group / ungroup, mirror</td></tr>
+<tr><td><img class="ic" src="../icons/draw.png" alt=""></td><td>Draw</td><td>Create geometry with the draw tools</td></tr>
+<tr><td><img class="ic" src="../icons/constraint.png" alt=""></td><td>Constrain</td><td>Add dimensions and geometric constraints</td></tr>
+<tr><td><img class="ic" src="../icons/scissor.png" alt=""></td><td>Scissor</td><td>Trim a segment between neighbouring intersections (a circle becomes an arc)</td></tr>
+<tr><td><img class="ic" src="../icons/delete_selected.png" alt=""></td><td>Delete</td><td>Delete clicked geometry</td></tr>
+</table></div>
+
+<h3 id="sk-draw">Drawing tools</h3>
+<div class="table-wrap"><table>
+<tr><th></th><th>Tool</th><th>How to draw</th></tr>
+<tr><td><img class="ic" src="../icons/line.png" alt=""></td><td>Line</td><td>Click the start and end points (chained)</td></tr>
+<tr><td><img class="ic" src="../icons/rectangle.png" alt=""></td><td>Rectangle</td><td>Two opposite corners</td></tr>
+<tr><td><img class="ic" src="../icons/circle.png" alt=""></td><td>Circle</td><td>Centre + radius</td></tr>
+<tr><td><img class="ic" src="../icons/ellipse.png" alt=""></td><td>Ellipse</td><td>Centre + two perpendicular diameters</td></tr>
+<tr><td><img class="ic" src="../icons/polygon.png" alt=""></td><td>Polygon</td><td>Regular polygon: centre + radius</td></tr>
+<tr><td><img class="ic" src="../icons/arc.png" alt=""></td><td>Arc</td><td>Centre, start, end (counter-clockwise)</td></tr>
+<tr><td><img class="ic" src="../icons/point.png" alt=""></td><td>Point</td><td>Single point, e.g. for construction</td></tr>
+<tr><td><img class="ic" src="../icons/text.png" alt=""></td><td>Text</td><td>Click to place, then choose font, size, style and alignment. Text is rigid and extrudable. Drag it to move, drag a corner to scale, double-click to edit.</td></tr>
+<tr><td><img class="ic" src="../icons/import_svg_dxf.png" alt=""></td><td>SVG / DXF import</td><td>Imports paths, shapes and DXF entities into the sketch (convert complex SVG text to paths first)</td></tr>
+<tr><td><img class="ic" src="../icons/support_geometry.png" alt=""></td><td>Support geometry</td><td>Toggle: the tools then create blue dashed construction geometry. It can carry constraints but is never extruded.</td></tr>
+<tr><td><img class="ic" src="../icons/grid.png" alt=""></td><td>Grid / Snap</td><td>Grid spacing (default 10 mm) and snap step (default 5 mm)</td></tr>
+</table></div>
+<p><b>Snapping:</b> the cursor snaps to an existing point within 8 screen pixels, otherwise to the snap grid. It also snaps to line crossings and onto lines.</p>
+
+<h3 id="sk-edit">Editing geometry</h3>
+<ul>
+  <li><b>Right-click</b> on geometry opens a context menu: switch support ↔ normal geometry, Cut, Copy, Paste, Delete. <kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd> work too, and paste lands at the cursor. The clipboard is shared between sketches.</li>
+  <li><b>Mirror Horizontal / Vertical</b> <img src="../icons/mirror_horizontal.png" alt="" width="18"><img src="../icons/mirror_vertical.png" alt="" width="18">: select geometry, then click a sketch line or a sketch axis. The copies stay constrained to their originals. Text cannot be mirrored.</li>
+  <li><kbd>Del</kbd> deletes the selected geometry and the selected constraints.</li>
+  <li>Open parts of the profile (loose ends, branch points) blink red for 5 s and then stay marked red.</li>
+  <li>Free (not fully constrained) geometry always wins a pick over dimensions and constrained geometry.</li>
+</ul>
+
+<h3 id="sk-group">Groups &amp; arrays</h3>
+<ul>
+  <li><b>Group</b> (Select mode) turns the selection into one rigid body. It keeps its shape but can still move and rotate. Drag the group to move it by its centre, drag one of its points to rotate it. <b>Ungroup</b> dissolves it.</li>
+  <li><b>Multiple</b> <img src="../icons/multiple.png" alt="" width="18">: select closed contour(s), then choose
+    <ul><li><b>Matrix</b>: rows × columns with spacing, or</li>
+    <li><b>Circular</b>: number of copies, total angle, start angle (clockwise from the sketch +Y axis), radius, optional rotation.</li></ul>
+    Click to place the copies. Support geometry through the copy centres is added automatically.</li>
+</ul>
+
+<h3 id="sk-constraints">Constraints</h3>
+<div class="table-wrap"><table>
+<tr><th></th><th>Constraint</th><th>Notes</th></tr>
+<tr><td><img class="ic" src="../icons/length.png" alt=""></td><td>Length / Distance</td><td>Between entities. Point-to-point distances can be direct, horizontal (ΔX) or vertical (ΔY). ΔX/ΔY = 0 aligns two points.</td></tr>
+<tr><td><img class="ic" src="../icons/diameter.png" alt=""></td><td>Diameter / Radius</td><td>Circle and arc size</td></tr>
+<tr><td><img class="ic" src="../icons/angle.png" alt=""></td><td>Angle</td><td>Between two lines</td></tr>
+<tr><td><img class="ic" src="../icons/fix.png" alt=""></td><td>Fix</td><td>Locks a point in place</td></tr>
+<tr><td><img class="ic" src="../icons/perpendicular.png" alt=""></td><td>Perpendicular</td><td>Two lines</td></tr>
+<tr><td><img class="ic" src="../icons/parallel.png" alt=""></td><td>Parallel</td><td>Two lines</td></tr>
+<tr><td><img class="ic" src="../icons/collinear.png" alt=""></td><td>Collinear</td><td>Two lines on one straight line</td></tr>
+<tr><td><img class="ic" src="../icons/equal.png" alt=""></td><td>Equal</td><td>Line lengths or circle diameters</td></tr>
+<tr><td><img class="ic" src="../icons/symmetric.png" alt=""></td><td>Symmetric</td><td>About a centre line</td></tr>
+<tr><td><img class="ic" src="../icons/tangential.png" alt=""></td><td>Tangential</td><td>Line + circle/arc, or two circles/arcs</td></tr>
+<tr><td><img class="ic" src="../icons/point_to_point.png" alt=""></td><td>Point → Point / Line</td><td>Detects the target automatically: point → coincident, line → point on line, circle/arc → point on curve, axis → on axis, origin → fixed at (0,0)</td></tr>
+</table></div>
+<ul>
+  <li>The sketch <b>X and Y axes</b> act as fixed lines for distance, perpendicular, parallel, collinear, angle, tangential and symmetric. Click the axis where no geometry lies on it.</li>
+  <li>The constraints are solved numerically. Dimensions drive the geometry, and dragging moves geometry only within its remaining freedom. Redundant or conflicting constraints are rejected.</li>
+  <li><b>DOF</b> (degrees of freedom) is shown in the Sketch Status panel. DOF 0 means fully constrained (green).</li>
+  <li>The <b>constraint list</b> shows every constraint. Selecting one highlights it, and you can remove it or edit its value. Dimensions can be dragged to a better position, and double-clicked to edit.</li>
+  <li>In support-geometry mode, Length and Angle only measure (the value is shown in brackets).</li>
+</ul>
+
+<h3 id="sk-references">References &amp; Sketch Explorer</h3>
+<p>The <b>Sketch Explorer</b> lists other sketches that are parallel to the active one, grouped by their signed distance:</p>
+<ul>
+  <li>Sketches on the same level are yellow and read-only. Levels below are violet (darker = deeper), levels above are red.</li>
+  <li>Tick <b>Reference</b> on a lower level (or the same level) to project its geometry as fixed references. You can then snap to it and constrain to it. The direct supporting sketch is enabled automatically.</li>
+  <li>Drawing onto a reference creates a removable coincident or point-on-line constraint. The new geometry is not merged into the reference.</li>
+  <li>The <i>Face outline</i> row shows or hides the face outline and switches its use as a reference.</li>
+  <li><b>Cut extrusions</b> (remove-material extrusions) are projected onto every sketch, clipped to the bodies they cut, and shown grey hatched with a dashed outline. A hole running inside a body therefore shows on its other faces too. They are display only, not references. The <i>Cut extrusions</i> row hides or shows them (remembered for the session). The cut made from the sketch being edited is left out.</li>
+  <li>Faces of other visible solids that lie in the same plane as a face sketch are shown grey with a dashed outline. They are display only as well.</li>
+  <li>The <i>Cut extrusions</i> row shows or hides the remove-material extrusions, projected onto the sketch and clipped to the bodies they cut (grey hatched, dashed outline). A hole running inside a body therefore shows on its other faces. They are display only: you cannot snap or constrain to them. The cut of the sketch you are editing is left out.</li>
+  <li>Hiding a level or unticking Reference does not remove existing constraints.</li>
+</ul>
+
+<h3 id="sk-finish">Accepting / cancelling</h3>
+<ul>
+  <li><b>Accept</b> (Sketch Status panel) needs a closed profile. Text outlines count as closed profiles.</li>
+  <li><kbd>Esc</kbd> with nothing pending cancels the sketch (it asks first if the sketch has geometry).</li>
+  <li>Right-click never closes the sketch. It deselects or aborts the current step.</li>
+  <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> undo / redo every sketch step.</li>
+</ul>
+</section>
+
+<!-- ───────────────────────── Features ───────────────────────── -->
+<section id="features">
+<h2>3-D features</h2>
+
+<h3 id="f-surface"><img src="../icons/surface.png" alt="" width="24"> Surface (work plane)</h3>
+<p>Creates a work plane relative to the origin, another Surface or a solid face. On planar faces it aligns directly. Curved faces get a tangent plane: spheres by azimuth / elevation, cylinders by angle / axial position, other faces at their highest point. You can set local XYZ offsets, XYZ rotations and the display size. Hiding a Surface hides only the plane, not the sketches built on it.</p>
+
+<h3 id="f-cutsurface"><img src="../icons/view_section.png" alt="" width="24"> Cut Surface</h3>
+<p>Select an extrusion and click <b>Cut Surface</b>. Place the grey plane with the move / rotate fields or drag the coloured arrows. The side the orange arrow points to is removed (<i>Keep the other side</i> swaps this), and the cut face is drawn hatched. The cut applies to the body and everything built on it. It is used by STEP/STL export and the assembly. The explorer checkbox switches the cut on or off. You can stack several Cut Surfaces.</p>
+
+<h3 id="f-extrude"><img src="../icons/extrusion.png" alt="" width="24"> Extrusion</h3>
+<ul>
+  <li><b>Direction:</b> one direction, opposite, or symmetric. A negative height extrudes the opposite way.</li>
+  <li><b>Extent:</b> distance, <i>through all</i> touching bodies (cuts), or <i>to next surface</i> (next extrusion, sketch region or coordinate plane; straight only). With <i>to next surface</i> you can click a face to make it the target. <b>Auto</b> forgets the chosen face.</li>
+  <li><b>Remove material</b> <img src="../icons/extrusion_cut.png" alt="" width="18">: the extrusion is drawn as a translucent red tool body and subtracted from every earlier body it passes through.</li>
+  <li><b>Face extrusion:</b> select flat faces of a body and click Extrude, with no sketch. The extrusion is rebuilt automatically whenever the body changes.</li>
+</ul>
+
+<h3 id="f-ring"><img src="../icons/ring_extrusion.png" alt="" width="24"> Ring Extrusion</h3>
+<p>Revolves the profile around an axis (sketch or world axis). The ring radius can be measured to the profile centre, outer edge or inner edge. The angle is positive counter-clockwise. With <b>Helical</b> mode the profile advances along the axis while it revolves (set the axial rise), e.g. for springs or coarse threads. Material can be added or removed.</p>
+
+<h3 id="f-draft"><img src="../icons/draft.png" alt="" width="24"> Angle Extrusion (draft)</h3>
+<p>Creates angled shapes. Pick the pivot point on the extrusion and enter the angle. Positive angles draft toward the pivot, negative angles away from it.</p>
+
+<h3 id="f-bridge"><img src="../icons/merge_extrusions.png" alt="" width="24"> Bridge / Merge</h3>
+<p>Click Bridge, then a face on each of two bodies. If the faces of two extrusions do not face each other, Bridge searches for a suitable pair. Curved targets such as cylinders work as well. The solids and the bridge are fused into one new solid under the first selected solid. The original solids are kept but hidden.</p>
+
+<h3 id="f-chamfer"><img src="../icons/chamfer.png" alt="" width="24"> Chamfer &amp; <img src="../icons/fillet.png" alt="" width="24"> Fillet</h3>
+<p>Click the edges in the 3-D view. Selected edges continue automatically along tangent chains. Chamfer modes: <b>Equal length</b>, <b>Two lengths</b>, <b>Length + angle</b>. <i>Flip</i> measures from the other face, and <i>Outside</i> adds material instead of cutting it. A fillet only needs a radius. Tight corners are handled without folding over.</p>
+
+<h3 id="f-gear"><img src="../icons/gear.png" alt="" width="24"> Gear generator</h3>
+<p>The involute gear generator creates the gear with an optional matching counterpart (ratio or mate diameter):</p>
+<div class="table-wrap"><table>
+<tr><th>Type</th><th>Specific parameters</th></tr>
+<tr><td>Spur gear</td><td>Teeth, module / outside diameter, width, bore</td></tr>
+<tr><td>Ring gear (internal)</td><td>Rim thickness</td></tr>
+<tr><td>Planetary</td><td>Sun / planet / ring diameters, planet count, fixed member, bores</td></tr>
+<tr><td>Bevel gear</td><td>Cone angle derived from the mate</td></tr>
+<tr><td>Helical / Herringbone</td><td>Helix angle</td></tr>
+<tr><td>Rack</td><td>Rack length</td></tr>
+<tr><td>Timing pulley</td><td>Belt profile, flanges, hub</td></tr>
+<tr><td>Chain sprocket</td><td>Chain standard / pitch</td></tr>
+<tr><td>Ratchet wheel</td><td>Tooth depth, locking face undercut</td></tr>
+<tr><td>Geneva drive</td><td>Slots, centre distance, pin diameter, crank plate</td></tr>
+<tr><td>Worm + worm wheel</td><td>Worm starts, worm pitch diameter</td></tr>
+</table></div>
+
+<h3 id="f-thread"><img src="../icons/thread.png" alt="" width="24"> Thread generator</h3>
+<p>Select a cylindrical surface. Then choose a <b>standard size</b> (metric / imperial) or <i>Custom</i> (turns per mm, thread depth). Choose <b>External</b> (screw) or <b>Internal</b> (nut), a fit grade (6 or 7, radial clearance), and the length (a distance or the full length). The profile is the ISO / Unified 60° profile.</p>
+
+<h3 id="f-measure"><img src="../icons/measurement.png" alt="" width="24"> Measure</h3>
+<p>Click any number of edges and corners. Results appear in the status bar and in the Measurement panel: edge lengths, the relations between edges (connected, same face, parallel, perpendicular, with 3-D and 2-D XY values), and between corners the 3-D distance, ΔX / ΔY / ΔZ and angles. Measured items are highlighted in the inverted body colour. Right-click an item to remove it. Right-click elsewhere or press <kbd>Esc</kbd> to clear everything.</p>
+</section>
+
+<!-- ───────────────────────── Managing ───────────────────────── -->
+<section id="manage">
+<h2>Managing objects</h2>
+<ul>
+  <li><b>Edit</b> <img src="../icons/edit_selected.png" alt="" width="18">: a sketch reopens in drawing mode, and an extrusion reopens its settings. Dependent objects are rebuilt.</li>
+  <li><b>Rename</b> (<kbd>F2</kbd>) and <b>Delete</b> (<kbd>Del</kbd>). Delete asks for confirmation and also removes dependent objects.</li>
+  <li><b>Copy to face / surface…</b> (sketch context menu): click a target face, Surface or base plane. A new sketch opens there with the copied geometry and its internal constraints.</li>
+  <li><b>Undo / Redo</b>: every project change (accepted sketch, extrusion, delete, rename, visibility, colour, edits) can be undone and redone.</li>
+  <li><b>Show All Objects</b> (View menu) makes everything visible again.</li>
+</ul>
+</section>
+
+<!-- ───────────────────────── I/O ───────────────────────── -->
+<section id="io">
+<h2>Import &amp; export</h2>
+<h3>Import (File → Import)</h3>
+<ul>
+  <li><b>STEP</b> (via CadQuery/OCP) and <b>STL</b> models are centred at the origin. You can move and rotate them with the XYZ fields in the properties panel.</li>
+  <li>New Sketch can use a planar STEP face. Dependent sketches fix the model's position automatically until the last dependency is deleted.</li>
+</ul>
+<h3>Export (File → Export, <kbd>Ctrl</kbd>+<kbd>E</kbd>)</h3>
+<p>Select the extrusion(s) first, in the explorer or with <kbd>Shift</kbd>+click in the 3-D view. The export writes the selected solids and everything built on them as <b>STEP</b> or <b>STL</b>. Cut bodies and Cut Surfaces are included.</p>
+</section>
+
+<!-- ───────────────────────── Drawing ───────────────────────── -->
+<section id="drawing">
+<h2><img src="../icons/technical_drawing.png" alt="" width="28"> Technical Drawing</h2>
+<p>Open it with <b>File → Technical Drawing</b>. It starts with the selected solid, or with an empty sheet if nothing is selected. The editor is a separate window with File / Edit / Sheet / View / Tools menus, two toolbars, and dock panels <b>Views</b>, <b>Dimensions</b> and <b>Sheet</b>.</p>
+
+<h3>Sheets &amp; standards</h3>
+<ul>
+  <li>Formats A2, A3, A4, A5, in landscape or portrait, with the frame, reference grid and title block of DIN EN ISO 5457. <i>Auto scale</i> fits the views to the sheet.</li>
+  <li>First-angle projection (DIN ISO 128-30) by default. Third-angle can be chosen on the Sheet tab.</li>
+  <li>Scales from ISO 5455. Dimension text follows DIN 406-11. General tolerances follow ISO 2768 (e.g. <i>ISO 2768-mK</i>).</li>
+  <li>A drawing can have <b>multiple sheets</b> (tabs; Add, Duplicate, Rename, Delete, drag to reorder). Each sheet has its own model, format, views, dimensions, sections, title and drawing number.</li>
+</ul>
+
+<h3>Views</h3>
+<ul>
+  <li>Place the top, front, left, right, isometric and section views manually. Views snap to the grid and align with each other.</li>
+  <li>Rotate the model in XYZ quarter turns. Hidden lines (dashed blue) can be switched off per view.</li>
+  <li><b>Sections</b> A-A, B-B …: add, rotate by 90°, or remove them in the Views panel, or click a view with the Cut tool. Drag a cutting line to move it, and right-click it to rotate or delete it.</li>
+  <li>Threads are drawn following DIN ISO 6410-1. Centre lines are added for holes and bosses.</li>
+  <li>The isometric view is shaded only.</li>
+  <li><b>Import SVG / DXF</b> (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>) places a 2-D graphic on the sheet. It can be dragged, scaled and dimensioned.</li>
+</ul>
+
+<h3>Dimensions</h3>
+<ul>
+  <li>A length always takes two picks: point → point, point ↔ line (perpendicular distance), or two parallel lines. Points snap first.</li>
+  <li>Angle, radius and diameter dimensions are available too. Centre lines can be used as references.</li>
+  <li>Drag the number to slide it and to move the dimension line sideways. Select a dimension on the sheet or in the list, and press <kbd>Del</kbd> to remove it.</li>
+</ul>
+
+<h3>Navigation &amp; finishing</h3>
+<p>Wheel zooms, the middle mouse button pans, right-click cancels or deselects, and <kbd>Home</kbd> fits the sheet. Undo / Redo cover every change while the editor is open. <b>Finish Drawing</b> (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) stores the drawing as a child of the extrusion.</p>
+
+<h3>Export</h3>
+<ul>
+  <li><b>PDF</b>: every sheet as one page.</li>
+  <li><b>SVG</b>: one file per sheet (<code>name.svg</code>, <code>name-2.svg</code> …).</li>
+  <li><b>DXF</b>: AutoCAD R12, mm, layers OUTLINE / THIN / HIDDEN / CENTER / FRAME / TEXT. The isometric view is exported as edges.</li>
+</ul>
+<p>Exports are always black on a white sheet.</p>
+</section>
+
+<!-- ───────────────────────── Assembly ───────────────────────── -->
+<section id="assembly">
+<h2><img src="../icons/assembly.png" alt="" width="28"> Assembly</h2>
+<p>The Assembly window has its own 3-D view, a component explorer and an <b>Alignments</b> panel.</p>
+<ul>
+  <li><b>Import</b>: STEP / STL / OBJ files (a SimpleCAD <code>.obj</code> project contributes each of its parent solids), or parts of the open project. Parts are snapshots. They cannot be edited here, only placed.</li>
+  <li><b>Placing</b>: arrows move along X / Y / Z, and rings rotate (snapping every 15°, hold <kbd>Ctrl</kbd> for free rotation, <kbd>Shift</kbd> for whole mm). The XYZ fields work too.</li>
+  <li><b>Align</b> <img src="../icons/assembly_align.png" alt="" width="18">: click a surface, corner, edge midpoint or hole rim on the part to move, then the same on another part (<kbd>Alt</kbd>+click on a surface = object centre). Two surfaces become parallel and coplanar, two points coincide. Alignments follow the target. <i>Apply</i> re-establishes them, and unticking releases them.</li>
+  <li><b>Update Selected / Update All</b> <img src="../icons/update_all.png" alt="" width="18">: re-reads parts whose source changed (marked <i>outdated</i>). Placement, colour and transparency are kept.</li>
+  <li><b>Cut Surface</b>: cuts the whole assembly at a movable plane. <i>Apply</i> makes the cut permanent, optionally splitting each object into <i>part 1 / part 2</i>.</li>
+  <li><b>Measure</b> is available here as well.</li>
+  <li><b>Export</b>: the ticked parts as one STEP or STL file.</li>
+  <li><b>Saving</b>: assemblies of project parts are stored inside the project as an "Assembly N" entry. <i>Save As</i> writes a <code>.asby</code> file.</li>
+</ul>
+</section>
+
+<!-- ───────────────────────── Thermal ───────────────────────── -->
+<section id="thermal">
+<h2><img src="../icons/thermal_sim.png" alt="" width="28"> Thermal add-on</h2>
+<div class="note">This feature is optional. It is only available when <code>simplecad_thermal.py</code> is next to <code>SimpleCAD.py</code> (or bundled into the executable). It needs <code>scipy</code>. Without the file, the Thermal toolbar button and menu entries are not shown. The installed add-on version (currently 2.2) is listed under Help → About.</div>
+<p>The Thermal add-on predicts the temperatures of parts and assemblies that produce heat, e.g. a power transistor on a heatsink, a PCB in a housing, or a 3-D-printed enclosure with an LED driver inside. You can answer questions like:</p>
+<ul>
+  <li>How hot does the part get after a long time (<b>steady state</b>)?</li>
+  <li>How quickly does it heat up, and does a duty cycle or a thermostat keep it below a limit (<b>transient</b>)?</li>
+  <li>Does natural convection suffice, or is a fan needed? Where should vents go (<b>airflow</b>)?</li>
+  <li>How much does a water-cooled cold plate warm the coolant, and what flow does the pump deliver (<b>liquid cooling</b>)?</li>
+  <li>How hot do the junctions of the power parts on a PCB get (<b>KiCad / Gerber import</b>)?</li>
+  <li>Which material, power, fan or thermal pad is good enough (<b>parameter sweep</b>)?</li>
+</ul>
+<p>Open it with the <b>Thermal</b> toolbar button (right of Assembly) or <b>File / Edit → Thermal…</b>. Units in the window are <b>mm, W and °C</b>; the solvers work internally in SI units.</p>
+
+<h3 id="th-window">Window layout</h3>
+<p>The Thermal window is a separate window like the Assembly window. It is divided into three areas. The two side panels can be collapsed with the arrow in their title.</p>
+<div class="table-wrap"><table>
+<tr><th>Area</th><th>Content</th></tr>
+<tr><td><b>Study</b> (left)</td><td>The study explorer (parts, heat sources, fans / vents, face conditions, contacts, probes; ☑ = visible) and below it the properties of the selected item.</td></tr>
+<tr><td><b>3-D view</b> (middle)</td><td>The model, the temperature legend on the right, and for transient results a time slider with a play button at the bottom.</td></tr>
+<tr><td><b>Simulation</b> (right)</td><td>Section-view controls (while active), the solver and its settings, the environment, the mesh, then the results tables, the temperature-over-time plot, the colour range and the solver messages.</td></tr>
+<tr><td>Bottom bar</td><td>Status text, progress bar, Cancel (while a run is going) and Close.</td></tr>
+</table></div>
+
+<h4>Toolbar</h4>
+<div class="table-wrap"><table>
+<tr><th></th><th>Button</th><th>Function</th></tr>
+<tr><td><img class="ic" src="../icons/new_file.png" alt=""><img class="ic" src="../icons/open.png" alt=""><img class="ic" src="../icons/save.png" alt=""><img class="ic" src="../icons/save_as.png" alt=""></td><td>New / Open / Save / Save as</td><td>Thermal study files (<code>.thml</code>)</td></tr>
+<tr><td><img class="ic" src="../icons/import.png" alt=""></td><td>Import ▾</td><td>STEP file, STL file, OBJ file / SimpleCAD project, assembly file (<code>.asby</code>), the assembly of the open project, parts of the open project, or a <b>PCB</b> (KiCad board or Gerber files)</td></tr>
+<tr><td><img class="ic" src="../icons/export.png" alt=""></td><td>Export ▾</td><td>PDF report, results table (CSV), values over time (CSV), result for ParaView (VTU), image of the view (PNG)</td></tr>
+<tr><td><img class="ic" src="../icons/undo.png" alt=""><img class="ic" src="../icons/redo.png" alt=""></td><td>Undo / Redo</td><td>Every change of the study</td></tr>
+<tr><td><img class="ic" src="../icons/measurement.png" alt=""></td><td>Probe</td><td>Click on a part to place a temperature probe (<kbd>Esc</kbd> ends)</td></tr>
+<tr><td><img class="ic" src="../icons/delete_selected.png" alt=""></td><td>Remove</td><td>Removes the selected part or item (<kbd>Del</kbd> in the explorer)</td></tr>
+<tr><td><img class="ic" src="../icons/heat_source_extrusion.png" alt=""></td><td>Heat Source ▾</td><td>Block…, Cylinder…, Extrusion on a face…, Component package (junction model)…, Power of the selected body…</td></tr>
+<tr><td><img class="ic" src="../icons/heat_convection.png" alt=""></td><td>Face Condition ▾</td><td>Fixed temperature, Heat flux, Convection, Insulated, Coolant channel, Liquid bath</td></tr>
+<tr><td><img class="ic" src="../icons/fit_together.png" alt=""></td><td>Contacts ▾</td><td>Detect touching parts, Contact between two bodies…</td></tr>
+<tr><td><img class="ic" src="../icons/air_flow_on.png" alt=""></td><td>Airflow ▾</td><td>Fan…, Vent / opening… (used by the Airflow + heat solver)</td></tr>
+<tr><td><img class="ic" src="../icons/objects.png" alt=""></td><td>Materials</td><td>Opens the material library</td></tr>
+<tr><td><img class="ic" src="../icons/start_thermal_simulation.png" alt=""></td><td>Start Simulation (<kbd>F5</kbd>)</td><td>Meshes the visible bodies and solves</td></tr>
+<tr><td><img class="ic" src="../icons/settings2.png" alt=""></td><td>Parameter sweep</td><td>Runs the study for several values of one parameter</td></tr>
+<tr><td><img class="ic" src="../icons/thermal_sim.png" alt=""></td><td>Show temperatures</td><td>Switches between the temperature map and the normal view</td></tr>
+<tr><td><img class="ic" src="../icons/view_section.png" alt=""></td><td>Section view</td><td>Cuts the view at a movable plane to look inside</td></tr>
+<tr><td><img class="ic" src="../icons/view_isometric.png" alt=""></td><td>Views, origin, Show all</td><td>Standard camera views, origin axes on/off, show and fit all parts</td></tr>
+<tr><td><img class="ic" src="../icons/update_selected.png" alt=""><img class="ic" src="../icons/update_all.png" alt=""></td><td>Update selected / all</td><td>Re-read changed sources. Placement, materials chosen here and powers are kept.</td></tr>
+</table></div>
+<p>The menu bar (File, Edit, View, <b>Simulation</b>) contains the same actions. The Simulation menu also has <i>Sweep results</i> and <i>Cancel simulation</i>, and View has <i>Streamlines</i> for airflow results.</p>
+
+<h3 id="th-steps">Step by step</h3>
+<ol class="steps">
+  <li><b>Import the parts</b> (Import ▾). Parts are snapshots like in the Assembly; a part whose source changed is marked and can be updated.</li>
+  <li><b>Place them</b> with the move arrows / rotation rings in the view or the Position / Rotation fields in the properties (position = centre of the part).</li>
+  <li><b>Assign a material</b> to every body. Bodies without a material cannot be simulated.</li>
+  <li><b>Add heat</b>: give a body a power, or place a block / cylinder heat source, or extrude one from a face.</li>
+  <li><b>Optional</b>: face conditions, contacts (thermal paste, pads), fans and vents, coolant channels and liquid baths, probes, thermostats, power profiles. For electronics, import the PCB and place the power components as packages.</li>
+  <li><b>Choose the solver and analysis</b> in the Simulation panel and set the environment (ambient temperature, convection, radiation) and the mesh.</li>
+  <li><b>Start Simulation</b> (<kbd>F5</kbd>). Progress is shown at the bottom; Cancel stops the run.</li>
+  <li><b>Evaluate</b>: temperature map, results table, probes, section view, plot, messages. Then export.</li>
+</ol>
+<div class="tip">Any change to the setup marks the shown result as outdated. Only <b>visible</b> parts (ticked in the explorer) take part in a simulation, so you can quickly leave parts out.</div>
+
+<h3 id="th-parts">Parts &amp; bodies</h3>
+<p>Selecting a part shows its <b>source</b>, <b>state</b> (ok / outdated / missing), position and rotation. Each part consists of one or more <b>bodies</b>, and each body has:</p>
+<ul>
+  <li><b>Material</b>: taken from the source object if it has one in SimpleCAD (it then follows Update), or chosen here (then kept). A summary of the material properties is shown below the box.</li>
+  <li><b>Power</b> (W): heat produced inside the body, spread evenly over its volume.</li>
+  <li><b>Profile</b> and <b>Thermostat</b> for the power (see below).</li>
+  <li><b>Own surface emissivity</b>: overrides the material value, e.g. ε = 0.8 for anodised or painted metal.</li>
+</ul>
+<p>The right-click menu in the explorer has Update, Set power…, Rename… and Remove; on face conditions also <i>Pick faces</i>.</p>
+
+<h3 id="th-sources">Heat sources</h3>
+<div class="table-wrap"><table>
+<tr><th>Type</th><th>Settings</th></tr>
+<tr><td><b>Block</b></td><td>Name, size X / Y / Z (default 10 × 10 × 2 mm), centre, power (default 1 W), material. With a part selected, <i>On top of &lt;part&gt;</i> places it centred on the part's top.</td></tr>
+<tr><td><b>Cylinder</b></td><td>Diameter (default 8 mm), height (12 mm), axis Z / X / Y; otherwise as Block.</td></tr>
+<tr><td><b>Extrusion on a face</b></td><td>Click a face of a part, then choose a <i>rectangle</i> (U × V) or <i>circle</i> footprint, its offset from the face centre (U follows X where possible, else Y; V is at right angles), the height, power and material. <b>Out of the face</b> creates a component sitting on the face; <b>Into the body</b> creates a heat zone inside the body in the body's own material (e.g. a die area inside a package).</td></tr>
+<tr><td><b>Component package</b></td><td>An electronic package with a junction model (see <a href="#th-pcb">PCB import &amp; packages</a>). It is placed on the selected board, or at the origin.</td></tr>
+<tr><td><b>Power of a body</b></td><td>Any imported body can produce heat itself; no extra geometry needed.</td></tr>
+</table></div>
+<p>Heat sources are shown in orange. Where a placed heat source overlaps a body, the heat source wins. The size of a placed block or cylinder can be changed later in its properties.</p>
+
+<h3 id="th-profiles">Power profiles</h3>
+<p>Profiles define how the power changes over time. They act in <b>transient</b> runs; a steady-state run uses an equivalent constant power.</p>
+<div class="table-wrap"><table>
+<tr><th>Profile</th><th>Parameters</th><th>Steady state uses</th></tr>
+<tr><td>Constant</td><td>—</td><td>the power</td></tr>
+<tr><td>On / off cycle</td><td>Period (s), duty (% on, at the start of each cycle)</td><td>the mean power (power × duty)</td></tr>
+<tr><td>Ramp up</td><td>Ramp time: linear rise from 0 to the full power</td><td>the full power</td></tr>
+<tr><td>Table (CSV)</td><td>Import a file with two columns: time in s, power in W. Separators: comma, semicolon (then decimal commas are allowed), tab or spaces. Header and comment lines are skipped; values are interpolated linearly.</td><td>the last table value</td></tr>
+</table></div>
+<p>The energy of a cycle is integrated exactly, even when the cycle is shorter than a time step. If a cycle switches much faster than the time step, a warning suggests more time steps.</p>
+
+<h3 id="th-thermostat">Thermostats</h3>
+<p>A thermostat (on a body power or a heat-flux condition) switches the power <b>off</b> at setpoint + ½ hysteresis and <b>on</b> again at setpoint − ½ hysteresis. Defaults: setpoint 60 °C, hysteresis 2 K.</p>
+<ul>
+  <li><b>Sensor</b>: the hottest point of the body, the mean of the body, or a probe (place one first with the Probe tool).</li>
+  <li>In a <b>transient</b> run the power switches on and off over time.</li>
+  <li>In a <b>steady-state</b> run the result shows the share of the power needed to hold the setpoint.</li>
+  <li>If the thermostat switches at almost every time step, a warning recommends more time steps or a larger hysteresis.</li>
+</ul>
+
+<h3 id="th-conditions">Face conditions</h3>
+<p>Choose a condition type, then click faces in the view (<i>Pick faces in the view</i>). Click a chosen face again to remove it; <kbd>Esc</kbd> ends picking. Faces without a condition exchange heat with the environment as set in the Simulation panel. A condition can be deactivated with its <i>Active</i> checkbox. Faces stay assigned when a part is updated, as long as they can be recognised.</p>
+<div class="table-wrap"><table>
+<tr><th>Condition</th><th>Colour</th><th>Settings</th><th>Typical use</th></tr>
+<tr><td><b>Fixed temperature</b></td><td>blue</td><td>Temperature</td><td>Part clamped to a cold plate, water-cooled surface</td></tr>
+<tr><td><b>Heat flux</b></td><td>magenta</td><td>Total power (W) or flux density (W/m²), optional profile and thermostat</td><td>Heating foil, a known load entering a surface (the faces still exchange heat with the air)</td></tr>
+<tr><td><b>Convection</b></td><td>cyan</td><td>h (W/m²K), air at ambient or at its own temperature</td><td>Fan-cooled side (h ≈ 20–100 W/m²K). Radiation stays as set for the environment.</td></tr>
+<tr><td><b>Insulated</b></td><td>grey</td><td>—</td><td>Face against insulation or a poorly conducting mounting surface (no convection, no radiation)</td></tr>
+<tr><td><b>Coolant channel</b></td><td>light blue</td><td>See <a href="#th-liquid">Liquid cooling</a></td><td>Water-cooled cold plate, drilled channel, pipe</td></tr>
+<tr><td><b>Liquid bath</b></td><td>violet-blue</td><td>See <a href="#th-liquid">Liquid cooling</a></td><td>Heater in a water tank, part immersed in oil</td></tr>
+</table></div>
+<p>If a face is part of several conditions, the last one counts.</p>
+
+<h3 id="th-contacts">Contacts</h3>
+<p>Touching bodies share grid nodes, so their contact is <b>bonded</b> (perfect heat transfer). A contact item between two bodies adds a thermal resistance where they touch. Use <b>Detect touching parts</b> to find all pairs automatically, or <b>Contact between two bodies…</b> to add one.</p>
+<div class="table-wrap"><table>
+<tr><th>Type</th><th>Input</th><th>Notes</th></tr>
+<tr><td>Bonded</td><td>—</td><td>Same as no contact item</td></tr>
+<tr><td>Contact resistance</td><td>R in K·cm²/W (1 K·cm²/W = 10⁻⁴ m²K/W)</td><td>Dry metal-on-metal joints ≈ 1–10 K·cm²/W, with thermal paste ≈ 0.1–0.5</td></tr>
+<tr><td>Interface layer</td><td>Thickness and conductivity k, or a preset</td><td>A thin layer that is not modelled as its own part</td></tr>
+</table></div>
+<p>Interface layer presets (typical datasheet values):</p>
+<div class="table-wrap"><table>
+<tr><th>Preset</th><th>Thickness</th><th>k (W/m·K)</th></tr>
+<tr><td>Thermal paste</td><td>0.05 mm</td><td>1.0</td></tr>
+<tr><td>Thermal pad</td><td>0.5 mm</td><td>3.0</td></tr>
+<tr><td>Soft silicone gap filler</td><td>1.0 mm</td><td>1.5</td></tr>
+<tr><td>Silicone insulator (Sil-Pad type)</td><td>0.23 mm</td><td>0.9</td></tr>
+<tr><td>Polyimide film (Kapton)</td><td>0.05 mm</td><td>0.12</td></tr>
+<tr><td>Mica washer</td><td>0.1 mm</td><td>0.6</td></tr>
+<tr><td>Air gap</td><td>0.1 mm</td><td>0.026</td></tr>
+</table></div>
+<p>If the two bodies of a contact do not actually touch, the messages show a warning.</p>
+
+<h3 id="th-airflow">Fans &amp; vents</h3>
+<p>Fans and vents are only used by the <b>Airflow + heat (CHT)</b> solver. They are not solids; they open the domain walls or housing walls they overlap.</p>
+<div class="table-wrap"><table>
+<tr><th>Item</th><th>Settings</th></tr>
+<tr><td><b>Fan</b></td><td>Round (Ø) or rectangular (W × H), thickness, blowing direction (±X / ±Y / ±Z). Flow either as a <b>fixed volume flow</b> (m³/h, default 10) or a <b>fan curve</b>: free-blowing flow and stall pressure, or a table of pressure over flow. With a part selected, <i>Next to &lt;part&gt;, blowing onto it</i> places the fan upstream of the part.</td></tr>
+<tr><td><b>Vent / opening</b></td><td>Shape, size, direction and the <b>free area</b> in % (default 50 %). The pressure loss is computed from the free area (perforated plate / grille, Idelchik). <i>In the face of &lt;part&gt;</i> places it in the wall the air leaves through.</td></tr>
+</table></div>
+<p>A fan that is not aligned with a grid axis acts along the nearest axis. A device without a free air face has no effect; both cases are reported in the messages.</p>
+
+<h3 id="th-liquid">Liquid cooling</h3>
+<p>Liquids are added as two face conditions in <b>Face Condition ▾</b>: <b>Coolant channel</b> and <b>Liquid bath</b>. As with the other conditions, you pick the faces in the view that touch the liquid.</p>
+
+<h4>Liquids</h4>
+<p>Properties are tabulated over temperature (density, specific heat, conductivity, viscosity) at about 1 bar and interpolated. The glycol mixtures and oils are typical values; real products vary.</p>
+<div class="table-wrap"><table>
+<tr><th>Liquid</th><th>Range in table</th><th>Warning above</th><th>Notes</th></tr>
+<tr><td>Water (default)</td><td>0 – 100 °C</td><td>100 °C (boiling not modelled)</td><td>IAPWS data; freezes at 0 °C</td></tr>
+<tr><td>Water–glycol 30 %</td><td>−10 – 100 °C</td><td>≈ 104 °C</td><td>Ethylene glycol by volume, frost protection to about −15 °C</td></tr>
+<tr><td>Water–glycol 50 %</td><td>−20 – 100 °C</td><td>≈ 107 °C</td><td>Frost protection to about −37 °C</td></tr>
+<tr><td>Transformer oil</td><td>−20 – 100 °C</td><td>105 °C (ages quickly)</td><td>Mineral insulating oil (IEC 60296); very viscous in the cold; no evaporation</td></tr>
+<tr><td>Hydraulic oil (ISO VG 32)</td><td>0 – 100 °C</td><td>90 °C (ages quickly)</td><td>32 mm²/s at 40 °C; no evaporation</td></tr>
+</table></div>
+<p>If a wetted face gets hotter than the liquid's limit, the messages show a warning.</p>
+
+<h4>Coolant channel</h4>
+<p>Pick the <b>inner faces</b> of a pipe, drilled channel or cold-plate passage. SimpleCAD derives the channel's length, hydraulic diameter and cross-section from these faces, also for bent passages. The liquid enters at the lower end, takes up heat from the wall and warms up along the channel.</p>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Liquid</td><td>Water</td><td>One of the liquids above</td></tr>
+<tr><td>Model</td><td>Correlations (fast)</td><td><b>Correlations</b>: heat transfer from pipe-flow formulas (laminar with entry region, transitional, turbulent); works with both solvers. <b>Liquid flow solved</b>: in Airflow mode the liquid itself is simulated (needs about 4 or more cells across the channel, and takes several minutes).</td></tr>
+<tr><td>Flow</td><td>Fixed flow rate, 1 L/min</td><td>Or a <b>pump curve</b>: free flow (default 4 L/min) and shut-off pressure (default 20 kPa). The operating point is where the pump curve meets the channel's pressure drop (Darcy–Weisbach).</td></tr>
+<tr><td>Inlet</td><td>own temperature, 25 °C</td><td>Either the liquid's own inlet temperature, or the <b>outlet of another coolant channel</b> (channels in series).</td></tr>
+<tr><td>Liquid enters at the other end</td><td>off</td><td>Reverses the flow direction</td></tr>
+<tr><td>Channel</td><td>—</td><td>Shows the derived geometry (length, hydraulic diameter)</td></tr>
+</table></div>
+<p>The messages list each channel with its flow regime, Reynolds and Nusselt numbers, h, inlet → outlet temperature, the heat taken up and the pressure drop. With a pump curve the operating point is reported. If the pump cannot overcome the channel, there is no flow and a warning.</p>
+
+<h4>Liquid bath</h4>
+<p>Pick the faces that touch the liquid, e.g. the inside of the container and the heater.</p>
+<div class="table-wrap"><table>
+<tr><th>Volume</th><th>Behaviour</th></tr>
+<tr><td><b>Fills the container</b> (default)</td><td>The liquid fills the container up to the <b>fill level</b> (default: the top of the picked faces, or a Z value) and is well mixed (one temperature). Natural convection acts on the wetted faces; the open surface loses heat by convection, radiation and, if ticked, <b>evaporation</b>. In transient runs the liquid starts at the run's start temperature, or at its own value.</td></tr>
+<tr><td><b>Large volume, fixed temperature</b></td><td>The faces see liquid at a fixed temperature (<i>Liquid at</i>), e.g. a part in a large tank.</td></tr>
+</table></div>
+<p>In Airflow mode with <i>Liquid flow solved</i>, the bath is simulated as liquid with buoyancy from the density table, instead of being well mixed.</p>
+
+<h4>Liquid results</h4>
+<p>The PDF report and the CSV export contain a table of all liquid items: kind, liquid, flow, inlet and outlet (or bath) temperature, heat taken up, h and pressure drop. The Parameter sweep can vary the <b>flow rate</b> and the <b>inlet temperature</b> of a coolant channel.</p>
+<div class="note">A flow-solved channel needs at least about 3–4 cells across; on coarser grids it gives a warmer wall than the correlations. Use the Correlations model for quick studies.</div>
+
+<h3 id="th-pcb">PCB import &amp; component packages</h3>
+<p><b>Import ▾ → PCB (KiCad board or Gerber files)…</b> turns a printed circuit board into a thermal body whose conductivity follows the real copper.</p>
+
+<h4>Sources</h4>
+<ul>
+  <li><b>KiCad</b> board files (<code>.kicad_pcb</code>, KiCad 5 … 10). The layer stack, board thickness, outline, copper, plated holes and the <b>footprints</b> are read.</li>
+  <li><b>Gerber</b> files (RS-274X) with Excellon drill files, either as a <b>folder</b>, a single Gerber file (its folder is read), or a <b>Gerber job</b> (<code>.gbrjob</code>). Layers are recognised from the file function attribute or from the file name (<code>.gtl / .gbl / .g1… / .gko / .gm1</code>, <code>F_Cu / B_Cu / In1_Cu / Edge_Cuts</code> …). Gerber files contain no components, so place power parts by hand with <i>Component package</i>.</li>
+</ul>
+<p>After loading, the dialog shows what was found (copper layers, outline, plated holes, footprints). Without an outline, the box around the copper is used.</p>
+
+<h4>Board settings</h4>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Core</td><td>FR-4</td><td><b>FR-4</b> (0.81 W/m·K in-plane, 0.29 through) or <b>Aluminium core (IMS)</b> with its dielectric thickness (0.1 mm) and conductivity (2 W/m·K)</td></tr>
+<tr><td>Hole plating</td><td>25 µm</td><td>Copper in the walls of vias and through-hole pads</td></tr>
+<tr><td>Other parts</td><td>0 W</td><td>Heat of all components that are not placed, spread evenly over the board</td></tr>
+<tr><td>Layer stack</td><td>from the file</td><td>Thickness of every copper layer (18 µm = ½ oz, 35 µm = 1 oz, 70 µm = 2 oz, 105 µm = 3 oz) and every dielectric in between</td></tr>
+</table></div>
+<p>The board becomes one body (the outline extruded to the board thickness, shown green). Each copper layer is rasterised, and every cell gets its own conductivity from the copper share of each layer, the resin in between and the copper barrels of the plated holes. In-plane heat spreading through copper planes and heat transport through via arrays are therefore included without modelling the copper as separate parts. The board's properties show a summary, e.g. "2 copper layers (35 / 35 µm), FR-4, 1.6 mm, 37 × 25 mm, 64 vias".</p>
+
+<h4>Components to place</h4>
+<p>The footprint table lists every KiCad footprint with reference, value and footprint name. <b>Select by reference</b> ticks all parts whose reference starts with the given letters (default <code>Q U D L</code>: transistors, ICs, diodes, inductors). For each ticked part:</p>
+<ul>
+  <li><b>Package</b> is guessed from the footprint name; you can change it.</li>
+  <li>Enter the <b>Power</b> in W.</li>
+  <li><b>θ top</b>, <b>θ board</b> and <b>Tj max</b> are filled in with typical values. Datasheet values are better.</li>
+</ul>
+<p>The parts are placed at their footprint positions and rotations, on the top or bottom side.</p>
+
+<h4>Junction model</h4>
+<p>Every package is a block of <i>Mould compound</i> (k = 0.8 W/m·K) with a <b>two-resistor model</b>: the power enters at the junction, which is connected to the package top by θ top (θJC top) and to the board by θ board (θJB, or θJC of an exposed pad or tab). The results give the <b>junction temperature</b> of every package, together with the package top and board temperatures. If a junction exceeds Tj max, the messages show a warning. Packages can be edited later in the properties (θ to top, θ to board, Tj max).</p>
+<p>A package can also be placed by hand with <b>Heat Source ▾ → Component package (junction model)…</b> (name, package, power, θ values, Tj max, top or bottom side). It is placed on the selected board, or at the origin, and can be moved with the arrows.</p>
+<div class="table-wrap"><table>
+<tr><th>Package</th><th>Size L × W × H (mm)</th><th>θ top (K/W)</th><th>θ board (K/W)</th><th>Tj max (°C)</th></tr>
+<tr><td>SOT-23</td><td>2.9 × 1.3 × 1.0</td><td>120</td><td>80</td><td>150</td></tr>
+<tr><td>SOT-23-6</td><td>2.9 × 1.6 × 1.1</td><td>100</td><td>60</td><td>150</td></tr>
+<tr><td>SOT-223</td><td>6.5 × 3.5 × 1.6</td><td>30</td><td>15</td><td>150</td></tr>
+<tr><td>SOT-89</td><td>4.5 × 2.5 × 1.5</td><td>40</td><td>20</td><td>150</td></tr>
+<tr><td>SOD-123</td><td>2.7 × 1.6 × 1.1</td><td>150</td><td>100</td><td>150</td></tr>
+<tr><td>SMA (DO-214AC)</td><td>4.3 × 2.6 × 2.1</td><td>60</td><td>25</td><td>150</td></tr>
+<tr><td>SMB (DO-214AA)</td><td>4.6 × 3.6 × 2.2</td><td>40</td><td>18</td><td>150</td></tr>
+<tr><td>SOIC-8</td><td>4.9 × 3.9 × 1.5</td><td>45</td><td>60</td><td>150</td></tr>
+<tr><td>SOIC-8 EP</td><td>4.9 × 3.9 × 1.5</td><td>40</td><td>10</td><td>150</td></tr>
+<tr><td>MSOP-8</td><td>3.0 × 3.0 × 1.0</td><td>60</td><td>80</td><td>150</td></tr>
+<tr><td>TSSOP-20 EP</td><td>6.5 × 4.4 × 1.2</td><td>30</td><td>8</td><td>150</td></tr>
+<tr><td>WSON / DFN 2×2 EP</td><td>2.0 × 2.0 × 0.8</td><td>70</td><td>15</td><td>150</td></tr>
+<tr><td>QFN 3×3 / 4×4 / 5×5 EP</td><td>3 / 4 / 5 square × 0.9</td><td>40 / 25 / 20</td><td>6 / 4 / 3</td><td>150</td></tr>
+<tr><td>DPAK (TO-252)</td><td>6.6 × 6.1 × 2.3</td><td>25</td><td>2</td><td>175</td></tr>
+<tr><td>D2PAK (TO-263)</td><td>10.2 × 9.2 × 4.5</td><td>15</td><td>1</td><td>175</td></tr>
+<tr><td>TO-220 (lying flat)</td><td>10.2 × 15.0 × 4.5</td><td>30</td><td>1.5</td><td>175</td></tr>
+<tr><td>TO-247 (lying flat)</td><td>16.0 × 21.0 × 5.0</td><td>25</td><td>0.6</td><td>175</td></tr>
+<tr><td>Power LED 3535</td><td>3.5 × 3.5 × 2.0</td><td>60</td><td>8</td><td>135</td></tr>
+<tr><td>LED 5050</td><td>5.0 × 5.0 × 1.6</td><td>60</td><td>12</td><td>125</td></tr>
+<tr><td>LED 1206</td><td>3.2 × 1.6 × 1.1</td><td>300</td><td>150</td><td>125</td></tr>
+<tr><td>Resistor 0603 / 0805 / 1206</td><td>1.6–3.2 × 0.8–1.6 × ≈0.5</td><td>600 / 450 / 300</td><td>250 / 180 / 120</td><td>155</td></tr>
+<tr><td>Resistor / shunt 2512</td><td>6.4 × 3.2 × 0.6</td><td>150</td><td>30</td><td>155</td></tr>
+<tr><td>Inductor 1812 / 6×6 / 10×10</td><td>4.5–10 square-ish × 3–4.5</td><td>100 / 60 / 40</td><td>50 / 30 / 20</td><td>125</td></tr>
+<tr><td>Custom block</td><td>size of the footprint's pads × 1.5</td><td>50</td><td>20</td><td>150</td></tr>
+</table></div>
+<div class="note">Not yet supported: detailed copper geometry as separate bodies, STEP models of components, automatic detection of thermal-via arrays as a group, and CEM-3 or ceramic cores. In Airflow mode, small boards on a coarse grid under-predict convection, so use a fine airflow grid (e.g. 0.5 mm or less) for single small boards.</div>
+
+<h3 id="th-materials">Materials</h3>
+<p>The <b>Materials</b> dialog lists the built-in materials (read only, shown in grey) and your own. Each of your materials shows where it is stored ("library" or, in italics, "this study") and how many bodies use it. Use <b>New</b>, <b>Duplicate</b> (e.g. copy a built-in one and change it) and <b>Delete</b>. Your materials are stored in <code>thermal_materials.json</code> next to SimpleCAD and copied into every study that uses them, so a study file still works on another computer.</p>
+<p>Material properties: k (W/m·K), optional in-plane k for laminates, cp (J/kg·K), density (kg/m³), emissivity, optional max. service temperature, note, and optional tables <b>k(T)</b> and <b>cp(T)</b> (cp(T) only matters in transient runs). The plain k and cp refer to 20 °C.</p>
+<p>Built-in materials (typical handbook values at about 20 °C; actual grades vary):</p>
+<div class="table-wrap"><table>
+<tr><th>Material</th><th>k (W/m·K)</th><th>cp (J/kg·K)</th><th>Density (kg/m³)</th><th>ε</th><th>Max. °C</th><th>Note</th></tr>
+<tr><td>Aluminium</td><td>167</td><td>896</td><td>2700</td><td>0.09</td><td>—</td><td>6061 / 6082, bare surface</td></tr>
+<tr><td>Aluminium Black Anodized</td><td>200</td><td>900</td><td>2700</td><td>0.85</td><td>—</td><td>Heatsink alloy 6063; the coating greatly increases radiation</td></tr>
+<tr><td>Copper</td><td>398</td><td>385</td><td>8960</td><td>0.05</td><td>—</td><td>Oxidised surface ε ≈ 0.6</td></tr>
+<tr><td>Tin</td><td>66.8</td><td>228</td><td>7310</td><td>0.05</td><td>200</td><td>Melts at 232 °C</td></tr>
+<tr><td>Brass</td><td>109</td><td>380</td><td>8500</td><td>0.10</td><td>—</td><td>CuZn37</td></tr>
+<tr><td>Bronze</td><td>50</td><td>380</td><td>8800</td><td>0.10</td><td>—</td><td>CuSn8</td></tr>
+<tr><td>Steel</td><td>50</td><td>490</td><td>7850</td><td>0.30</td><td>—</td><td>Carbon steel; stainless only ≈ 16</td></tr>
+<tr><td>ABS</td><td>0.17</td><td>1400</td><td>1040</td><td>0.92</td><td>80</td><td>Softens near 95 °C</td></tr>
+<tr><td>PLA</td><td>0.13</td><td>1800</td><td>1240</td><td>0.92</td><td>50</td><td>Glass transition ≈ 60 °C</td></tr>
+<tr><td>PET</td><td>0.20</td><td>1200</td><td>1380</td><td>0.90</td><td>70</td><td>PET / PETG</td></tr>
+<tr><td>Micarta</td><td>0.30</td><td>1400</td><td>1350</td><td>0.90</td><td>120</td><td>Phenolic laminate</td></tr>
+<tr><td>G10</td><td>0.29 / 0.81 in-plane</td><td>1100</td><td>1850</td><td>0.90</td><td>140</td><td>Glass-epoxy laminate</td></tr>
+<tr><td>FR-4</td><td>0.29 / 0.81 in-plane</td><td>1100</td><td>1850</td><td>0.90</td><td>130</td><td>PCB laminate without copper</td></tr>
+<tr><td>GFK</td><td>0.30</td><td>1000</td><td>1900</td><td>0.90</td><td>120</td><td>Glass-fibre reinforced plastic</td></tr>
+<tr><td>CFK</td><td>0.80 / 5.0 in-plane</td><td>1000</td><td>1600</td><td>0.85</td><td>120</td><td>Carbon-fibre laminate</td></tr>
+<tr><td>Wood (Oak / Pine / Beech / Birch / Walnut)</td><td>0.12 – 0.17</td><td>1900 – 2300</td><td>500 – 750</td><td>0.90</td><td>100</td><td>Across the grain</td></tr>
+<tr><td>Mould compound</td><td>0.8</td><td>880</td><td>—</td><td>0.90</td><td>—</td><td>Body of component packages</td></tr>
+</table></div>
+<p>Laminates (G10, FR-4, CFK) are <b>orthotropic</b>: the low through-plane value applies along the thinnest extent of the body. If a body exceeds its material's max. service temperature, the messages show a warning.</p>
+
+<h3 id="th-settings">Simulation settings</h3>
+<h4>Solver &amp; analysis</h4>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Options / default</th><th>Meaning</th></tr>
+<tr><td>Solver</td><td><b>Conduction (FEM)</b> / Airflow + heat (CHT)</td><td>Conduction: heat conduction in the bodies, air cooling and radiation act on their surfaces (fast, seconds). Airflow: the air around and inside the parts is simulated too, with buoyancy, fans and vents (minutes).</td></tr>
+<tr><td>Analysis</td><td><b>Steady state</b> / Transient</td><td>Final temperatures after a long time, or how the temperatures develop after switching on.</td></tr>
+<tr><td>Duration</td><td>600 s (shown in s / min / h)</td><td>Transient: simulated time after switching on</td></tr>
+<tr><td>Time steps</td><td>100 (1 – 10 000)</td><td>More steps = more accurate and slower. Up to 100 time points are kept for the time slider.</td></tr>
+<tr><td>Start temperature</td><td>Ambient, or own value</td><td>Transient: temperature of all bodies at t = 0</td></tr>
+</table></div>
+<p>For transient runs the panel shows an estimated <b>thermal time constant</b> τ. After about 5 τ the temperatures are within about 1 % of their final values, so a duration of 5 τ is a good choice to see the whole warm-up.</p>
+
+<h4>Environment</h4>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Ambient</td><td>25 °C</td><td>Temperature of the surrounding air and surfaces</td></tr>
+<tr><td>Convection (Conduction solver)</td><td><b>Natural convection (auto h)</b></td><td>h from correlations for vertical, upward- and downward-facing surfaces (gravity along −Z)</td></tr>
+<tr><td></td><td>Forced air</td><td>Air flows along the surfaces at the given <b>air speed</b> (default 1 m/s; a small fan gives about 1–3 m/s), flat-plate correlation combined with natural convection</td></tr>
+<tr><td></td><td>Fixed coefficient h</td><td>One h for all surfaces (default 10 W/m²K; ≈ 5–10 for still air, 20–100 with a fan)</td></tr>
+<tr><td>Radiation</td><td>on</td><td>Radiation exchange with the surroundings at ambient temperature, using each body's emissivity</td></tr>
+</table></div>
+<div class="tip">Gravity points along <b>−Z</b>. Orient your model so that "up" in reality is +Z, otherwise natural convection is calculated for the wrong surfaces.</div>
+
+<h4>Mesh (Conduction solver)</h4>
+<ul>
+  <li><b>Automatic cell size</b> (default): aims at about 150 000 solid cells and at least three cells across the thinnest body.</li>
+  <li><b>Cell size</b>: edge length of the cubic cells. Thin walls need at least two cells across.</li>
+  <li><b>Max cells</b>: upper limit of solid cells (default 400 000, up to 5 million). If necessary the cell size is raised and a message says so.</li>
+  <li>The panel shows an estimate of the cell size and cell count before you start.</li>
+</ul>
+
+<h4>Air domain (Airflow solver)</h4>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Beside / Below / Above</td><td>automatic</td><td>Air space around the parts in X/Y, below and above (where the warm air rises)</td></tr>
+<tr><td>Domain sides</td><td>all Open</td><td>Each of the six sides (−X, +X, −Y, +Y, −Z floor, +Z top) can be:
+  <ul style="margin:4px 0 0">
+    <li><b>Open</b>: air flows in at ambient temperature and out freely</li>
+    <li><b>Wall</b>: closed, no slip, no heat crosses (table top, cabinet wall)</li>
+    <li><b>Wall, fixed temperature</b>: closed wall held at <i>Wall at</i> (default 25 °C)</li>
+    <li><b>Inlet</b>: air blows in at the <i>Inlet speed</i> (default 1 m/s) and ambient temperature</li>
+    <li><b>Symmetry</b>: mirror plane (free slip, no heat crosses); simulates half a model</li>
+  </ul></td></tr>
+<tr><td>Flow</td><td>Automatic</td><td>Automatic: laminar for natural convection, turbulent (mixing length) once a fan or inlet blows. Or force Laminar / Turbulent.</td></tr>
+<tr><td>Grid</td><td>automatic</td><td>Cell size at the parts; cells grow towards the domain sides (factor 1.18, at most 10 × the part cell size)</td></tr>
+<tr><td>Max cells</td><td>250 000</td><td>Upper limit of grid cells (air and solid)</td></tr>
+<tr><td>Iterations</td><td>800</td><td>Steady: upper limit; the run stops earlier once flow and heat balance settle</td></tr>
+<tr><td>Per time step</td><td>30</td><td>Transient: upper limit of inner iterations per time step</td></tr>
+</table></div>
+
+<h3 id="th-solvers">How the solvers work</h3>
+<h4>Conduction (FEM)</h4>
+<ul>
+  <li>All visible bodies are <b>voxelised</b> on one Cartesian grid. A cell belongs to a body if its centre is inside (majority vote of three ray directions, so slightly open meshes still work). Where bodies overlap the later body wins; placed heat sources always win.</li>
+  <li>Touching bodies share grid nodes (bonded contact). Contact items lower the conductivity of the two touching cell layers accordingly.</li>
+  <li>Trilinear 8-node <b>hexahedral finite elements</b>; laminates are orthotropic.</li>
+  <li>Exposed faces lose heat by <b>convection</b> (natural / forced / fixed h) and <b>radiation</b>. Air enclosed in a housing conducts heat as still air (k = 0.026 W/m·K).</li>
+  <li><b>Steady state</b> by Picard iteration over the non-linear surface terms; <b>transient</b> by implicit Euler. Each linear system is solved by conjugate gradients with a two-level preconditioner.</li>
+</ul>
+<h4>Airflow + heat (CHT)</h4>
+<ul>
+  <li>Air and solids on one <b>rectilinear grid</b> that is fine at the parts and grows towards the sides of the air box.</li>
+  <li>Steady incompressible <b>Navier–Stokes</b> with <b>Boussinesq buoyancy</b>, finite volumes on a staggered grid, SIMPLEC with a pseudo time step. One energy equation for air and solids (conjugate heat transfer).</li>
+  <li>Laminar or mixing-length eddy viscosity; a thermal wall function for coarse cells.</li>
+  <li>Converged when the mass residual, temperature change and heat balance (within 0.5 %) settle.</li>
+  <li>Validated against the de Vahl Davis heated cavity (Ra 10³ … 10⁶, Nusselt number within 2 %).</li>
+  <li>Transient: implicit time steps, each converged by inner iterations.</li>
+  <li>With <i>Liquid flow solved</i>, the liquid of a bath or channel is simulated on the same grid (buoyancy from the liquid's density table; a channel is fed by its pump at the inlet).</li>
+</ul>
+<h4>Liquids and PCBs (both solvers)</h4>
+<ul>
+  <li><b>Coolant channels</b> (correlation model): the liquid temperature is marched along the channel from the inlet. h follows pipe-flow correlations, and the pressure drop follows Darcy–Weisbach. Checks: the outlet temperature matches the energy balance within 0.02 K; laminar Nu in a long pipe gives the textbook 3.66 / 4.36.</li>
+  <li><b>Well-mixed baths</b>: one liquid temperature, natural convection of the liquid on the wetted faces, and losses from the open surface.</li>
+  <li><b>PCBs</b>: per-cell conductivity from the rasterised copper layers and plated holes. Checks: copper-plane heat spreading is within 0.4 % of the analytical fin solution; a DPAK on a 1 in² FR-4 board with 2 oz copper gives θJA ≈ 51.6 K/W (datasheets: about 50 K/W).</li>
+</ul>
+
+<h3 id="th-results">Results</h3>
+<ul>
+  <li><b>Temperature map</b> on the surfaces with a colour legend. <i>Auto colour range</i> or a fixed range (low / high °C), useful to compare runs.</li>
+  <li><b>Results table</b>: every body with material, power, min / mean / max °C. Selecting a row highlights the body.</li>
+  <li><b>Probes</b> table: the temperature at every probe. A probe stays on its part when the part moves; probes can also be placed on the cut faces of the section view.</li>
+  <li><b>Plot</b> (transient): maximum temperature over time. Click into the plot to jump to that time.</li>
+  <li><b>Time slider / Play</b> (transient): step through the stored time points.</li>
+  <li><b>Section view</b>: a movable plane (arrows, rings or Position / Rotation fields; <i>Show the other side</i>). Cut faces show the temperatures inside the parts. In airflow results the section shows the air <b>temperature</b> or <b>air speed</b>, optionally with <b>velocity arrows</b>.</li>
+  <li><b>Streamlines</b> (airflow): the paths of the air.</li>
+  <li><b>Messages</b>: the heat balance of every run (heat in from sources, out by convection, radiation and fixed-temperature faces), mesh information and warnings.</li>
+</ul>
+<div class="note">Results are not saved in the <code>.thml</code> file; run the simulation again after opening a study, or export the results first.</div>
+
+<h3 id="th-sweep">Parameter sweep</h3>
+<p>Runs the study once for every value of one parameter (the study itself stays unchanged) and compares the temperatures of all bodies and probes. Up to 50 runs. Values are either <i>evenly from … to …</i> with a number of runs, or a <i>list of values</i> (e.g. <code>0.5, 1, 2, 5</code>). Materials are chosen from a checklist.</p>
+<div class="table-wrap"><table>
+<tr><th>Parameter</th><th>Unit</th><th>Applies to</th></tr>
+<tr><td>Power of a body</td><td>W</td><td>a body</td></tr>
+<tr><td>Material of a body</td><td>—</td><td>a body</td></tr>
+<tr><td>Emissivity of a body</td><td>—</td><td>a body</td></tr>
+<tr><td>Thermostat setpoint of a body</td><td>°C</td><td>a body with thermostat</td></tr>
+<tr><td>Position of a part</td><td>mm</td><td>a part, along X, Y or Z</td></tr>
+<tr><td>Heat flux of a face condition</td><td>W or W/m²</td><td>a heat-flux condition</td></tr>
+<tr><td>Contact resistance / layer thickness</td><td>K·cm²/W or mm</td><td>a contact</td></tr>
+<tr><td>Ambient temperature</td><td>°C</td><td>—</td></tr>
+<tr><td>Convection coefficient h (fixed)</td><td>W/m²K</td><td>—</td></tr>
+<tr><td>Air speed (forced air)</td><td>m/s</td><td>—</td></tr>
+<tr><td>Volume flow of a fan</td><td>m³/h</td><td>a fan</td></tr>
+<tr><td>Flow rate of a coolant channel</td><td>L/min</td><td>a coolant channel</td></tr>
+<tr><td>Inlet temperature of a coolant channel</td><td>°C</td><td>a coolant channel</td></tr>
+<tr><td>Inlet speed (airflow)</td><td>m/s</td><td>—</td></tr>
+<tr><td>Cell size (mesh study)</td><td>mm</td><td>— (check that the result no longer changes with a finer mesh)</td></tr>
+</table></div>
+<p><b>Sweep results</b> (Simulation menu) shows a table and a chart of all runs; each run can be shown in the view afterwards, and the table can be exported as CSV.</p>
+
+<h3 id="th-export">Export</h3>
+<div class="table-wrap"><table>
+<tr><th>Format</th><th>Content</th></tr>
+<tr><td>PDF report</td><td>Study name, setup (solver, analysis, environment, air domain, flow model), pictures, results with temperatures, liquid items, junction temperatures, the parameter sweep and the materials used</td></tr>
+<tr><td>Results table (CSV)</td><td>Solver, analysis, ambient, the per-body / per-probe temperatures, liquid items and package junctions</td></tr>
+<tr><td>Values over time (CSV)</td><td>Transient: temperatures over time</td></tr>
+<tr><td>ParaView (VTU)</td><td>Temperatures (and air velocities) of the whole mesh; a transient run additionally as a <code>.pvd</code> time series</td></tr>
+<tr><td>Image (PNG)</td><td>The current 3-D view</td></tr>
+</table></div>
+
+<h3 id="th-example">Example: transistor on a heatsink</h3>
+<ol class="steps">
+  <li>Model the heatsink in SimpleCAD and set its material to <i>Aluminium Black Anodized</i> in the Properties panel. Make sure the fins point up (+Z) or sideways as in reality.</li>
+  <li>Open Thermal → Import → <i>Parts of the open project…</i> and select the heatsink.</li>
+  <li>Select the heatsink, choose Heat Source → <i>Extrusion on a face…</i> and click the base face. Rectangle 10 × 15 mm, height 4.5 mm, <i>Out of the face</i>, power 5 W, material e.g. <i>Copper</i> (the package tab).</li>
+  <li>Contacts → <i>Detect touching parts</i>. Select the new contact, type <i>Interface layer</i>, preset <i>Silicone insulator (Sil-Pad type)</i>.</li>
+  <li>Place a probe on the heat source.</li>
+  <li>Solver <i>Conduction</i>, analysis <i>Steady state</i>, ambient 40 °C (inside a device), natural convection, radiation on. Press <kbd>F5</kbd>.</li>
+  <li>Read the maximum temperature of the heat source in the results table. Add the junction-to-case resistance from the datasheet × 5 W to estimate the junction temperature.</li>
+  <li>Use a <b>Parameter sweep</b> over the power (e.g. 2 … 10 W, 5 runs) to find the power at which the limit is reached, or over the material to compare a bare and an anodised heatsink.</li>
+</ol>
+
+<h3 id="th-trouble">Messages &amp; accuracy</h3>
+<div class="table-wrap"><table>
+<tr><th>Message</th><th>What to do</th></tr>
+<tr><td>… is not a closed mesh; its volume is estimated</td><td>The body has holes in its mesh. Results are usually fine; check the imported model if values look odd.</td></tr>
+<tr><td>… is thinner than one cell / coarsely resolved</td><td>Reduce the cell size or increase Max cells so that thin walls have at least two cells across.</td></tr>
+<tr><td>Heat balance off by …; the result is not converged</td><td>Increase iterations (airflow), refine the mesh, or check for extreme material contrasts.</td></tr>
+<tr><td>The surface coefficients did not fully settle / the linear solver stopped early</td><td>Usually small; check the heat balance. Refine or simplify the model if needed.</td></tr>
+<tr><td>The air flow did not fully settle in N iterations</td><td>Increase <i>Iterations</i> or coarsen the airflow grid.</td></tr>
+<tr><td>Still heating up at the end: … rises N K/min</td><td>The transient duration is too short to reach the final temperature. Use a longer duration (about 5 τ) or Steady state.</td></tr>
+<tr><td>An on / off cycle switches faster than the time step</td><td>Increase the number of time steps if the ripple matters.</td></tr>
+<tr><td>Thermostat switches at almost every time step</td><td>More time steps or a larger hysteresis.</td></tr>
+<tr><td>Face condition reaches no outside surface</td><td>The picked faces are covered by other bodies; pick exposed faces.</td></tr>
+<tr><td>Contact: the two bodies do not touch</td><td>Move the parts so they touch, or remove the contact.</td></tr>
+<tr><td>Fan / vent has no free air face, or is not aligned with a grid axis</td><td>Place it so one side is in free air; align it with X, Y or Z.</td></tr>
+<tr><td>… reaches N °C, above the material's limit</td><td>The material's max. service temperature is exceeded.</td></tr>
+<tr><td>The junction of … reaches N °C, above its limit</td><td>Tj max of a package is exceeded: more copper, vias, a heatsink, or less power.</td></tr>
+<tr><td>Coolant …: no flow (the pump cannot overcome the channel)</td><td>Use a stronger pump curve, or a larger or shorter channel.</td></tr>
+<tr><td>Coolant / bath …: wetted faces reach N °C</td><td>The liquid would boil or age. Increase the flow or lower the inlet temperature.</td></tr>
+<tr><td>The liquid of … touches no part</td><td>The bath's picked faces or fill level do not reach any body.</td></tr>
+</table></div>
+<p><b>Accuracy tips</b></p>
+<ul>
+  <li>Do a quick mesh study: run a <i>Cell size</i> sweep and use a cell size at which the maximum temperature hardly changes.</li>
+  <li>Natural convection correlations are typical engineering values; expect deviations of roughly 10–20 % from measurements. Contact resistances and emissivities are often the biggest unknowns, so sweep them.</li>
+  <li>Use the Conduction solver for fast design iterations and the Airflow solver for housings, fans, vents and chimney effects.</li>
+  <li>Use a <i>Symmetry</i> side in the airflow solver to simulate half a symmetric model with twice the resolution.</li>
+</ul>
+</section>
+
+<!-- ───────────────────────── Shortcuts ───────────────────────── -->
+<section id="shortcuts">
+<h2>Keyboard &amp; mouse reference</h2>
+<p>The defaults are listed below. All shortcuts are listed under <b>Edit → Settings → Shortcuts</b>.</p>
+<div class="table-wrap"><table>
+<tr><th>Command</th><th>Shortcut</th></tr>
+<tr><td>New project</td><td><kbd>Ctrl</kbd>+<kbd>N</kbd></td></tr>
+<tr><td>Open</td><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td></tr>
+<tr><td>Save / Save As</td><td><kbd>Ctrl</kbd>+<kbd>S</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td></tr>
+<tr><td>Export STEP / STL</td><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td></tr>
+<tr><td>Exit</td><td><kbd>Ctrl</kbd>+<kbd>Q</kbd></td></tr>
+<tr><td>Undo</td><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td></tr>
+<tr><td>Redo</td><td><kbd>Ctrl</kbd>+<kbd>Y</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td></tr>
+<tr><td>Rename selected</td><td><kbd>F2</kbd></td></tr>
+<tr><td>Delete selected</td><td><kbd>Del</kbd></td></tr>
+<tr><td>Fit all</td><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td></tr>
+<tr><td>Sketch: cut / copy / paste</td><td><kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd></td></tr>
+<tr><td>Cancel tool / sketch</td><td><kbd>Esc</kbd></td></tr>
+<tr><td>Drawing: import SVG / DXF</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd></td></tr>
+<tr><td>Drawing: finish</td><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td></tr>
+<tr><td>Drawing: fit sheet</td><td><kbd>Home</kbd></td></tr>
+<tr><td>Assembly: close window</td><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td></tr>
+</table></div>
+<p>New Sketch, Extrude, Measure, Edit Selected and Deselect have no default shortcut.</p>
+</section>
+
+<!-- ───────────────────────── Settings ───────────────────────── -->
+<section id="settings">
+<h2>Settings &amp; troubleshooting</h2>
+<ul>
+  <li><b>Edit → Settings</b>: <i>Shortcuts</i> tab, and <i>Debug</i> tab (show frame rate, write the debug output file <code>simplecad_debug.txt</code>).</li>
+  <li>Errors (uncaught exceptions, native crash tracebacks, Qt critical messages) are written to <code>simplecad_error.txt</code>, next to the script or in the temp folder. Uncaught exceptions do not end the program.</li>
+  <li>When you close the program it asks, in this order: cancel the open sketch → save the assembly → save the project.</li>
+</ul>
+</section>
+
+<!-- ───────────────────────── Files ───────────────────────── -->
+<section id="files">
+<h2>File formats</h2>
+<table>
+<tr><th>Extension</th><th>Content</th></tr>
+<tr><td><code>.obj</code></td><td>SimpleCAD project: JSON with every explorer object, including sketch geometry and constraints. Solids are rebuilt on load. Embedded drawings and assemblies are included. <i>(Not a Wavefront OBJ.)</i></td></tr>
+<tr><td><code>.asby</code></td><td>Stand-alone assembly</td></tr>
+<tr><td><code>.thml</code></td><td>Thermal study (add-on)</td></tr>
+<tr><td><code>.step</code> / <code>.stl</code></td><td>Import and export of 3-D geometry</td></tr>
+<tr><td><code>.svg</code> / <code>.dxf</code></td><td>Sketch import, drawing import and drawing export</td></tr>
+<tr><td><code>.kicad_pcb</code>, Gerber / Excellon, <code>.gbrjob</code></td><td>PCB import in the Thermal add-on</td></tr>
+<tr><td><code>thermal_materials.json</code></td><td>Your own thermal materials (Thermal add-on)</td></tr>
+<tr><td><code>.pdf</code></td><td>Technical drawing export, thermal report</td></tr>
+<tr><td><code>.settings</code></td><td>User settings (shortcuts, recent files …)</td></tr>
+</table>
+</section>
+
+<!-- ───────────────────────── Dev ───────────────────────── -->
+<section id="dev">
+<h2>Developer notes</h2>
+<ul>
+  <li>The application is a single module, <code>SimpleCAD.py</code>. Add-ons are loaded with <code>load_addon()</code> through importlib (e.g. <code>simplecad_thermal.py</code>).</li>
+  <li><code>state["objects"]</code> is a flat list of entry dicts <code>{type, name, parent, visible, …}</code>. An extrusion's parent is its sketch. A sketch's parent is the extrusion it was drawn on, or <code>None</code>. Call <code>_rebuild_tree()</code> after every change.</li>
+  <li>Tree items store <code>id(entry)</code> rather than the dict itself, because PyQt5 copies dicts through QVariant.</li>
+  <li><code>Sketch.frame = (origin, u, v, w)</code>: the sketch axes in 3-D and the extrusion direction.</li>
+  <li>Sketch solver <code>SketchSystem</code>: the unknowns are the vertex x/y values and the circle radii. DOF = unknowns − rank(Jacobian).</li>
+  <li><code>circ.radius</code> always stores the true radius. <code>CDimension.dim_mode</code> selects whether the value is shown as a diameter or a radius.</li>
+  <li>Arcs run counter-clockwise from <code>v_start</code> to <code>v_end</code>.</li>
+  <li>Cut Surfaces are applied last (<code>_apply_cuts</code> → <code>clip_mesh_by_plane</code>, with CSG as the fallback).</li>
+  <li>Undo / redo is snapshot based (JSON of the sketch or the project).</li>
+</ul>
+<p style="color:var(--muted);margin-top:40px">SimpleCAD is open source; see <code>LICENSE</code> in the project folder.</p>
+</section>
+</main>
+</div>
+<script>
+(function(){
+  var root=document.documentElement, btn=document.getElementById('themeBtn');
+  try{var t=localStorage.getItem('scad-doc-theme'); if(t) root.setAttribute('data-theme',t);}catch(e){}
+  btn.addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    if(!cur){cur=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}
+    var next=cur==='dark'?'light':'dark';
+    root.setAttribute('data-theme',next);
+    try{localStorage.setItem('scad-doc-theme',next);}catch(e){}
+  });
+})();
+</script>
+</body>
+</html>

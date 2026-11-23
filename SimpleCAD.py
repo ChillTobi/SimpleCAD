@@ -12,7 +12,10 @@ Menu: File (New, Open, Recent Files, Import, Save, Save As, Export STEP/STL or T
 Edit (incl. Measure and the configurable Settings) · View · Help.
 Add-ons (load_addon): optional modules next to this file. simplecad_thermal.py adds the Thermal
 Study window (toolbar button right of Assembly, File / Edit menus); without the file the button and
-menu entries are not shown.
+menu entries are not shown. Like an assembly, a study made with parts of the open project is kept in
+the project as a "Thermal N" item of its own (top level) in the Objects explorer: Save stores it
+there, double-click / Edit opens it, Save As writes a .thml file; a study without such an item
+is saved to its file (the first Save asks for it).
 Measure tool (toolbar "Measure" / Edit → Measure): click edges and corners of the solids (any
 number); lengths, the relations between edges (connected / same face / parallel / perpendicular
 with 3-D and 2-D XY values) and, for corners, the 3-D distance, ΔX / ΔY / ΔZ and angles are shown
@@ -43,6 +46,11 @@ Workflow:
      On a face sketch, faces of other visible solids that lie in the same plane (e.g. the end
      of an extrusion that runs up to this face's plane) are shown grey with a dashed outline.
      They are display only: no reference, snap or constraint target.
+     Cut (remove-material) extrusions are projected onto every sketch, clipped to the bodies
+     they cut, and shown grey hatched with a dashed outline — so a hole running inside a body
+     shows on its other faces. Display only as well; the "Cut extrusions" row of the Sketch
+     Explorer hides / shows them (remembered for the session). The cut of the sketch being
+     edited is left out.
      Sketch Explorer shows parallel sketches grouped by signed distance along the active sketch's
      normal. Toggle each level's visibility; the current sketch cannot be hidden. Same-level
      sketches remain yellow and read-only. The nearest below level stays violet; deeper levels
@@ -264,8 +272,8 @@ Workflow:
     when the target part moves, Apply restores it, unticking releases it.
     A part whose source changed is marked (outdated); Update Selected / Update All re-read the
     sources and keep the placement, the colour and the transparency (only the shape changes). Importing parts of the open project gives the assembly an
-    "Assembly N" entry under the (first) imported object in the Objects explorer, like a Technical
-    Drawing: Save stores the assembly there (written with the project), double-click / Edit opens
+    "Assembly N" item of its own (top level) in the Objects explorer - an assembly can take in every
+    object: Save stores the assembly there (written with the project), double-click / Edit opens
     it again. Save As writes a .asby file; an assembly without such an entry is saved to a .asby
     file (the first Save asks for it). Open loads .asby files. The Colour and Transparency of a part
     apply to all of its bodies. Export writes the parts
@@ -385,7 +393,8 @@ from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QBy
                           QLocale, QEventLoop, QEvent, QObject, QtCriticalMsg, QtFatalMsg)
 from PyQt5.QtGui import (QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath,
                          QTransform, QCursor, QPolygonF, QKeySequence, QPixmap, QIcon,
-                         QPalette, QPdfWriter, QImage, QFontInfo, QPicture, QPageSize, QKeyEvent)
+                         QPalette, QPdfWriter, QImage, QFontInfo, QPicture, QPageSize, QKeyEvent,
+                         QBrush)
 from PyQt5.QtSvg import QSvgGenerator
 import numpy as np
 import qt_modern_style
@@ -763,6 +772,8 @@ def color_button_style(color):
 
 FACE_OUTLINE_COLOR = (255, 255, 255, 235)    # outline of the face a sketch lies on: white
 FACE_OUTLINE_ROW = "face outline"             # Sketch Explorer row id (other rows: level in mm)
+CUT_UNDERLAY_ROW = "cut extrusions"           # Sketch Explorer row: hatched cut tool bodies
+CUT_UNDERLAY_COLOR = (165, 165, 165, 235)     # grey hatch / dashed outline of those
 
 def face_outline_vertices(sk):
     """Vertices of the face outline references of sk (the face's own edges)."""
@@ -4628,7 +4639,10 @@ def make_rack_sketch(name, parameters, frame=None):
     rack_length = float(parameters.get("rack_length", 0.0) or 0.0)
     if not math.isfinite(rack_length) or rack_length < 0:
         raise ValueError("Rack length must be a finite positive number.")
-    length = max(rack_length, teeth * pitch)
+    end_length = float(parameters.get("end_length", 0.0) or 0.0)
+    if not math.isfinite(end_length) or end_length < 0:
+        raise ValueError("The flat end length must be zero or positive.")
+    length = max(rack_length, teeth * pitch + 2.0 * end_length)
     base_y = -2.5 * module
     points = [(length / 2.0, base_y), (length / 2.0, -1.25 * module)]
     tip_corners = []
@@ -5251,9 +5265,21 @@ def worm_default_length(module, wheel_teeth, starts):
     return (11.0 + 0.06 * z2) * m if starts <= 2 else (12.5 + 0.09 * z2) * m
 
 
+def worm_max_width(module, worm_diameter, starts):
+    """Widest wheel the worm still cuts teeth into at both faces (at least 0.5·m deep there),
+    and at most 0.85 × the worm tip diameter."""
+    m, r1 = float(module), float(worm_diameter) / 2.0
+    rim = {1: 1.0, 2: 0.75, 3: 0.75}.get(int(starts), 0.5)          # see worm_geometry "outer"
+    hob_tip = r1 + 1.25 * m
+    clear = r1 - m - rim * m + 0.5 * m          # worm axis to (wheel rim - 0.5·m)
+    return min(1.7 * (r1 + m), 2.0 * math.sqrt(max(hob_tip * hob_tip - clear * clear, 0.0)))
+
+
 def worm_default_width(module, worm_diameter, starts):
-    """Usual wheel face width: 0.75 (≤ 3 starts) or 0.67 × the worm tip diameter."""
-    return (0.75 if starts <= 3 else 0.67) * (float(worm_diameter) + 2.0 * float(module))
+    """Usual wheel face width: 0.75 (≤ 3 starts) or 0.67 × the worm tip diameter, within
+    what the worm can cut."""
+    usual = (0.75 if starts <= 3 else 0.67) * (float(worm_diameter) + 2.0 * float(module))
+    return min(usual, 0.95 * worm_max_width(module, worm_diameter, starts))
 
 
 def _hand_sign(hand):
@@ -5313,17 +5339,22 @@ def _worm_wheel_grid(module, wheel_teeth, starts, worm_diameter, pressure_angle,
     pitch, lead, t = g["pitch"], g["lead"], g["tan_alpha"]
     sign = _hand_sign(hand)
     hob_tip, hob_half, hob_root = g["hob_tip"], g["hob_half"], g["worm_root"]
-    if not 0.0 < width <= 1.7 * g["worm_tip"]:
-        raise ValueError(f"The wheel width must be at most {1.7 * g['worm_tip']:.2f} mm "
-                         "(0.85 × the worm tip diameter).")
+    widest = worm_max_width(module, worm_diameter, starts)
+    if not 0.0 < width <= widest + 1e-9:
+        raise ValueError(f"The wheel width must be at most {widest:.2f} mm for this worm (further "
+                         "out it cannot cut teeth into the wheel).")
     kappa = sign * math.tan(g["lead_angle"]) / r2              # tooth helix twist per mm
     slices = max(13, min(41, int(math.ceil(width / (0.45 * m))) + 1))
     hs = np.linspace(-width / 2.0, width / 2.0, slices)
-    base = np.arange(per_tooth) * (2.0 * math.pi / z2) / per_tooth
+    period = 2.0 * math.pi / z2
+    # samples per tooth: root land, rising flank, tip land, falling flank; every slice uses
+    # the same counts between the same four corners, so each corner is one grid line
+    n_root, n_flank, n_tip = 4, (per_tooth - 8) // 2, 4
+    coarse_n = 48
     angles, radii = [], []
     for h in hs:
         tip = min(g["wheel_outer"], a - math.sqrt(max(g["throat_radius"] ** 2 - h * h, 0.0)))
-        psi = base + kappa * h
+        root = a - math.sqrt(max(hob_tip * hob_tip - h * h, 0.0))   # rolled by the hob tip line
         lo_r = a - hob_tip - 0.01 * m
         reach = math.sqrt(max(tip * tip - (a - hob_tip) ** 2, 0.0))
         span = math.asin(min(1.0, reach / tip)) + 0.05
@@ -5331,7 +5362,8 @@ def _worm_wheel_grid(module, wheel_teeth, starts, worm_diameter, pressure_angle,
         delta = np.linspace(-span, span, steps)[None, :]
         sin_d, cos_d = np.sin(delta), np.cos(delta)
 
-        def cut(radius):
+        def cut(radius, psi):
+            """Whether the hob reaches the wheel points (radius, psi) anywhere in the roll."""
             xw, yw = -radius[:, None] * sin_d, radius[:, None] * cos_d
             du = yw - a
             rho = np.hypot(du, h)
@@ -5341,24 +5373,83 @@ def _worm_wheel_grid(module, wheel_teeth, starts, worm_diameter, pressure_angle,
             inside = (rho <= hob_tip) & ((rho < hob_root) | (xc <= hob_half + (r1 - rho) * t))
             return inside.any(axis=1)
 
-        lo = np.full(per_tooth, lo_r)
-        hi = np.full(per_tooth, tip)
-        solid = ~cut(hi)
-        for _ in range(16):                                      # ≈ 1e-4 mm
-            mid = (lo + hi) / 2.0
-            c = cut(mid)
-            hi = np.where(c, mid, hi)
-            lo = np.where(c, lo, mid)
-        r = np.where(solid, tip, lo)
-        angles.append(np.concatenate([psi + k * 2.0 * math.pi / z2 for k in range(z2)]))
+        def flank_radius(psi):
+            lo, hi = np.full(len(psi), lo_r), np.full(len(psi), tip)
+            for _ in range(16):                                      # ≈ 1e-4 mm
+                mid = (lo + hi) / 2.0
+                c = cut(mid, psi)
+                hi, lo = np.where(c, mid, hi), np.where(c, lo, mid)
+            return lo
+
+        eps = 1e-3 * m
+        coarse = kappa * h + np.arange(coarse_n) * period / coarse_n
+        in_root = cut(np.full(coarse_n, root + eps), coarse)       # inside the gap bottom
+        on_tip = ~cut(np.full(coarse_n, tip - eps), coarse)        # on the tooth's tip land
+
+        def corner(flags, rising, radius, solid_test):
+            """Angle where `flags` switches (False -> True if rising), refined by bisection;
+            None if it does not switch exactly once per tooth."""
+            following = np.roll(flags, -1)
+            found = np.nonzero((~flags & following) if rising else (flags & ~following))[0]
+            if len(found) != 1:
+                return None
+            lo_a = coarse[found[0]]
+            hi_a = lo_a + period / coarse_n
+            low_value = not rising
+            for _ in range(22):
+                mid = (lo_a + hi_a) / 2.0
+                # flag value at mid: "cut" for the root land, "not cut" for the tip land
+                value = bool(cut(np.array([radius]), np.array([mid]))[0]) != solid_test
+                lo_a, hi_a = (mid, hi_a) if value == low_value else (lo_a, mid)
+            return (lo_a + hi_a) / 2.0
+
+        root_end = corner(in_root, False, root + eps, False)
+        root_start = corner(in_root, True, root + eps, False)
+        if root_end is None or root_start is None:
+            raise ValueError("The worm wheel teeth cannot be formed (undercut teeth); use more "
+                             "teeth, a smaller pressure angle or a narrower wheel.")
+        tip_start = corner(on_tip, True, tip - eps, True)
+        tip_end = corner(on_tip, False, tip - eps, True)
+        pointed = tip_start is None or tip_end is None
+        if pointed:
+            # the tooth comes to a point below the tip circle in this slice (where the throat
+            # meets the rim cylinder): a very narrow tip strip around its highest point
+            fine = np.linspace(root_end, root_end + period, 4 * coarse_n, endpoint=False)
+            heights = flank_radius(fine)
+            heights[cut(np.full(len(fine), root + eps), fine)] = root
+            peak = fine[int(np.argmax(heights))]
+            half = 0.25 * period / (4 * coarse_n)
+            tip_start, tip_end = peak - half, peak + half
+        tip_start = root_end + (tip_start - root_end) % period
+        tip_end = root_end + (tip_end - root_end) % period
+        root_start = root_end + (root_start - root_end) % period
+        if not root_end < tip_start < tip_end < root_start:
+            raise ValueError("The worm wheel teeth cannot be formed for these settings.")
+        segments = (
+            (np.linspace(root_start - period, root_end, n_root, endpoint=False), "root"),
+            (np.linspace(root_end, tip_start, n_flank, endpoint=False), "flank"),
+            (np.linspace(tip_start, tip_end, n_tip, endpoint=False), "tip"),
+            (np.linspace(tip_end, root_start, n_flank, endpoint=False), "flank"),
+        )
+        psi = np.concatenate([seg for seg, _ in segments])
+        r = np.concatenate([
+            np.full(len(seg), root) if kind == "root" else
+            flank_radius(seg) if kind == "tip" and pointed else
+            np.full(len(seg), tip) if kind == "tip" else
+            np.r_[root if index == 1 else flank_radius(seg[:1]) if pointed else tip,
+                  flank_radius(seg[1:])]
+            for index, (seg, kind) in enumerate(segments)])
+        angles.append(np.concatenate([psi + k * period for k in range(z2)]))
         radii.append(np.tile(r, z2))
     return hs + width / 2.0, np.asarray(angles), np.asarray(radii)
 
 
-def _polar_columns_solid(frame, columns, bore=0.0, label="part"):
+def _polar_columns_solid(frame, columns, bore=0.0, label="part", faces_per_strip=False):
     """Closed solid around the frame's w axis from angular columns [(z, r, angle), …] in
     counter-clockwise order, every column running from the same bottom z to the same top z.
-    Neighbouring columns are zipped by z; the end faces are star-shaped (optional bore)."""
+    Neighbouring columns are zipped by z; the end faces are star-shaped (optional bore).
+    The side gets one face per smooth patch (split at sharp creases), or with faces_per_strip
+    one face per strip between neighbouring columns, like an extruded profile."""
     O, u, v, w = (np.asarray(axis, float) for axis in frame)
     flip = float(np.dot(np.cross(u, v), w)) < 0
     verts, tris = [], []
@@ -5372,17 +5463,19 @@ def _polar_columns_solid(frame, columns, bore=0.0, label="part"):
     def add(a, b, c, bucket):
         bucket.append(len(tris))
         tris.append((a, c, b) if flip else (a, b, c))
-    side = []
+    side, strips = [], []
     n = len(columns)
     for j in range(n):
         left, right = columns[j], columns[(j + 1) % n]
         li, ri = ids[j], ids[(j + 1) % n]
+        strip_start = len(side)
         i = k = 0
         while i < len(left) - 1 or k < len(right) - 1:
             if i == len(left) - 1 or (k < len(right) - 1 and right[k + 1][0] < left[i + 1][0]):
                 add(li[i], ri[k], ri[k + 1], side); k += 1
             else:
                 add(li[i], ri[k], li[i + 1], side); i += 1
+        strips.append(side[strip_start:])
     z_bottom, z_top = columns[0][0][0], columns[0][-1][0]
     ring_bottom = [col[0] for col in ids]
     ring_top = [col[-1] for col in ids]
@@ -5409,23 +5502,59 @@ def _polar_columns_solid(frame, columns, bore=0.0, label="part"):
             add(bottom_hole[k], top_hole[k1], bottom_hole[k1], bore_ids)
             add(bottom_hole[k], top_hole[k], top_hole[k1], bore_ids)
         hole = [(bore / 2.0 * math.cos(t), bore / 2.0 * math.sin(t)) for t in hole_angles]
-    def cap(outer, ring, hole_ring, top):
-        holes = [hole[::-1]] if hole else []
-        cap_tris, points = triangulate_with_holes(outer, holes)
-        lookup = {}
-        for k, p in enumerate(outer):
-            lookup.setdefault((p[0], p[1]), ring[k])
-        for k, p in enumerate(holes[0] if holes else []):
-            lookup.setdefault((p[0], p[1]), hole_ring[::-1][k])
+    def point(radius, angle, z):
+        verts.append(tuple(float(c) for c in O + radius * (math.cos(angle) * u + math.sin(angle) * v) + z * w))
+        return len(verts) - 1
+
+    def cap(end, ring, hole_ring, top):
+        """End face of a star-shaped outline (the column angles increase around the axis):
+        radial quads to an inner circle, then a ring zipped to the bore (or a fan to the
+        centre). Exact and fast, unlike a general polygon triangulation."""
+        z = columns[0][end][0]
+        outer_angles = [c[end][2] for c in columns]
         bucket = []
-        for a, b, c in cap_tris:
-            ia, ib, ic = (lookup[(points[x][0], points[x][1])] for x in (a, b, c))
-            if len({ia, ib, ic}) < 3:
-                continue
-            add(ia, ib, ic, bucket) if top else add(ia, ic, ib, bucket)
+        def tri(a, b, c):
+            add(a, b, c, bucket) if top else add(a, c, b, bucket)
+        n_outer = len(ring)
+        if not hole:
+            centre = point(0.0, 0.0, z)
+            for i in range(n_outer):
+                tri(centre, ring[i], ring[(i + 1) % n_outer])
+            return bucket
+        inner_r = (bore / 2.0 + min(c[end][1] for c in columns)) / 2.0
+        middle = [point(inner_r, angle, z) for angle in outer_angles]
+        for i in range(n_outer):
+            j = (i + 1) % n_outer
+            tri(ring[i], ring[j], middle[j])
+            tri(ring[i], middle[j], middle[i])
+        # zip the middle ring (outer) with the bore ring (inner), both convex, by angle
+        def unwrapped(values):
+            first = min(range(len(values)), key=lambda k: values[k] % (2.0 * math.pi))
+            order = values[first:] + values[:first]
+            out, base = [], order[0] % (2.0 * math.pi)
+            for value in order:
+                value = base + (value - order[0]) % (2.0 * math.pi) if out else base
+                while out and value < out[-1]:
+                    value += 2.0 * math.pi
+                out.append(value)
+            return first, out
+        a_first, a_angles = unwrapped(outer_angles)
+        b_first, b_angles = unwrapped(hole_angles)
+        A = middle[a_first:] + middle[:a_first]
+        B = hole_ring[b_first:] + hole_ring[:b_first]
+        nA, nB = len(A), len(B)
+        a_next = a_angles[1:] + [a_angles[0] + 2.0 * math.pi]
+        b_next = b_angles[1:] + [b_angles[0] + 2.0 * math.pi]
+        i = k = 0
+        while i < nA or k < nB:
+            if k == nB or (i < nA and a_next[i] <= b_next[k]):
+                tri(A[i % nA], A[(i + 1) % nA], B[k % nB]); i += 1
+            else:
+                tri(A[i % nA], B[(k + 1) % nB], B[k % nB]); k += 1
         return bucket
-    bottom_ids = cap(outer_bottom, ring_bottom, bottom_hole if hole else [], False)
-    top_ids = cap(outer_top, ring_top, top_hole if hole else [], True)
+
+    bottom_ids = cap(0, ring_bottom, bottom_hole if hole else [], False)
+    top_ids = cap(-1, ring_top, top_hole if hole else [], True)
     uu = _unit(u)
     for kind, bucket, z, normal, outline in (("bottom", bottom_ids, z_bottom, -w, outer_bottom),
                                              ("top", top_ids, z_top, w, outer_top)):
@@ -5436,12 +5565,47 @@ def _polar_columns_solid(frame, columns, bore=0.0, label="part"):
             boundary.append(("circle", O + z * w, bore / 2.0))
         faces.append({"kind": kind, "tris": bucket, "planar": True,
                       "frame": (O + z * w, uu, np.cross(normal, uu), normal), "boundary": boundary})
-    faces.append({"kind": "side", "tris": side, "planar": False})
+    # one face per smooth patch (tip land, flank, root, …), split at the sharp tooth creases,
+    # so shading is smoothed within a patch only and the tooth edges show like on other gears
+    groups = [strip for strip in strips if strip] if faces_per_strip else \
+             _split_at_creases(verts, tris, side)
+    faces.extend({"kind": "side", "tris": group, "planar": False} for group in groups)
     if bore_ids:
         faces.append({"kind": "bore", "tris": bore_ids, "planar": False})
     if not _mesh_is_closed(tris):
         raise ValueError(f"The {label} surface could not be closed.")
     return verts, tris, faces
+
+
+def _split_at_creases(verts, tris, ids, crease_deg=25.0):
+    """Group the triangles `ids` into smooth patches: neighbours stay together while their
+    normals differ by less than crease_deg."""
+    V = np.asarray(verts, float)
+    T = np.asarray(tris, np.int64).reshape(-1, 3)[np.asarray(ids, np.int64)]
+    N = np.cross(V[T[:, 1]] - V[T[:, 0]], V[T[:, 2]] - V[T[:, 0]])
+    N /= np.maximum(np.linalg.norm(N, axis=1), 1e-30)[:, None]
+    count = len(T)
+    edges = np.sort(np.concatenate([T[:, [0, 1]], T[:, [1, 2]], T[:, [2, 0]]]), axis=1)
+    owner = np.tile(np.arange(count), 3)
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    edges, owner = edges[order], owner[order]
+    same = np.all(edges[1:] == edges[:-1], axis=1)
+    a, b = owner[:-1][same], owner[1:][same]
+    smooth = np.einsum("ij,ij->i", N[a], N[b]) >= math.cos(math.radians(crease_deg))
+    parent = list(range(count))
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, j in zip(a[smooth].tolist(), b[smooth].tolist()):
+        ri, rj = root(i), root(j)
+        if ri != rj:
+            parent[rj] = ri
+    groups = {}
+    for local, tri in enumerate(ids):
+        groups.setdefault(root(local), []).append(int(tri))
+    return list(groups.values())
 
 
 def worm_wheel_columns(parameters):
@@ -5469,7 +5633,7 @@ def worm_wheel_solid(parameters, frame, z0=0.0):
     if z0:
         columns = [[(z + z0, r, a) for z, r, a in col] for col in columns]
     return _polar_columns_solid(frame, columns, float(parameters.get("bore_diameter", 0.0)),
-                                "worm wheel")
+                                "worm wheel", faces_per_strip=True)
 
 
 def worm_solid(parameters, frame, z0=0.0, length=None):
@@ -6213,11 +6377,76 @@ def helical_rack_extrusion(loops, h, frame, angle, z0=0.0, herringbone=False):
     return _swept_profile(loops, h, frame, z0, 1, lambda t: (0.0, total_shift * t), "helical rack")
 
 
+def rack_body_length(parameters):
+    """Overall rack length: the rack length, at least the teeth plus both flat ends."""
+    pitch = math.pi * float(parameters["module"])
+    return max(float(parameters.get("rack_length", 0.0) or 0.0),
+               int(parameters["teeth"]) * pitch + 2.0 * float(parameters.get("end_length", 0.0) or 0.0))
+
+
+def _box_prism(frame, x0, x1, y0, y1, z0, height):
+    """Rectangular prism in a profile frame (x, y in the sketch plane, extruded along w)."""
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    loop = [{"kind": "line", "pts": [corners[i], corners[(i + 1) % 4]]} for i in range(4)]
+    return extrude_profile([loop], height, frame, z0)
+
+
+def rack_extrusion(loops, h, frame, parameters, z0=0.0):
+    """Rack solid. Helical / herringbone racks are sheared along their length but keep square
+    ends: the sheared profile is made longer and cut back to the rack length. Optional fixing
+    holes run vertically (along the tooth height) through the middle of both flat ends."""
+    module = float(parameters["module"])
+    trace = parameters.get("tooth_trace", "straight")
+    angle = float(parameters.get("helix_angle", 0.0)) if trace in ("helical", "herringbone") else 0.0
+    length = rack_body_length(parameters)
+    base, top = -2.5 * module, -1.25 * module            # rack bottom, tooth root line
+    O, u, v, w = (np.asarray(axis, float) for axis in frame)
+    tools = []
+    shear = 0.0
+    if abs(angle) > 1e-8:
+        shear = h * abs(math.tan(math.radians(angle))) * (0.5 if trace == "herringbone" else 1.0)
+        extra = shear + module
+        longer = make_rack_sketch("rack", dict(parameters, rack_length=length + 2.0 * extra,
+                                               end_length=0.0), frame)
+        mesh = helical_rack_extrusion(longer.profile_loop_edges(), h, frame, angle, z0,
+                                      trace == "herringbone")
+        for sign in (-1.0, 1.0):
+            near, far = sign * length / 2.0, sign * (length / 2.0 + extra + 2.0 * module)
+            tools.append(_box_prism(frame, min(near, far), max(near, far), base - module,
+                                    2.0 * module, z0 - 1.0, h + 2.0))
+    else:
+        mesh = extrude_profile(loops, h, frame, z0)
+    if parameters.get("fix_holes"):
+        diameter = float(parameters.get("hole_diameter", 3.2))
+        land = (length - int(parameters["teeth"]) * math.pi * module) / 2.0
+        if diameter <= 0 or land < diameter + 1.0 + shear:
+            raise ValueError(f"The flat ends are too short for {diameter:g} mm fixing holes: "
+                             f"each needs at least {diameter + 1.0 + shear:.2f} mm "
+                             f"(it has {land:.2f} mm).")
+        if diameter > h - 1.0:
+            raise ValueError("The fixing holes are wider than the rack is thick.")
+        for sign in (-1.0, 1.0):
+            centre = sign * (length / 2.0 - land / 2.0)
+            hole_frame = (O + centre * u + (base - 1.0) * v + (z0 + h / 2.0) * w, u, w, v)
+            pts = circle_pts(0.0, 0.0, diameter / 2.0)
+            circle = [{"kind": "circle", "pts": pts + [pts[0]], "center": (0.0, 0.0),
+                       "radius": diameter / 2.0}]
+            tools.append(extrude_profile([circle], top - base + 2.0, hole_frame, 0.0))
+    if not tools:
+        return mesh
+    result = csg_subtract(mesh, tools, label="", union=False)
+    if not result[1] or not _mesh_is_closed(result[1]):
+        raise ValueError("The rack ends could not be cut.")
+    return result
+
+
 def gear_extrusion(loops, h, frame, parameters, z0=0.0):
     """Solid of a generated gear from its profile loops and stored parameters: tapered to
     the cone apex (bevel), twisted (helical, herringbone, helical ring gear), sheared
     (helical rack), or a plain prism."""
     kind = parameters.get("kind", "spur")
+    if kind == "rack":
+        return rack_extrusion(loops, h, frame, parameters, z0)
     if kind == "worm_wheel":
         return worm_wheel_solid(parameters, frame, z0)
     if kind == "worm":
@@ -9497,7 +9726,7 @@ class View3D(QGLWidget):
             frame = [np.asarray(axis, float) for axis in mw._gear_preview["sketch"]["sketch"].frame]
             module = mw.sp_gear_module.value()
             length = max(mw.sp_gear_rack_length.value(),
-                         mw.sp_gear_teeth.value() * math.pi * module)
+                         mw.sp_gear_teeth.value() * math.pi * module + 2.0 * mw.sp_rack_end.value())
             anchor = (frame[0] + length / 2.0 * frame[1] - 0.75 * module * frame[2] +
                       mw.sp_gear_thickness.value() / 2.0 * frame[3])
             handle_specs = [(anchor, _unit(frame[1]), mw.sp_gear_rack_length,
@@ -10734,6 +10963,7 @@ class View3D(QGLWidget):
             if sk:
                 self._paint_solid_underlay(p)
                 self._paint_coplanar_underlay(p)
+                self._paint_cut_underlay(p)
                 self._paint_sketch_underlays(p)
                 self._paint_sketch(p, sk)
                 self._paint_groups(p, sk, self.state.get("sketch_view_state", {}))
@@ -10788,6 +11018,27 @@ class View3D(QGLWidget):
         painter.setBrush(Qt.NoBrush)
         painter.setPen(QPen(QColor(175, 175, 175, 210), 1.2, Qt.DashLine))
         painter.drawPath(transform.map(underlay["edges"]))
+        painter.restore()
+
+    def _paint_cut_underlay(self, painter):
+        """Grey hatched remove-material extrusions inside the bodies (display only, see
+        MainWindow._collect_cut_underlay); the Sketch Explorer's "Cut extrusions" row hides it."""
+        underlay = self.state.get("sketch_view_state", {}).get("cut_underlay")
+        if underlay is None or not underlay.get("visible", True):
+            return
+        transform = QTransform(self.scale, 0.0, 0.0, -self.scale,
+                               self.width()/2 + self.offset.x(),
+                               self.height()/2 + self.offset.y())
+        shape = transform.map(underlay["fill"])
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(140, 140, 140, 40))
+        painter.drawPath(shape)
+        painter.setBrush(QBrush(QColor(*CUT_UNDERLAY_COLOR[:3], 150), Qt.BDiagPattern))
+        painter.drawPath(shape)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(*CUT_UNDERLAY_COLOR), 1.2, Qt.DashLine))
+        painter.drawPath(shape)
         painter.restore()
 
     def _paint_sketch_underlays(self, painter):
@@ -27600,11 +27851,11 @@ class AssemblyDialog(QDialog):
         self.view.fit_all()
         text = f"Added {', '.join(c['name'] for c in added)}"
         # an assembly made of project objects is kept in the project: it gets an "Assembly"
-        # entry under the (first) object in the Objects explorer, like a Technical Drawing
+        # item of its own in the Objects explorer (it can take in every object)
         if self._window._bound_assembly_entry() is None:
-            entry = self._window._create_assembly_entry(chosen[0])
+            entry = self._window._create_assembly_entry()
             self._update_title()
-            text += f" — stored as {entry['name']} under {chosen[0]['name']} in the Objects explorer"
+            text += f" — stored as {entry['name']} in the Objects explorer"
         self._set_status(text)
 
     def _import_files(self, kind=None):
@@ -27727,6 +27978,10 @@ class AssemblyDialog(QDialog):
         a file dialog asks for it). Save As always writes a .asby file (and keeps the entry
         up to date)."""
         entry = self._window._bound_assembly_entry()
+        if entry is None and not save_as and self._window._assembly_file:
+            # opened from a file: Save keeps it in the open project (an "Assembly" item);
+            # Save As still writes files
+            entry = self._window._create_assembly_entry()
         if entry is not None and not save_as:
             self._window._store_assembly_in_entry(entry)
             self._mark_saved()
@@ -28209,6 +28464,7 @@ class MainWindow(QMainWindow):
         self._file=None; self._dirty=False
         self._assembly=assembly_new(); self._assembly_dialog=None; self._assembly_file=None
         self._assembly_entry=None     # the "Assembly" entry of the Objects explorer it is kept in
+        self._thermal_entry=None      # the "Thermal" entry the open thermal study is kept in
         self._preview_workers = {}
         self._retired_preview_workers = set()
         self._preview_restart_pending = False
@@ -28255,6 +28511,7 @@ class MainWindow(QMainWindow):
              feature_fields, feature_width),
             (self._gear_form,
              (self.cb_gear_type, self.sp_gear_outside, self.sp_gear_teeth, self.sp_gear_rack_length,
+              self.sp_rack_end, self.sp_rack_hole,
               self.sp_worm_starts, self.sp_worm_diameter, self.cb_worm_hand, self.sp_worm_length,
               self.cb_pulley_profile, self.cb_sprocket_chain, self.sp_geneva_slots,
               self.sp_geneva_distance, self.sp_geneva_pin, self.sp_geneva_plate, self.sp_ratchet_depth,
@@ -29281,6 +29538,23 @@ class MainWindow(QMainWindow):
             "Overall rack length; the teeth that fit are centred and the rest is a flat land at "
             "both ends. Changing the tooth count sets the length to whole teeth. You can also "
             "drag the arrow at the rack's end in the 3-D view")
+        self.lbl_rack_end=QLabel("Flat end length:")
+        self.sp_rack_end=QDoubleSpinBox(); self.sp_rack_end.setRange(0.0, 10000.0)
+        self.sp_rack_end.setDecimals(2); self.sp_rack_end.setSingleStep(1.0)
+        self.sp_rack_end.setLocale(QLocale.c()); self.sp_rack_end.setKeyboardTracking(False)
+        self.sp_rack_end.setSuffix(" mm"); self.sp_rack_end.setValue(0.0)
+        self.sp_rack_end.setToolTip(
+            "Toothless end at both rack ends, flat at the tooth root line. It is added to the "
+            "toothed length; helical racks keep square ends")
+        self.chk_rack_holes=QCheckBox("Fixing holes in the flat ends")
+        self.chk_rack_holes.setToolTip(
+            "One vertical hole through the base in the middle of each flat end")
+        self.lbl_rack_hole=QLabel("Hole diameter:")
+        self.sp_rack_hole=QDoubleSpinBox(); self.sp_rack_hole.setRange(0.5, 100.0)
+        self.sp_rack_hole.setDecimals(2); self.sp_rack_hole.setSingleStep(0.1)
+        self.sp_rack_hole.setLocale(QLocale.c()); self.sp_rack_hole.setKeyboardTracking(False)
+        self.sp_rack_hole.setSuffix(" mm"); self.sp_rack_hole.setValue(3.2)
+        self.sp_rack_hole.setToolTip("3.2 mm suits M3 screws, 4.3 mm M4")
         # timing pulley / chain sprocket / ratchet / Geneva drive
         def mech_spin(low, high, value, decimals=2, suffix=" mm", step=None, tip=None):
             spin = QDoubleSpinBox(); spin.setRange(low, high); spin.setDecimals(decimals)
@@ -29441,7 +29715,7 @@ class MainWindow(QMainWindow):
         for checkbox in (self.chk_planetary_fix_sun, self.chk_planetary_fix_ring,
                          self.chk_planetary_fix_carrier, self.chk_gear_round_tips,
                          self.chk_gear_mate, self.chk_gear_transparent,
-                         self.chk_pulley_flanges):
+                         self.chk_pulley_flanges, self.chk_rack_holes):
             _style_checkbox_like_explorer(checkbox)
         self.lbl_gear_ratio=QLabel("Mate ratio (mate / primary):")
         self.sp_gear_ratio=PlanetaryRatioSpinBox(); self.sp_gear_ratio.setRange(0.1,10.0)
@@ -29479,6 +29753,9 @@ class MainWindow(QMainWindow):
         gear_form.addRow(self.lbl_gear_outside, self.sp_gear_outside)
         gear_form.addRow(self.lbl_gear_teeth, self.sp_gear_teeth)
         gear_form.addRow(self.lbl_gear_rack_length, self.sp_gear_rack_length)
+        gear_form.addRow(self.lbl_rack_end, self.sp_rack_end)
+        gear_form.addRow(self.chk_rack_holes)
+        gear_form.addRow(self.lbl_rack_hole, self.sp_rack_hole)
         for label, field in ((self.lbl_worm_starts, self.sp_worm_starts),
                              (self.lbl_worm_diameter, self.sp_worm_diameter),
                              (self.lbl_worm_hand, self.cb_worm_hand),
@@ -29689,6 +29966,9 @@ class MainWindow(QMainWindow):
         self.sp_gear_shift.valueChanged.connect(self._gear_shift_changed)
         self.cb_gear_trace.currentIndexChanged.connect(self._gear_trace_changed)
         self.sp_gear_rack_length.valueChanged.connect(self._rack_length_changed)
+        self.sp_rack_end.valueChanged.connect(self._rack_end_changed)
+        self.chk_rack_holes.toggled.connect(self._rack_holes_changed)
+        self.sp_rack_hole.valueChanged.connect(self._queue_gear_preview)
         self.sp_gear_teeth.valueChanged.connect(self._rack_teeth_changed)
         self.sp_gear_module.valueChanged.connect(self._rack_module_changed)
         self.chk_gear_transparent.toggled.connect(self._gear_transparency_changed)
@@ -29894,7 +30174,15 @@ class MainWindow(QMainWindow):
         w=QFrame(); w.setFrameShape(QFrame.StyledPanel)
         lay=QVBoxLayout(w); lay.setContentsMargins(6,6,6,6); lay.setSpacing(4)
         lay.addWidget(QLabel("<b>Properties</b>"))
-        form=QFormLayout(); form.setLabelAlignment(Qt.AlignRight)
+        # laid out like the Assembly window's part panel: labels on the left, values next to
+        # them, compact rows; free width stays empty on the right
+        form=QFormLayout(); form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        # The row spacing comes from the labels' padding, not the layout: rows hidden for the
+        # selected object (import position / rotation …) then leave no gap.
+        form.setHorizontalSpacing(8); form.setVerticalSpacing(0)
+        form.setContentsMargins(0, 0, 0, 0)
+        w.setStyleSheet("QLabel { padding-top: 3px; padding-bottom: 3px; }")
         self.p_name=QLineEdit(); self.p_name.setMaximumWidth(200)
         self.p_name.editingFinished.connect(self._on_prop_name)
         self.p_type=QLabel(); self.p_parent=QLabel(); self.p_pos=QLabel(); self.p_center=QLabel()
@@ -29959,12 +30247,11 @@ class MainWindow(QMainWindow):
         form.addRow("Bounds min:", self.p_pos)
         form.addRow(self.lbl_import_position, self.w_import_position)
         form.addRow(self.lbl_import_rotation, self.w_import_rotation)
-        form.addRow("", self.chk_import_fixed)
+        form.addRow(self.chk_import_fixed)      # (no empty label row left behind when hidden)
         form.addRow("Centre:", self.p_center)
         form.addRow("Size:", self.p_size)
         form.addRow(self.lbl_prop_extra, self.p_extra)
         form.addRow(self.lbl_prop_material, self.cb_prop_material)
-        form.addRow("Colour:", self.p_color)
         for field in (self.w_import_position, self.w_import_rotation, self.cb_prop_material):
             form.setAlignment(field, Qt.AlignLeft)
         self.lbl_prop_material.hide(); self.cb_prop_material.hide()
@@ -29984,7 +30271,11 @@ class MainWindow(QMainWindow):
         orow.addWidget(self.sl_prop_opacity); orow.addWidget(self.lbl_prop_opacity)
         self.w_prop_opacity=QWidget(); self.w_prop_opacity.setLayout(orow)
         self.lbl_prop_opacity_title=QLabel("Transparency:")
+        appearance = QLabel("<b>Appearance</b>")      # as "Object appearance" in the Assembly
+        appearance.setContentsMargins(0, 6, 0, 0)
+        form.addRow(appearance)
         form.addRow(self.lbl_prop_opacity_title, self.w_prop_opacity)
+        form.addRow("Colour:", self.p_color)
         self._show_prop_opacity(False)
         lay.addLayout(form); lay.addStretch()
         return w
@@ -31313,7 +31604,8 @@ class MainWindow(QMainWindow):
                 self.cb_sprocket_chain.currentData(), max(6, self.sp_gear_teeth.value()))["tooth_width"], 2))
         if kind == "rack" and previous_kind != "rack":
             self._set_quietly(self.sp_gear_rack_length,
-                              self.sp_gear_teeth.value() * math.pi * self.sp_gear_module.value())
+                              self.sp_gear_teeth.value() * math.pi * self.sp_gear_module.value() +
+                              2.0 * self.sp_rack_end.value())
             self._rack_last_teeth = self.sp_gear_teeth.value()
         self._previous_gear_type = kind
         is_rack = kind == "rack"
@@ -31326,6 +31618,10 @@ class MainWindow(QMainWindow):
         self.sp_gear_module.setVisible(is_rack or is_planetary)
         self.lbl_gear_rack_length.setVisible(is_rack)
         self.sp_gear_rack_length.setVisible(is_rack)
+        for widget in (self.lbl_rack_end, self.sp_rack_end, self.chk_rack_holes):
+            widget.setVisible(is_rack)
+        self.lbl_rack_hole.setVisible(is_rack and self.chk_rack_holes.isChecked())
+        self.sp_rack_hole.setVisible(is_rack and self.chk_rack_holes.isChecked())
         self.lbl_bevel_angle.setVisible(is_bevel)
         self.sp_bevel_angle.setVisible(is_bevel)
         self.lbl_gear_trace.setVisible(is_rack or is_internal or is_planetary)
@@ -31486,7 +31782,8 @@ class MainWindow(QMainWindow):
             return
         old_teeth = getattr(self, "_rack_last_teeth", teeth)
         self._rack_last_teeth = teeth
-        self._set_quietly(self.sp_gear_rack_length, teeth * math.pi * self.sp_gear_module.value())
+        self._set_quietly(self.sp_gear_rack_length, teeth * math.pi * self.sp_gear_module.value() +
+                          2.0 * self.sp_rack_end.value())
         if old_teeth != teeth and self.chk_gear_mate.isChecked():
             self._rack_keep_pinion(old_teeth, teeth)
             self._gear_ratio_changed()
@@ -31496,17 +31793,35 @@ class MainWindow(QMainWindow):
         if self.cb_gear_type.currentData() != "rack":
             return
         pitch = math.pi * self.sp_gear_module.value()
-        if length < pitch:
-            length = pitch
+        ends = 2.0 * self.sp_rack_end.value()
+        if length < pitch + ends:
+            length = pitch + ends
             self._set_quietly(self.sp_gear_rack_length, length)
         # the field shows 3 decimals: a length of whole teeth must not lose one by rounding
-        teeth = max(1, min(self.sp_gear_teeth.maximum(), int(math.floor((length + 1e-3) / pitch))))
+        teeth = max(1, min(self.sp_gear_teeth.maximum(),
+                           int(math.floor((length - ends + 1e-3) / pitch))))
         old_teeth = self.sp_gear_teeth.value()
         if teeth != old_teeth:
             self._set_quietly(self.sp_gear_teeth, teeth)
             self._rack_keep_pinion(old_teeth, teeth)
         self._rack_last_teeth = teeth
         self._gear_primary_changed()
+
+    def _rack_end_changed(self, *_):
+        """Rack: the flat ends are added to the toothed length (the tooth count stays)."""
+        if self.cb_gear_type.currentData() == "rack":
+            self._set_quietly(self.sp_gear_rack_length,
+                              self.sp_gear_teeth.value() * math.pi * self.sp_gear_module.value() +
+                              2.0 * self.sp_rack_end.value())
+        self._queue_gear_preview()
+
+    def _rack_holes_changed(self, checked):
+        is_rack = self.cb_gear_type.currentData() == "rack"
+        self.lbl_rack_hole.setVisible(is_rack and checked)
+        self.sp_rack_hole.setVisible(is_rack and checked)
+        if self._dock_gear.isVisible():
+            self._fit_dock_to_content(self._dock_gear)
+        self._queue_gear_preview()
 
     def _rack_module_changed(self, *_):
         if self.cb_gear_type.currentData() == "rack":
@@ -32401,6 +32716,9 @@ class MainWindow(QMainWindow):
             "backlash": self.sp_gear_backlash.value(),
             "round_tips": is_rack and self.chk_gear_round_tips.isChecked(),
             "rack_length": self.sp_gear_rack_length.value() if is_rack else 0.0,
+            "end_length": self.sp_rack_end.value() if is_rack else 0.0,
+            "fix_holes": is_rack and self.chk_rack_holes.isChecked(),
+            "hole_diameter": self.sp_rack_hole.value(),
             "tooth_radius": self.sp_gear_tooth_radius.value(),
             "pressure_angle": self.sp_gear_pressure.value(),
             "bevel_angle": self.sp_bevel_angle.value(),
@@ -32485,6 +32803,8 @@ class MainWindow(QMainWindow):
                 (self.sp_gear_outside, outside),
                 (self.sp_gear_teeth, parameters["teeth"]),
                 (self.sp_gear_module, parameters.get("module", 2.0)),
+                (self.sp_rack_end, parameters.get("end_length", 0.0)),
+                (self.sp_rack_hole, parameters.get("hole_diameter", 3.2)),
                 (self.sp_gear_rack_length, parameters.get("rack_length") or
                  parameters["teeth"] * math.pi * parameters.get("module", 2.0)),
                 (self.sp_gear_backlash, parameters.get("backlash", 0.1 if kind == "rack" else 0.0)),
@@ -32504,6 +32824,7 @@ class MainWindow(QMainWindow):
             self._load_mechanism_controls(parameters)
         self.chk_gear_round_tips.setChecked(
             bool(parameters.get("round_tips", False)))
+        self.chk_rack_holes.setChecked(bool(parameters.get("fix_holes", False)))
         self.chk_gear_mate.setChecked(False)
         self.chk_gear_mate.setEnabled(False)
         self.sp_gear_ratio.setEnabled(False)
@@ -32691,7 +33012,7 @@ class MainWindow(QMainWindow):
         elif self.cb_gear_type.currentData() == "rack":
             module = self.sp_gear_module.value()
             self.lbl_gear_derived.setText(
-                f"Rack length: {max(self.sp_gear_rack_length.value(), teeth * math.pi * module):.2f} mm · toothed {teeth * math.pi * module:.2f} mm · Pitch: {math.pi * module:.2f} mm")
+                f"Rack length: {max(self.sp_gear_rack_length.value(), teeth * math.pi * module + 2.0 * self.sp_rack_end.value()):.2f} mm · toothed {teeth * math.pi * module:.2f} mm · Pitch: {math.pi * module:.2f} mm")
         elif self.cb_gear_type.currentData() == "planetary":
             planet_teeth = self.sp_planet_teeth.value()
             ring_teeth = teeth + 2 * planet_teeth
@@ -33877,6 +34198,20 @@ class MainWindow(QMainWindow):
             row.setToolTip(0, "Edges of the face this sketch lies on — show them / use them "
                               "as fixed references (constraints already on them stay)")
             self.sketch_levels.addTopLevelItem(row)
+        cut_underlay = self.state.get("sketch_view_state", {}).get("cut_underlay")
+        if cut_underlay is not None:
+            # hatched cut extrusions inside the bodies: show / hide only (never a reference)
+            row = QTreeWidgetItem(["Cut extrusions", ""])
+            row.setData(0, Qt.UserRole, CUT_UNDERLAY_ROW)
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setCheckState(0, Qt.Checked if cut_underlay.get("visible", True) else Qt.Unchecked)
+            row.setForeground(0, QColor(*CUT_UNDERLAY_COLOR))
+            row.setToolTip(0, "Remove-material extrusions inside the bodies, projected onto this "
+                              "sketch (grey hatched) — shown for orientation only, never a reference")
+            self.sketch_levels.addTopLevelItem(row)
+            for cut_name in cut_underlay["names"]:
+                row.addChild(QTreeWidgetItem([cut_name, ""]))
+            row.setExpanded(True)
         for item in underlays:
             level = item["level"]
             label = "Same level" if level == 0 else \
@@ -33927,6 +34262,14 @@ class MainWindow(QMainWindow):
             sv["face_outline"] = {"visible": row.checkState(0) == Qt.Checked,
                                   "reference": row.checkState(1) == Qt.Checked}
             self.view3d._hover2d = None
+            self.view3d.update()
+            return
+        if level == CUT_UNDERLAY_ROW:
+            cut_underlay = self.state["sketch_view_state"].get("cut_underlay")
+            # remembered for the following sketches of this session
+            self._cut_underlay_visible = row.checkState(0) == Qt.Checked
+            if cut_underlay is not None:
+                cut_underlay["visible"] = self._cut_underlay_visible
             self.view3d.update()
             return
         underlays = self.state.get("sketch_view_state", {}).get("underlays", [])
@@ -34087,11 +34430,88 @@ class MainWindow(QMainWindow):
             edges.moveTo(float(a[0]), float(a[1])); edges.lineTo(float(b[0]), float(b[1]))
         return {"fill": fill, "edges": edges}
 
+    @staticmethod
+    def _projected_mesh_area(mesh, origin, axis_u, axis_v):
+        """Area a closed mesh covers when projected onto the plane (origin, u, v), as a
+        simplified QPainterPath in plane mm. A closed mesh's shadow is already covered by the
+        triangles facing one way, so only those are used (both ways for an open mesh)."""
+        V = np.asarray(mesh[0], dtype=float).reshape(-1, 3)
+        T = np.asarray(mesh[1], dtype=int).reshape(-1, 3)
+        path = QPainterPath(); path.setFillRule(Qt.WindingFill)
+        if not len(T) or not len(V):
+            return path
+        rel = V - origin
+        P = np.column_stack((rel @ axis_u, rel @ axis_v))[T]
+        area = (P[:, 1, 0]-P[:, 0, 0])*(P[:, 2, 1]-P[:, 0, 1]) - \
+               (P[:, 1, 1]-P[:, 0, 1])*(P[:, 2, 0]-P[:, 0, 0])
+        front, back = area > 1e-12, area < -1e-12
+        total_front, total_back = float(area[front].sum()), float(-area[back].sum())
+        if abs(total_front - total_back) <= 1e-6 * max(total_front, total_back, 1e-12):
+            P = P[front]                                  # closed: one side suffices
+        else:
+            P = np.concatenate((P[front], P[back][:, ::-1]))
+        # all counter-clockwise, so overlapping triangles unite under the winding rule
+        for a, b, c in P:
+            path.addPolygon(QPolygonF([QPointF(float(a[0]), float(a[1])),
+                                       QPointF(float(b[0]), float(b[1])),
+                                       QPointF(float(c[0]), float(c[1]))]))
+            path.closeSubpath()
+        return path.simplified()
+
+    def _collect_cut_underlay(self, active_sketch):
+        """Remove-material (cut) extrusions projected onto the sketch plane and clipped to the
+        projection of the bodies they cut, so holes and pockets hidden inside a body (e.g. seen
+        from a side face) show where they are. Drawn grey and hatched; display only — no
+        reference, snap or constraint target. The cuts of the sketch being edited are left out
+        (its own geometry is them). → {"fill", "names", "visible"} or None."""
+        objects = self.state.get("objects", [])
+        origin, axis_u, axis_v, _ = (np.asarray(axis, dtype=float) for axis in active_sketch.frame)
+        editing = next((o for o in objects if o.get("type") == "sketch"
+                        and o.get("sketch") is active_sketch), None)
+        bodies = [(i, o) for i, o in enumerate(objects)
+                  if o.get("type") == "extrusion" and not o.get("cut") and not o.get("preview")
+                  and "base" in o and entry_visible(o)]
+        body_areas = {}
+        fill = QPainterPath(); fill.setFillRule(Qt.WindingFill)
+        names = []
+        for i, cut in enumerate(objects):
+            if cut.get("type") != "extrusion" or not cut.get("cut") or cut.get("preview") \
+                    or "base" not in cut:
+                continue
+            if editing is not None and cut.get("parent") is editing:
+                continue
+            # the bodies it cuts: the same ones _apply_cuts uses (earlier in the list, overlapping)
+            targets = [body for j, body in bodies if j < i and _cut_overlaps(body, cut)]
+            if not targets:
+                continue
+            try:
+                region = None
+                for body in targets:
+                    if id(body) not in body_areas:
+                        body_areas[id(body)] = self._projected_mesh_area(
+                            body["base"], origin, axis_u, axis_v)
+                    area = body_areas[id(body)]
+                    region = area if region is None else region.united(area)
+                shape = self._projected_mesh_area(cut["base"], origin, axis_u, axis_v)
+                shape = shape.intersected(region)
+            except Exception as ex:
+                _dbg(f"cut underlay {cut.get('name')}: {ex}")
+                continue
+            if shape.isEmpty():
+                continue
+            fill = fill.united(shape)
+            names.append(cut.get("name", "cut"))
+        if fill.isEmpty():
+            return None
+        return {"fill": fill, "names": names,
+                "visible": getattr(self, "_cut_underlay_visible", True)}
+
     def _begin_sketch(self, sk, where=None, name=""):
         self._migrate_legacy_sketch_references(sk)
         underlays = self._collect_sketch_underlays(sk)
         solid_underlay = self._collect_solid_underlay(sk)
         coplanar_underlay = self._collect_coplanar_underlay(sk)
+        cut_underlay = self._collect_cut_underlay(sk)
         self._release_unreferenceable_levels(sk, underlays)
         self._follow_moved_levels(sk, underlays)
         # Reference starts unticked; a level this sketch already uses references from stays on
@@ -34132,6 +34552,7 @@ class MainWindow(QMainWindow):
             "face_outline":{"visible": True, "reference": True},
             "solid_underlay":solid_underlay,
             "coplanar_underlay":coplanar_underlay,
+            "cut_underlay":cut_underlay,
         }
         self.sketch_panel.ed_name.setText(name)
         self.sketch_panel.ed_name.setPlaceholderText(sk.name)
@@ -34422,7 +34843,7 @@ class MainWindow(QMainWindow):
         handled_pairs = set()
         for entry in objects:
             if entry["type"] not in ("sketch", "imported", "surface", "technical_drawing",
-                                     "assembly") or \
+                                     "assembly", "thermal") or \
                     entry.get("parent") is not None:
                 continue
             pair_id = profile_pairs.get(id(entry))
@@ -34471,6 +34892,7 @@ class MainWindow(QMainWindow):
                    "\U0001f4d0" if entry["type"] == "sketch" else \
                      "\U0001f4c4" if entry["type"] == "technical_drawing" else \
                    "\U0001f9e9" if entry["type"] == "assembly" else \
+                   "\U0001f321" if entry["type"] == "thermal" else \
                    "\u2736" if entry["type"] == "feature" else \
                    "\u2702" if entry["type"] == "cut_surface" else \
                    "\U0001f7e5" if entry.get("cut") else "\u2b1b"
@@ -34511,6 +34933,7 @@ class MainWindow(QMainWindow):
                    "\U0001f4d0" if entry["type"] == "sketch" else \
                      "\U0001f4c4" if entry["type"] == "technical_drawing" else \
                    "\U0001f9e9" if entry["type"] == "assembly" else \
+                   "\U0001f321" if entry["type"] == "thermal" else \
                    "\u2736" if entry["type"] == "feature" else \
                    "\u2702" if entry["type"] == "cut_surface" else \
                    "\U0001f7e5" if entry.get("cut") else "\u2b1b"
@@ -34641,6 +35064,9 @@ class MainWindow(QMainWindow):
         clicked = self._entry_of(item)
         if clicked is not None and clicked.get("type") == "assembly":
             self._open_assembly_entry(clicked)    # an assembly kept in the project
+            return
+        if clicked is not None and clicked.get("type") == "thermal":
+            self._open_thermal_entry(clicked)     # a thermal study kept in the project
             return
         if item.data(0, Qt.UserRole + 1) != "draft":
             return
@@ -34827,9 +35253,13 @@ class MainWindow(QMainWindow):
             for component in self._assembly["components"]:
                 if component["kind"] == "project" and component.get("source_name") == old:
                     component["source_name"] = new_name
-            for stored in self.state["objects"]:         # assemblies kept in the project too
-                data = stored.get("assembly_data") if stored.get("type") == "assembly" else None
-                for component in (data or {}).get("components") or []:
+            studies = [getattr(self, "_thermal_study", None) or {}]     # the open thermal study
+            for stored in self.state["objects"]:   # assemblies / thermal studies in the project too
+                data = stored.get("assembly_data") if stored.get("type") == "assembly" else \
+                    stored.get("study_data") if stored.get("type") == "thermal" else None
+                studies.append(data or {})
+            for data in studies:
+                for component in data.get("components") or []:
                     if component.get("kind") == "project" and component.get("source_name") == old:
                         component["source_name"] = new_name
             for drawing in self.state["objects"]:        # drawing sheets name their model
@@ -34851,6 +35281,9 @@ class MainWindow(QMainWindow):
         self._set_measure_mode(False)
         if entry["type"] == "assembly":
             self._open_assembly_entry(entry)
+            return
+        if entry["type"] == "thermal":
+            self._open_thermal_entry(entry)
             return
         if entry["type"] == "technical_drawing":
             parent = entry.get("parent")
@@ -35601,6 +36034,16 @@ class MainWindow(QMainWindow):
                                  ", ".join(part.get("name", "?") for part in parts[:6]) +
                                  (" …" if len(parts) > 6 else "") +
                                  f" · {len(alignments)} alignment(s) · double-click to open")
+        elif sel["type"] == "thermal":
+            self.p_type.setText("Thermal study")
+            self.p_parent.setText("—")
+            data = sel.get("study_data") or {}
+            parts = data.get("components") or []
+            conditions = data.get("conditions") or []
+            self.p_extra.setText(f"{len(parts)} part(s): " +
+                                 ", ".join(part.get("name", "?") for part in parts[:6]) +
+                                 (" …" if len(parts) > 6 else "") +
+                                 f" · {len(conditions)} boundary condition(s) · double-click to open")
         elif sel["type"] == "technical_drawing":
             self.p_type.setText("Technical Drawing")
             self.p_parent.setText(par["name"] if par else "—")
@@ -38329,6 +38772,14 @@ class MainWindow(QMainWindow):
             # the project save question was already answered (the assembly is part of it)
             self._assembly_dialog._force_close = True
             self._assembly_dialog.close(); self._assembly_dialog = None
+        if self._bound_thermal_entry() is not None:
+            # a thermal study kept in the project belongs to it: closed with it
+            dialog = getattr(self, "_thermal_dialog", None)
+            if dialog is not None:
+                dialog._force_close = True
+                dialog.close(); self._thermal_dialog = None
+            self._thermal_study = None; self._thermal_file = None
+        self._thermal_entry = None
 
     def _file_new(self):
         if not self._maybe_save(): return
@@ -38545,8 +38996,20 @@ class MainWindow(QMainWindow):
                     assembly_from_data(od.get("assembly"))      # (only checks it can be read)
                 except (TypeError, ValueError, KeyError) as ex:
                     raise ValueError(f"invalid assembly {od['name']}: {ex}") from ex
-                e = {"type": "assembly", "name": od["name"], "parent": par,
+                # an item of its own (top level), also when an older file put it under an object
+                e = {"type": "assembly", "name": od["name"], "parent": None,
                      "assembly_data": od.get("assembly"), "visible": od.get("visible", True),
+                     "tree_item": None}
+            elif od["type"] == "thermal":
+                addon = load_addon("simplecad_thermal")
+                if addon is not None:
+                    try:
+                        addon.study_from_data(od.get("study"))   # (only checks it can be read)
+                    except (TypeError, ValueError, KeyError) as ex:
+                        raise ValueError(f"invalid thermal study {od['name']}: {ex}") from ex
+                # without the add-on the study is kept as it is (written back on save)
+                e = {"type": "thermal", "name": od["name"], "parent": None,
+                     "study_data": od.get("study"), "visible": od.get("visible", True),
                      "tree_item": None}
             elif od["type"] == "sketch":
                 e={"type":"sketch","name":od["name"],"sketch":sketch_from_dict(od["sketch"]),
@@ -38718,6 +39181,8 @@ class MainWindow(QMainWindow):
                 d["options"] = self._drawing_options_for_storage(o.get("options", {}))
             elif o["type"]=="assembly":
                 d["assembly"] = o.get("assembly_data")
+            elif o["type"]=="thermal":
+                d["study"] = o.get("study_data")
             elif o["type"]=="imported":
                 d["vertices"]=o["mesh_vertices"]; d["triangles"]=o["triangles"]
                 d["position"]=o.get("position", [0, 0, 0])
@@ -38968,13 +39433,14 @@ class MainWindow(QMainWindow):
         self._assembly_entry = entry
         return entry
 
-    def _create_assembly_entry(self, parent):
-        """An "Assembly N" entry under `parent` (the first project object imported into the
-        assembly) that keeps the open assembly; it opens by double-click / Edit."""
+    def _create_assembly_entry(self, _parent=None):
+        """An "Assembly N" entry of its own in the Objects explorer (top level - an assembly
+        can take in every object) that keeps the open assembly; it opens by double-click /
+        Edit."""
         taken = {obj.get("name") for obj in self.state["objects"] if obj.get("type") == "assembly"}
         name = next(f"Assembly {number}" for number in range(1, len(taken) + 2)
                     if f"Assembly {number}" not in taken)
-        entry = {"type": "assembly", "name": name, "parent": parent, "visible": True,
+        entry = {"type": "assembly", "name": name, "parent": None, "visible": True,
                  "tree_item": None, "assembly_data": assembly_to_data(self._assembly, keep_empty=True)}
         self.state["objects"].append(entry)
         self._assembly_entry = entry
@@ -38984,8 +39450,8 @@ class MainWindow(QMainWindow):
 
     def _adopt_project_assembly(self):
         """An older project stored one assembly for the whole project: when it holds parts of
-        the project, it becomes an "Assembly" entry under the first of them (the project is
-        not marked changed; the next save writes it as an entry)."""
+        the project, it becomes an "Assembly" entry (the project is not marked changed; the
+        next save writes it as an entry)."""
         objects = self.state["objects"]
         root = next((found for component in self._assembly["components"]
                      if component.get("kind") == "project"
@@ -38996,7 +39462,7 @@ class MainWindow(QMainWindow):
         taken = {obj.get("name") for obj in objects if obj.get("type") == "assembly"}
         name = next(f"Assembly {number}" for number in range(1, len(taken) + 2)
                     if f"Assembly {number}" not in taken)
-        entry = {"type": "assembly", "name": name, "parent": root, "visible": True,
+        entry = {"type": "assembly", "name": name, "parent": None, "visible": True,
                  "tree_item": None, "assembly_data": assembly_to_data(self._assembly, keep_empty=True)}
         objects.append(entry)
         self._assembly_entry = entry
@@ -39076,10 +39542,89 @@ class MainWindow(QMainWindow):
             self._assembly_dialog = None
 
     def _open_thermal_study(self):
-        """Thermal window of the simplecad_thermal add-on (kept open like the Assembly)."""
+        """Thermal window of the simplecad_thermal add-on (kept open like the Assembly). With
+        nothing open yet it shows the project's (last) "Thermal" entry."""
         addon = load_addon("simplecad_thermal")
-        if addon is not None:
+        if addon is None:
+            return
+        study = getattr(self, "_thermal_study", None)
+        if getattr(self, "_thermal_dialog", None) is None and \
+                (study is None or not study.get("components")) and \
+                self._bound_thermal_entry() is None and not getattr(self, "_thermal_file", None):
+            stored = [obj for obj in self.state["objects"] if obj.get("type") == "thermal"]
+            if stored:
+                self._open_thermal_entry(stored[-1])
+                return
+        addon.open_window(self)
+
+    # ── thermal studies kept in the project ("Thermal" entries of the Objects explorer) ──
+    def _bound_thermal_entry(self):
+        """The "Thermal" entry the open thermal study is kept in, or None (found again by its
+        name after undo / redo, like _bound_assembly_entry)."""
+        entry = getattr(self, "_thermal_entry", None)
+        if entry is None:
+            return None
+        objects = self.state["objects"]
+        if any(obj is entry for obj in objects):
+            return entry
+        entry = next((obj for obj in objects if obj.get("type") == "thermal" and
+                      obj.get("name") == entry.get("name")), None)
+        self._thermal_entry = entry
+        return entry
+
+    def _create_thermal_entry(self, study_data):
+        """A "Thermal N" entry of its own in the Objects explorer (top level - a study can take
+        in every object) that keeps the open thermal study; it opens by double-click / Edit."""
+        taken = {obj.get("name") for obj in self.state["objects"] if obj.get("type") == "thermal"}
+        name = next(f"Thermal {number}" for number in range(1, len(taken) + 2)
+                    if f"Thermal {number}" not in taken)
+        entry = {"type": "thermal", "name": name, "parent": None, "visible": True,
+                 "tree_item": None, "study_data": study_data}
+        self.state["objects"].append(entry)
+        self._thermal_entry = entry
+        self._rebuild_tree_widget_only()
+        self._mark_dirty()
+        return entry
+
+    def _store_thermal_in_entry(self, entry, study_data):
+        entry["study_data"] = study_data
+        self._mark_dirty()
+        if self.state.get("selected") is entry:
+            self._update_info()
+
+    def _open_thermal_entry(self, entry):
+        """Double-click / Edit on a "Thermal" entry: show its study in the Thermal window."""
+        if self._busy():
+            return
+        addon = load_addon("simplecad_thermal")
+        if addon is None:
+            QMessageBox.information(self, "Thermal", "The Thermal add-on (simplecad_thermal.py) "
+                                    "is not available.")
+            return
+        dialog = getattr(self, "_thermal_dialog", None)
+        if dialog is not None and self._bound_thermal_entry() is entry:
+            dialog.show(); dialog.raise_(); dialog.activateWindow()
+            return
+        if dialog is not None and not dialog._confirm_close():   # unsaved other study
+            return
+        try:
+            study = addon.study_from_data(entry.get("study_data"))
+        except (ValueError, KeyError, TypeError) as ex:
+            QMessageBox.critical(self, "Thermal", f"{entry['name']} cannot be opened:\n{ex}")
+            return
+        self._thermal_entry = entry
+        self._thermal_file = None
+        if dialog is None:
+            if getattr(self, "_thermal_study", None) is None:
+                self._thermal_study = study
+            else:
+                self._thermal_study.clear(); self._thermal_study.update(study)
+            self._thermal_saved = addon.study_state(self._thermal_study)
             addon.open_window(self)
+        else:
+            dialog.load_study(study, f"Opened {entry['name']}")
+            dialog.show(); dialog.raise_(); dialog.activateWindow()
+        self._st(f"Opened {entry['name']} in the Thermal window")
 
     def _file_export_drawing(self):
         if self._busy():

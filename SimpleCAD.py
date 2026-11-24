@@ -10,7 +10,7 @@ Units: millimetres.
 
 Menu: File (New, Open, Recent Files, Import, Save, Save As, Export STEP/STL or Technical Drawing, Exit) ·
 Edit (incl. Measure and the configurable Settings) · View · Help.
-Add-ons (load_addon): optional modules next to this file. simplecad_thermal.py adds the Thermal
+Add-ons (load_addon): optional modules next to this file. simplecad_simulation.py adds the Thermal
 Study window (toolbar button right of Assembly, File / Edit menus); without the file the button and
 menu entries are not shown. Like an assembly, a study made with parts of the open project is kept in
 the project as a "Thermal N" item of its own (top level) in the Objects explorer: Save stores it
@@ -367,7 +367,7 @@ Key implementation notes:
 
 Python 3.13, Windows (tested). Packages: PyQt5 5.15, numpy 2.3, PyOpenGL 3.1, manifold3d 3.5. DXF
 sketch import uses ezdxf. STEP import/export also uses CadQuery/OCP; STL import has no extra dependency.
-UI styling uses qt-modern-style 2.0.1. The Thermal add-on needs scipy. build.py lists every package;
+UI styling uses qt-modern-style 2.0.1. The Simulation add-on needs scipy. build.py lists every package;
 Help → About shows the versions actually in use.
 """
 import sys, os, json, copy, math, struct, datetime, traceback, tempfile, collections, ctypes
@@ -402,7 +402,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "2.3b"
+APP_VERSION = "2.4b"
 
 QLocale.setDefault(QLocale.c())
 
@@ -729,12 +729,12 @@ def _json_default(obj):
 
 # ── add-ons ───────────────────────────────────────────────────────────────────
 # Optional modules next to SimpleCAD.py (or bundled into the executable) that add a feature,
-# e.g. simplecad_thermal.py → the Thermal window. A missing add-on hides its toolbar
+# e.g. simplecad_simulation.py → the Thermal window. A missing add-on hides its toolbar
 # button and menu entries; an add-on that fails to load is logged and hidden the same way.
 # Add-ons import this module as "SimpleCAD" (also when it runs as the main script).
 # Each add-on defines ADDON_TITLE and ADDON_VERSION (listed in Help → About). Keep this list in
 # step with ADDONS in build.py.
-KNOWN_ADDONS = ("simplecad_thermal", "simplecad_motion")
+KNOWN_ADDONS = ("simplecad_simulation", "simplecad_motion")
 _ADDONS = {}
 
 def load_addon(name):
@@ -29022,8 +29022,8 @@ class MainWindow(QMainWindow):
         tb2.addSeparator()
         tb2.addAction(self.act_technical_drawing)
         tb2.addAction(self.act_assembly)
-        # Thermal add-on: the button exists only while simplecad_thermal.py is available
-        self._thermal_addon = load_addon("simplecad_thermal")
+        # Simulation add-on: the button exists only while simplecad_simulation.py is available
+        self._thermal_addon = load_addon("simplecad_simulation")
         self._thermal_dialog = None
         self.act_thermal = None
         if self._thermal_addon is not None:
@@ -30455,7 +30455,7 @@ class MainWindow(QMainWindow):
         act(m, "&Assembly…", self._open_assembly,
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
-        if load_addon("simplecad_thermal") is not None:
+        if load_addon("simplecad_simulation") is not None:
             act(m, "&Simulation…", self._open_thermal_study,
                 tip="Simulate the temperatures (Thermal) or the stresses and natural frequencies "
                     "(Structural) of parts and assemblies",
@@ -30490,7 +30490,7 @@ class MainWindow(QMainWindow):
         act(m, "&Assembly…", self._open_assembly,
             tip="Place parent objects and imported STEP / STL files together",
             icon=app_icon("assembly.png"))
-        if load_addon("simplecad_thermal") is not None:
+        if load_addon("simplecad_simulation") is not None:
             act(m, "&Simulation…", self._open_thermal_study,
                 tip="Simulate the temperatures (Thermal) or the stresses and natural frequencies "
                     "(Structural) of parts and assemblies",
@@ -39151,7 +39151,7 @@ class MainWindow(QMainWindow):
                      "assembly_data": od.get("assembly"), "visible": od.get("visible", True),
                      "tree_item": None}
             elif od["type"] == "thermal":
-                addon = load_addon("simplecad_thermal")
+                addon = load_addon("simplecad_simulation")
                 if addon is not None:
                     try:
                         addon.study_from_data(od.get("study"))   # (only checks it can be read)
@@ -39692,9 +39692,9 @@ class MainWindow(QMainWindow):
             self._assembly_dialog = None
 
     def _open_thermal_study(self):
-        """Thermal window of the simplecad_thermal add-on (kept open like the Assembly). With
+        """Simulation window of the simplecad_simulation add-on (kept open like the Assembly). With
         nothing open yet it shows the project's (last) "Thermal" entry."""
-        addon = load_addon("simplecad_thermal")
+        addon = load_addon("simplecad_simulation")
         if addon is None:
             return
         study = getattr(self, "_thermal_study", None)
@@ -39746,9 +39746,9 @@ class MainWindow(QMainWindow):
         """Double-click / Edit on a "Thermal" entry: show its study in the Thermal window."""
         if self._busy():
             return
-        addon = load_addon("simplecad_thermal")
+        addon = load_addon("simplecad_simulation")
         if addon is None:
-            QMessageBox.information(self, "Thermal", "The Thermal add-on (simplecad_thermal.py) "
+            QMessageBox.information(self, "Thermal", "The Simulation add-on (simplecad_simulation.py) "
                                     "is not available.")
             return
         dialog = getattr(self, "_thermal_dialog", None)

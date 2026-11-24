@@ -207,7 +207,10 @@ Workflow:
     (DIN EN ISO 5457 frame, grid and title block; first-angle projection per DIN ISO 128-30 by default:
     top view below the front view, left view to its right; the third-angle method can be chosen on the
     Sheet tab). Scales are the preferred ones of ISO 5455, dimension text is unit-less (mm) and follows
-    DIN 406-11; the title block carries the general tolerances (ISO 2768).
+    DIN 406-11; the title block carries the general tolerances (ISO 2768) and a surface note.
+    Every dimension can carry a tolerance (±, deviations, limits or an ISO 286 fit symbol such as H7,
+    ISO 286 / ISO 2768 in the "Tolerances" section below) and the Dimensions panel has a fit calculator and the annotations
+    geometric tolerance frame, datum, surface finish and weld symbol.
     Rotate the model in XYZ quarter-turns, position cuts by clicking a projection, and place
     entered dimensions between two picked points. The drawing is saved as a child of the extrusion.
     The editor shows the sheet like the sketcher (dark background and grid; thin lines of constant
@@ -387,7 +390,7 @@ from PyQt5.QtWidgets import (
     QShortcut, QFormLayout, QColorDialog, QDialog, QDialogButtonBox, QPlainTextEdit, QToolButton,
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QKeySequenceEdit, QTabWidget, QStyle,
     QComboBox, QMenuBar, QSizePolicy, QGridLayout, QAbstractItemView, QProgressBar, QHeaderView,
-    QTabBar, QStackedWidget
+    QTabBar, QStackedWidget, QCompleter
 )
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QRect, QLine, QLineF, QByteArray, QBuffer, QMarginsF, QSize, QSizeF, QDir, pyqtSignal, QTimer,
                           QThread, QElapsedTimer, qInstallMessageHandler, QT_VERSION_STR, PYQT_VERSION_STR,
@@ -16239,6 +16242,417 @@ def _drawing_view_frame(normal, up_hint):
 
 
 DRAWING_PAGE_W, DRAWING_PAGE_H = 2376.0, 1680.0      # A2 landscape, 4 page units per mm
+# ── Tolerances (Technical Drawing, Phase 1) ──────────────────────────────────
+# ISO 286-1 limits and fits, ISO 2768-1 general tolerances, the text of a toleranced dimension
+# and the geometric tolerance / datum / surface finish / weld annotations. Sizes are nominal
+# sizes in mm (1 … 500), deviations are returned in mm (the standard tables are in µm).
+#   holes   D, E, F, G, H, JS, K, M, N, P, R, S      grades IT5 … IT11
+#   shafts  d, e, f, g, h, js, k, m, n, p, r, s      (r, s tabulated up to 50 mm)
+# A dimension stores its tolerance as {"mode": "none" | "symmetric" | "deviations" | "limits" |
+# "fit", "upper", "lower", "fit": "H7", "show_deviations": True} (see tol_normalize_tolerance).
+# Annotations are entries of the sheet's dimension list with type "annotation".
+
+TOL_MODES = ("none", "symmetric", "deviations", "limits", "fit")
+TOL_MODE_TITLES = {"none": "None", "symmetric": "Symmetric (±)", "deviations": "Deviations (+ / −)",
+               "limits": "Limit values (max / min)", "fit": "ISO 286 fit symbol"}
+
+
+class ToleranceError(ValueError):
+    """A fit or tolerance that cannot be evaluated (the message is meant for the user)."""
+
+
+# ── ISO 286-1 ─────────────────────────────────────────────────────────────────
+# nominal size ranges (over, up to and including) in mm
+TOL_SIZE_RANGES = ((0, 3), (3, 6), (6, 10), (10, 18), (18, 30), (30, 50), (50, 80), (80, 120),
+               (120, 180), (180, 250), (250, 315), (315, 400), (400, 500))
+
+# standard tolerance grades in µm per size range
+TOL_IT_TABLE = {
+    1: (0.8, 1, 1, 1.2, 1.5, 1.5, 2, 2.5, 3.5, 4.5, 6, 7, 8),
+    2: (1.2, 1.5, 1.5, 2, 2.5, 2.5, 3, 4, 5, 7, 8, 9, 10),
+    3: (2, 2.5, 2.5, 3, 4, 4, 5, 6, 8, 10, 12, 13, 15),
+    4: (3, 4, 4, 5, 6, 7, 8, 10, 12, 14, 16, 18, 20),
+    5: (4, 5, 6, 8, 9, 11, 13, 15, 18, 20, 23, 25, 27),
+    6: (6, 8, 9, 11, 13, 16, 19, 22, 25, 29, 32, 36, 40),
+    7: (10, 12, 15, 18, 21, 25, 30, 35, 40, 46, 52, 57, 63),
+    8: (14, 18, 22, 27, 33, 39, 46, 54, 63, 72, 81, 89, 97),
+    9: (25, 30, 36, 43, 52, 62, 74, 87, 100, 115, 130, 140, 155),
+    10: (40, 48, 58, 70, 84, 100, 120, 140, 160, 185, 210, 230, 250),
+    11: (60, 75, 90, 110, 130, 160, 190, 220, 250, 290, 320, 360, 400),
+    12: (100, 120, 150, 180, 210, 250, 300, 350, 400, 460, 520, 570, 630),
+    13: (140, 180, 220, 270, 330, 390, 460, 540, 630, 720, 810, 890, 970),
+    14: (250, 300, 360, 430, 520, 620, 740, 870, 1000, 1150, 1300, 1400, 1550),
+    15: (400, 480, 580, 700, 840, 1000, 1200, 1400, 1600, 1850, 2100, 2300, 2500),
+    16: (600, 750, 900, 1100, 1300, 1600, 1900, 2200, 2500, 2900, 3200, 3600, 4000),
+}
+TOL_SUPPORTED_GRADES = tuple(range(5, 12))
+
+# fundamental deviations of shafts in µm per size range: a–h → upper deviation es,
+# k–s → lower deviation ei (k for IT4 … IT7 only; other grades 0)
+TOL_SHAFT_DEVIATION = {
+    "d": (-20, -30, -40, -50, -65, -80, -100, -120, -145, -170, -190, -210, -230),
+    "e": (-14, -20, -25, -32, -40, -50, -60, -72, -85, -100, -110, -125, -135),
+    "f": (-6, -10, -13, -16, -20, -25, -30, -36, -43, -50, -56, -62, -68),
+    "g": (-2, -4, -5, -6, -7, -9, -10, -12, -14, -15, -17, -18, -20),
+    "h": (0,) * 13,
+    "k": (0, 1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 4, 5),
+    "m": (2, 4, 6, 7, 8, 9, 11, 13, 15, 17, 20, 21, 23),
+    "n": (4, 8, 10, 12, 15, 17, 20, 23, 27, 31, 34, 37, 40),
+    "p": (6, 12, 15, 18, 22, 26, 32, 37, 43, 50, 56, 62, 68),
+    # r and s are tabulated here only up to 50 mm (the larger ranges split further)
+    "r": (10, 15, 19, 23, 28, 34),
+    "s": (14, 19, 23, 28, 35, 43),
+}
+TOL_UPPER_LETTERS = "defgh"            # a–h: the table value is the upper deviation
+TOL_HOLE_LETTERS = ("D", "E", "F", "G", "H", "JS", "K", "M", "N", "P", "R", "S")
+TOL_SHAFT_LETTERS = ("d", "e", "f", "g", "h", "js", "k", "m", "n", "p", "r", "s")
+# holes K … S: the shaft value is mirrored and Δ = IT(n) − IT(n−1) is added up to this grade
+TOL_DELTA_UP_TO = {"K": 8, "M": 8, "N": 8, "P": 7, "R": 7, "S": 7}
+
+# preferred fits (ISO 286 / DIN 7157), hole-basis first
+TOL_PREFERRED_FITS = (("H7", "g6"), ("H7", "h6"), ("H7", "f7"), ("H7", "k6"), ("H7", "n6"),
+                  ("H7", "p6"), ("H8", "f7"), ("H8", "h9"), ("H11", "h11"), ("H9", "d9"),
+                  ("H7", "s6"), ("H7", "e8"), ("G7", "h6"), ("F8", "h6"), ("K7", "h6"),
+                  ("N7", "h6"), ("P7", "h6"), ("S7", "h6"))
+
+
+def tol_size_range_index(size):
+    if not (isinstance(size, (int, float)) and math.isfinite(size)) or size <= 0:
+        raise ToleranceError("The nominal size must be greater than 0 mm.")
+    for index, (low, high) in enumerate(TOL_SIZE_RANGES):
+        if low < size <= high:
+            return index
+    raise ToleranceError(f"ISO 286 fits are available up to 500 mm (nominal size {size:g} mm).")
+
+
+def tol_it_value(grade, size):
+    """Standard tolerance (width of the tolerance zone) in mm."""
+    if grade not in TOL_IT_TABLE:
+        raise ToleranceError(f"IT{grade} is not available.")
+    return TOL_IT_TABLE[grade][tol_size_range_index(size)] / 1000.0
+
+
+def tol_parse_fit_symbol(symbol):
+    """'H7' → ('H', 7, True) for a hole, 'g6' → ('g', 6, False) for a shaft."""
+    text = str(symbol).strip().replace(" ", "")
+    letters = ""
+    while text and text[0].isalpha():
+        letters, text = letters + text[0], text[1:]
+    if not letters or not text.isdigit():
+        raise ToleranceError(f"'{symbol}' is not a fit symbol (for example H7 or g6).")
+    grade = int(text)
+    is_hole = letters.isupper()
+    return letters, grade, is_hole
+
+
+def tol_table_value(letter, size):
+    table = TOL_SHAFT_DEVIATION.get(letter.lower())
+    if table is None:
+        raise ToleranceError(f"The fit letter '{letter}' is not supported "
+                             f"(holes: {', '.join(TOL_HOLE_LETTERS)}; shafts: {', '.join(TOL_SHAFT_LETTERS)}).")
+    index = tol_size_range_index(size)
+    if index >= len(table):
+        raise ToleranceError(f"The fit letter '{letter}' is tabulated up to 50 mm only "
+                             f"(nominal size {size:g} mm).")
+    return table[index]
+
+
+def tol_deviations(symbol, size):
+    """(upper, lower) deviation in mm of a hole ('H7') or a shaft ('g6') of nominal size `size`."""
+    letter, grade, is_hole = tol_parse_fit_symbol(symbol)
+    if grade not in TOL_SUPPORTED_GRADES:
+        raise ToleranceError(f"Grade IT{grade} is not supported (IT{TOL_SUPPORTED_GRADES[0]} … "
+                             f"IT{TOL_SUPPORTED_GRADES[-1]}).")
+    it = tol_it_value(grade, size) * 1000.0                        # µm
+    if letter.upper() == "JS":
+        upper, lower = it / 2.0, -it / 2.0
+    elif is_hole:
+        if letter not in TOL_HOLE_LETTERS:
+            raise ToleranceError(f"The hole letter '{letter}' is not supported "
+                                 f"({', '.join(TOL_HOLE_LETTERS)}).")
+        value = tol_table_value(letter, size)
+        if letter.lower() in TOL_UPPER_LETTERS:                    # D … H: EI = −es
+            lower = -value
+            upper = lower + it
+        else:                                                  # K … S: ES = −ei (+ Δ)
+            if letter == "K" and grade > 8:
+                upper = 0.0
+            else:
+                delta = 0.0
+                if grade <= TOL_DELTA_UP_TO[letter] and grade > 3:
+                    delta = it - tol_it_value(grade - 1, size) * 1000.0
+                upper = -value + delta
+            lower = upper - it
+    else:
+        if letter not in TOL_SHAFT_LETTERS:
+            raise ToleranceError(f"The shaft letter '{letter}' is not supported "
+                                 f"({', '.join(TOL_SHAFT_LETTERS)}).")
+        value = tol_table_value(letter, size)
+        if letter in TOL_UPPER_LETTERS:                            # d … h: es
+            upper = value
+            lower = upper - it
+        else:                                                  # k … s: ei
+            if letter == "k" and not 4 <= grade <= 7:
+                value = 0
+            lower = value
+            upper = lower + it
+    return round(upper / 1000.0, 6), round(lower / 1000.0, 6)
+
+
+def tol_fit_limits(symbol, size):
+    """Limits of size (maximum, minimum) of a hole or a shaft symbol."""
+    upper, lower = tol_deviations(symbol, size)
+    return size + upper, size + lower
+
+
+def tol_analyse_fit(hole, shaft, size):
+    """Hole + shaft symbol → limits, clearances and the kind of fit."""
+    hole_letter, _, hole_is_hole = tol_parse_fit_symbol(hole)
+    shaft_letter, _, shaft_is_hole = tol_parse_fit_symbol(shaft)
+    if not hole_is_hole:
+        raise ToleranceError("The hole symbol needs capital letters (for example H7).")
+    if shaft_is_hole:
+        raise ToleranceError("The shaft symbol needs lower-case letters (for example g6).")
+    hole_up, hole_low = tol_deviations(hole, size)
+    shaft_up, shaft_low = tol_deviations(shaft, size)
+    max_clearance = round(hole_up - shaft_low, 6)             # largest hole − smallest shaft
+    min_clearance = round(hole_low - shaft_up, 6)             # smallest hole − largest shaft
+    if min_clearance >= 0:
+        kind = "clearance"
+    elif max_clearance <= 0:
+        kind = "interference"
+    else:
+        kind = "transition"
+    return {"size": size, "hole": hole, "shaft": shaft, "hole_dev": (hole_up, hole_low),
+            "shaft_dev": (shaft_up, shaft_low),
+            "hole_limits": (size + hole_up, size + hole_low),
+            "shaft_limits": (size + shaft_up, size + shaft_low),
+            "max_clearance": max_clearance, "min_clearance": min_clearance, "kind": kind}
+
+
+def tol_fit_report(result):
+    """Text lines of tol_analyse_fit() for the fit calculator."""
+    def mm(value):
+        return f"{value:+.3f}".replace("+0.000", "0").replace("-0.000", "0")
+    lines = [f"Nominal size {result['size']:g} mm",
+             f"Hole {result['hole']}: {mm(result['hole_dev'][0])} / {mm(result['hole_dev'][1])} mm"
+             f"  →  {result['hole_limits'][1]:.3f} … {result['hole_limits'][0]:.3f} mm",
+             f"Shaft {result['shaft']}: {mm(result['shaft_dev'][0])} / {mm(result['shaft_dev'][1])} mm"
+             f"  →  {result['shaft_limits'][1]:.3f} … {result['shaft_limits'][0]:.3f} mm"]
+    if result["kind"] == "interference":
+        lines.append(f"Maximum interference: {-result['min_clearance']:.3f} mm")
+        lines.append(f"Minimum interference: {-result['max_clearance']:.3f} mm")
+    else:
+        lines.append(f"Maximum clearance: {result['max_clearance']:.3f} mm")
+        lines.append(f"Minimum clearance: {result['min_clearance']:.3f} mm"
+                     if result["kind"] == "clearance" else
+                     f"Maximum interference: {-result['min_clearance']:.3f} mm")
+    lines.append(f"Fit type: {result['kind']}")
+    return lines
+
+
+# ── ISO 2768-1 general tolerances (linear sizes) ─────────────────────────────
+TOL_GENERAL_CLASSES = {"f": "fine", "m": "medium", "c": "coarse", "v": "very coarse"}
+TOL_GENERAL_FORM_CLASSES = {"H": "fine", "K": "medium", "L": "coarse"}      # ISO 2768-2
+TOL_GENERAL_RANGES = ((0.5, 3), (3, 6), (6, 30), (30, 120), (120, 400), (400, 1000),
+                  (1000, 2000), (2000, 4000))
+TOL_GENERAL_TABLE = {
+    "f": (0.05, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, None),
+    "m": (0.1, 0.1, 0.2, 0.3, 0.5, 0.8, 1.2, 2.0),
+    "c": (0.2, 0.3, 0.5, 0.8, 1.2, 2.0, 3.0, 4.0),
+    "v": (None, 0.5, 1.0, 1.5, 2.5, 4.0, 6.0, 8.0),
+}
+TOL_GENERAL_PRESETS = ["ISO 2768-f", "ISO 2768-m", "ISO 2768-c", "ISO 2768-v",
+                   "ISO 2768-mH", "ISO 2768-mK", "ISO 2768-mL", "ISO 2768-fH", "ISO 2768-cL"]
+
+
+def tol_general_tolerance(designation, size):
+    """± tolerance of ISO 2768-1 for a linear size, or None (below 0.5 mm / not tabulated)."""
+    text = str(designation).strip().lower().replace("iso 2768-", "").replace("iso2768-", "")
+    letter = text[:1]
+    if letter not in TOL_GENERAL_TABLE or not size > 0.5:
+        return None
+    for index, (low, high) in enumerate(TOL_GENERAL_RANGES):
+        if low < size <= high:
+            return TOL_GENERAL_TABLE[letter][index]
+    return None
+
+
+# ── tolerance on a dimension ──────────────────────────────────────────────────
+def tol_normalize_tolerance(raw):
+    """A checked tolerance dict (values from a project file are not trusted), or None for none."""
+    if not isinstance(raw, dict):
+        return None
+    mode = raw.get("mode")
+    if mode not in TOL_MODES or mode == "none":
+        return None
+    result = {"mode": mode}
+
+    def number(key):
+        value = raw.get(key)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and math.isfinite(value) and abs(value) < 1e6 else 0.0
+    if mode == "symmetric":
+        result["upper"] = abs(number("upper"))
+    elif mode in ("deviations", "limits"):
+        upper, lower = number("upper"), number("lower")
+        if upper < lower:
+            upper, lower = lower, upper
+        result.update(upper=upper, lower=lower)
+    else:
+        symbol = str(raw.get("fit", "")).strip()[:12]
+        try:
+            tol_parse_fit_symbol(symbol)
+        except ToleranceError:
+            return None
+        result.update(fit=symbol, show_deviations=bool(raw.get("show_deviations", True)))
+    return result
+
+
+def tol_decimals(*values):
+    count = 0
+    for value in values:
+        text = f"{abs(value):.4f}".rstrip("0")
+        count = max(count, len(text.split(".")[1]) if "." in text else 0)
+    return count
+
+
+def tol_signed(value, places):
+    if abs(value) < 0.5 * 10 ** -places:
+        return "0"
+    return f"{value:+.{places}f}"
+
+
+def tol_plain(value, places=2):
+    text = f"{abs(value):.{max(2, places)}f}"
+    text = text.rstrip("0").rstrip(".") if "." in text else text
+    return text or "0"
+
+
+def tol_format_dimension(value, tolerance, prefix="", unit=""):
+    """The printed text of a toleranced dimension: '25 ±0.1', '25 +0.1/-0.2', '25.1/24.9' or
+    'Ø25 H7 (+0.021/0)'. `prefix` is R / Ø, `unit` the degree sign of angles."""
+    tolerance = tol_normalize_tolerance(tolerance)
+    base = f"{prefix}{tol_plain(value)}{unit}"
+    if tolerance is None:
+        return base
+    mode = tolerance["mode"]
+    try:
+        if mode == "symmetric":
+            places = tol_decimals(tolerance["upper"])
+            return f"{base} ±{tol_plain(tolerance['upper'], places)}"
+        if mode == "deviations":
+            places = tol_decimals(tolerance["upper"], tolerance["lower"])
+            return f"{base} {tol_signed(tolerance['upper'], places)}/{tol_signed(tolerance['lower'], places)}"
+        if mode == "limits":
+            places = max(2, tol_decimals(value + tolerance["upper"], value + tolerance["lower"]))
+            return (f"{prefix}{value + tolerance['upper']:.{places}f}{unit}/"
+                    f"{prefix}{value + tolerance['lower']:.{places}f}{unit}")
+        # fit
+        text = f"{base} {tolerance['fit'].replace(' ', '')}"
+        if tolerance.get("show_deviations", True):
+            upper, lower = tol_deviations(tolerance["fit"], value)
+            places = max(2, tol_decimals(upper, lower))
+            text += f" ({tol_signed(upper, places)}/{tol_signed(lower, places)})"
+        return text
+    except ToleranceError:
+        return f"{base} {tolerance.get('fit', '')}".rstrip()
+
+
+def tol_tolerance_summary(value, tolerance):
+    """One short line for the dimension list ('H7 +0.021/0', '±0.1', …); '' for none."""
+    tolerance = tol_normalize_tolerance(tolerance)
+    if tolerance is None:
+        return ""
+    text = tol_format_dimension(value, tolerance)
+    base = tol_plain(value)
+    if tolerance["mode"] == "limits":
+        return text
+    return text[len(base):].strip()
+
+
+# ── annotations: geometric tolerances, datums, surface finish, weld symbols ────
+TOL_ANNOTATION_KINDS = ("gdt", "datum", "surface", "weld")
+TOL_ANNOTATION_TITLES = {"gdt": "Geometric tolerance", "datum": "Datum", "surface": "Surface finish",
+                     "weld": "Weld symbol"}
+# ISO 1101 characteristics: key → (title, needs datum, may take a diameter zone)
+TOL_GDT_SYMBOLS = {
+    "straightness": ("Straightness", False, True), "flatness": ("Flatness", False, False),
+    "circularity": ("Circularity", False, False), "cylindricity": ("Cylindricity", False, False),
+    "profile_line": ("Profile of a line", False, False),
+    "profile_surface": ("Profile of a surface", False, False),
+    "parallelism": ("Parallelism", True, True), "perpendicularity": ("Perpendicularity", True, True),
+    "angularity": ("Angularity", True, False), "position": ("Position", False, True),
+    "concentricity": ("Concentricity / coaxiality", True, True), "symmetry": ("Symmetry", True, False),
+    "runout": ("Circular run-out", True, False), "total_runout": ("Total run-out", True, False),
+}
+TOL_GDT_MODIFIERS = ("", "M", "L", "P")          # none, maximum material, least material, projected
+TOL_SURFACE_REMOVAL = {"any": "Any process", "required": "Material removal required",
+                   "forbidden": "No material removal"}
+TOL_LAY_SYMBOLS = ("", "=", "⊥", "X", "M", "C", "R")
+TOL_WELD_TYPES = {"fillet": "Fillet", "square": "Square butt (I)", "v": "V butt", "bevel": "Bevel butt",
+              "u": "U butt", "plug": "Plug / slot"}
+
+
+def tol_clean_text(value, limit=40):
+    return str(value if value is not None else "").strip()[:limit]
+
+
+def tol_normalize_annotation(raw):
+    """A checked annotation dict (project files are not trusted), or None when unusable."""
+    if not isinstance(raw, dict) or raw.get("kind") not in TOL_ANNOTATION_KINDS:
+        return None
+    kind = raw["kind"]
+    offset = raw.get("offset")
+    if not (isinstance(offset, (list, tuple)) and len(offset) == 2 and
+            all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                for v in offset)):
+        offset = (60.0, -40.0)
+    result = {"kind": kind, "offset": [float(offset[0]), float(offset[1])]}
+    if kind == "gdt":
+        symbol = raw.get("symbol")
+        if symbol not in TOL_GDT_SYMBOLS:
+            return None
+        datums = [tol_clean_text(d, 2).upper() for d in (raw.get("datums") or [])[:3]]
+        modifier = raw.get("modifier") if raw.get("modifier") in TOL_GDT_MODIFIERS else ""
+        result.update(symbol=symbol, tolerance=tol_clean_text(raw.get("tolerance"), 16),
+                      diameter=bool(raw.get("diameter")) and TOL_GDT_SYMBOLS[symbol][2],
+                      modifier=modifier, datums=[d for d in datums if d])
+    elif kind == "datum":
+        letter = tol_clean_text(raw.get("letter"), 2).upper()
+        if not letter:
+            return None
+        result["letter"] = letter
+    elif kind == "surface":
+        removal = raw.get("removal") if raw.get("removal") in TOL_SURFACE_REMOVAL else "any"
+        lay = raw.get("lay") if raw.get("lay") in TOL_LAY_SYMBOLS else ""
+        result.update(removal=removal, value=tol_clean_text(raw.get("value"), 16), lay=lay,
+                      allowance=tol_clean_text(raw.get("allowance"), 12))
+    else:
+        weld = raw.get("type") if raw.get("type") in TOL_WELD_TYPES else "fillet"
+        other = raw.get("other") if raw.get("other") in TOL_WELD_TYPES else ""
+        result.update({"type": weld, "other": other, "size": tol_clean_text(raw.get("size"), 12),
+                       "all_around": bool(raw.get("all_around")), "field": bool(raw.get("field")),
+                       "tail": tol_clean_text(raw.get("tail"), 24)})
+    return result
+
+
+def tol_annotation_summary(ann):
+    """One line for the dimension list."""
+    ann = tol_normalize_annotation(ann)
+    if ann is None:
+        return "Annotation"
+    kind = ann["kind"]
+    if kind == "gdt":
+        text = f"{TOL_GDT_SYMBOLS[ann['symbol']][0]} {'Ø' if ann['diameter'] else ''}{ann['tolerance']}"
+        return text + (" | " + " ".join(ann["datums"]) if ann["datums"] else "")
+    if kind == "datum":
+        return f"Datum {ann['letter']}"
+    if kind == "surface":
+        return f"Surface finish {ann['value']}".strip()
+    return f"Weld {TOL_WELD_TYPES[ann['type']].split(' ')[0].lower()} {ann['size']}".strip()
+
+
 DRAWING_UNITS_PER_MM = 4.0
 # ISO 216 sheets (landscape size in mm) with the DIN EN ISO 5457 reference grid (50 mm fields)
 DRAWING_SHEETS = {"A2": (594, 420, (12, 8)), "A3": (420, 297, (8, 6)),
@@ -17400,6 +17814,14 @@ def _drawing_fmt(value):
     return text or "0"
 
 
+def _drawing_dimension_value_text(dimension, prefix="", unit=""):
+    """Printed value of an added dimension, with its tolerance (ISO 286 fit, deviations, limits)."""
+    value = float(dimension["value"])
+    if dimension.get("tol"):
+        return tol_format_dimension(abs(value), dimension["tol"], prefix, unit)
+    return f"{prefix}{_drawing_fmt(value)}{unit}"
+
+
 def _drawing_prune(values, scale, metrics):
     """Drop coordinates whose dimension text would not fit between neighbours."""
     if len(values) < 3:
@@ -17617,6 +18039,240 @@ def _paint_radial_dimension(painter, center, edge, text, diameter, scale, ink, b
     painter.drawText(label_rect, Qt.AlignCenter, text)
 
     return label_rect
+
+
+def _paint_gdt_symbol(painter, key, rect):
+    """ISO 1101 characteristic symbol drawn with lines inside the square `rect`."""
+    h = rect.height()
+    c = rect.center()
+    cx, cy = c.x(), c.y()
+
+    def line(x0, y0, x1, y1):
+        painter.drawLine(QPointF(cx + x0 * h, cy + y0 * h), QPointF(cx + x1 * h, cy + y1 * h))
+
+    def circle(radius, dx=0.0, dy=0.0):
+        painter.drawEllipse(QPointF(cx + dx * h, cy + dy * h), radius * h, radius * h)
+
+    def arrow(x0, y0, x1, y1):
+        line(x0, y0, x1, y1)
+        _paint_arrow(painter, QPointF(cx + x1 * h, cy + y1 * h), (x1 - x0, y1 - y0), 0.22 * h)
+
+    painter.setBrush(Qt.NoBrush)
+    if key == "straightness":
+        line(-0.3, 0, 0.3, 0)
+    elif key == "flatness":
+        painter.drawPolyline(QPolygonF([QPointF(cx + x * h, cy + y * h) for x, y in (
+            (-0.32, 0.15), (-0.12, -0.15), (0.32, -0.15), (0.12, 0.15), (-0.32, 0.15))]))
+    elif key == "circularity":
+        circle(0.25)
+    elif key == "cylindricity":
+        circle(0.17)
+        line(-0.36, 0.27, -0.12, -0.27)
+        line(0.12, 0.27, 0.36, -0.27)
+    elif key in ("profile_line", "profile_surface"):
+        painter.drawArc(QRectF(cx - 0.3 * h, cy - 0.2 * h, 0.6 * h, 0.6 * h), 0, 180 * 16)
+        if key == "profile_surface":
+            line(-0.3, 0.1, 0.3, 0.1)
+    elif key == "parallelism":
+        line(-0.3, 0.25, -0.05, -0.25)
+        line(0.05, 0.25, 0.3, -0.25)
+    elif key == "perpendicularity":
+        line(0, -0.28, 0, 0.28)
+        line(-0.3, 0.28, 0.3, 0.28)
+    elif key == "angularity":
+        line(-0.3, 0.25, 0.3, 0.25)
+        line(-0.3, 0.25, 0.15, -0.28)
+    elif key == "position":
+        circle(0.2)
+        line(-0.33, 0, 0.33, 0)
+        line(0, -0.33, 0, 0.33)
+    elif key == "concentricity":
+        circle(0.12)
+        circle(0.25)
+    elif key == "symmetry":
+        line(-0.25, -0.16, 0.25, -0.16)
+        line(-0.33, 0, 0.33, 0)
+        line(-0.25, 0.16, 0.25, 0.16)
+    elif key == "runout":
+        arrow(-0.25, 0.28, 0.25, -0.22)
+    elif key == "total_runout":
+        arrow(-0.3, 0.28, 0.1, -0.18)
+        arrow(-0.05, 0.28, 0.35, -0.18)
+
+
+def _paint_weld_symbol(painter, kind, x, y, size, side):
+    """Weld symbol centred at x on the reference line y; side +1 = below it (arrow side), −1 above."""
+    s, d = size, float(side)
+
+    def point(px, py):
+        return QPointF(x + px * s, y + py * s * d)
+
+    painter.setBrush(Qt.NoBrush)
+    if kind == "fillet":
+        painter.drawPolyline(QPolygonF([point(-0.5, 0), point(-0.5, 1), point(0.5, 0), point(-0.5, 0)]))
+    elif kind == "square":
+        painter.drawLine(point(-0.12, 0), point(-0.12, 1))
+        painter.drawLine(point(0.12, 0), point(0.12, 1))
+    elif kind == "v":
+        painter.drawPolyline(QPolygonF([point(-0.5, 0), point(0, 1), point(0.5, 0)]))
+    elif kind == "bevel":
+        painter.drawPolyline(QPolygonF([point(-0.25, 0), point(-0.25, 1), point(0.5, 0)]))
+    elif kind == "u":
+        painter.drawLine(point(-0.5, 0), point(-0.5, 0.5))
+        painter.drawLine(point(0.5, 0.5), point(0.5, 0))
+        painter.drawArc(QRectF(x - 0.5 * s, y if d > 0 else y - s, s, s),
+                        (180 if d > 0 else 0) * 16, 180 * 16)
+    elif kind == "plug":
+        painter.drawPolyline(QPolygonF([point(-0.5, 0), point(-0.5, 0.7), point(0.5, 0.7),
+                                        point(0.5, 0)]))
+
+
+def _paint_annotation(painter, ann, tip, offset, unit, pen, ink, text_height=None):
+    """One geometric tolerance frame, datum, surface finish or weld symbol: its leader ends at
+    `tip` (an arrow on the feature), the frame / symbol sits at tip + offset. Sizes are page units
+    * `unit` (1 on the sheet, the screen scale in the editor). Returns the bounding rectangle."""
+    ann = tol_normalize_annotation(ann)
+    if ann is None:
+        return QRectF()
+    u = (text_height or DRAWING_TEXT) * unit
+    font = _drawing_font(max(6.0, u))
+    metrics = QFontMetricsF(font)
+    anchor = QPointF(tip.x() + offset[0], tip.y() + offset[1])
+    arrow_length = max(5.0, 14.0 * unit)
+    painter.save()
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    painter.setFont(font)
+    kind = ann["kind"]
+    bounds = QRectF(tip, tip).normalized()
+
+    def leader(target, with_arrow=True):
+        direction = np.array((tip.x() - target.x(), tip.y() - target.y()), dtype=float)
+        length = float(np.linalg.norm(direction))
+        if length < 1e-6:
+            return
+        painter.setPen(pen)
+        painter.drawLine(target, tip)
+        if with_arrow and length > arrow_length * 1.2:
+            _paint_arrow(painter, tip, direction / length, arrow_length, ink)
+
+    if kind == "gdt":
+        h = 1.9 * u
+        cells = [h]
+        tol_text = ("Ø" if ann["diameter"] else "") + ann["tolerance"] + \
+            (f" ({ann['modifier']})" if ann["modifier"] else "")
+        cells.append(metrics.horizontalAdvance(tol_text) + 0.9 * u)
+        cells += [h] * len(ann["datums"])
+        width = sum(cells)
+        left = anchor.x() if anchor.x() >= tip.x() else anchor.x() - width
+        top = anchor.y() - h / 2
+        frame = QRectF(left, top, width, h)
+        side_point = QPointF(frame.left() if anchor.x() >= tip.x() else frame.right(), anchor.y())
+        leader(side_point)
+        painter.setPen(pen)
+        painter.drawRect(frame)
+        x = left
+        for index, cell in enumerate(cells):
+            if index:
+                painter.drawLine(QPointF(x, top), QPointF(x, top + h))
+            rect = QRectF(x, top, cell, h)
+            painter.setPen(pen)
+            if index == 0:
+                _paint_gdt_symbol(painter, ann["symbol"], rect)
+            else:
+                painter.setPen(ink)
+                painter.drawText(rect, Qt.AlignCenter,
+                                 tol_text if index == 1 else ann["datums"][index - 2])
+            x += cell
+        bounds = bounds.united(frame)
+    elif kind == "datum":
+        h = 1.9 * u
+        frame = QRectF(anchor.x() - h / 2, anchor.y() - h / 2, h, h)
+        direction = np.array((frame.center().x() - tip.x(), frame.center().y() - tip.y()), dtype=float)
+        length = float(np.linalg.norm(direction))
+        if length > 1e-6:
+            direction /= length
+            normal = np.array((-direction[1], direction[0]))
+            base_length = min(length, 1.1 * u + 0.0)
+            base = QPointF(tip.x() + direction[0] * base_length, tip.y() + direction[1] * base_length)
+            half = 0.45 * u
+            painter.setPen(pen)
+            painter.setBrush(ink)
+            painter.drawPolygon(QPolygonF([tip, QPointF(base.x() + normal[0] * half, base.y() + normal[1] * half),
+                                           QPointF(base.x() - normal[0] * half, base.y() - normal[1] * half)]))
+            painter.setBrush(Qt.NoBrush)
+            edge = QPointF(frame.center().x() - direction[0] * h / 2 * (1.0 if abs(direction[0]) >= abs(direction[1]) else 0.0),
+                           frame.center().y() - direction[1] * h / 2 * (1.0 if abs(direction[1]) > abs(direction[0]) else 0.0))
+            painter.drawLine(base, edge)
+        painter.setPen(pen)
+        painter.drawRect(frame)
+        painter.setPen(ink)
+        painter.drawText(frame, Qt.AlignCenter, ann["letter"])
+        bounds = bounds.united(frame)
+    elif kind == "surface":
+        s = 1.5 * u
+        far = math.hypot(offset[0], offset[1]) > 2.0 * s
+        peak = QPointF(anchor.x(), anchor.y())
+        long_leg = QPointF(peak.x() + 0.8 * s, peak.y() - 1.39 * s)
+        short_leg = QPointF(peak.x() - 0.4 * s, peak.y() - 0.69 * s)
+        text = ann["value"]
+        bar_length = max(1.6 * s, metrics.horizontalAdvance(text) + 0.8 * u)
+        bar_end = QPointF(long_leg.x() + bar_length, long_leg.y())
+        if far:
+            leader(peak)
+        painter.setPen(pen)
+        painter.drawLine(short_leg, peak)
+        painter.drawLine(peak, long_leg)
+        if ann["removal"] != "forbidden":
+            painter.drawLine(long_leg, bar_end)
+        else:
+            painter.drawLine(long_leg, bar_end)
+            painter.drawEllipse(QPointF(peak.x() + 0.2 * s, peak.y() - 0.75 * s), 0.45 * s, 0.45 * s)
+        if ann["removal"] == "required":
+            painter.drawLine(short_leg, QPointF(peak.x() + 0.4 * s, short_leg.y()))
+        painter.setPen(ink)
+        painter.drawText(QPointF(long_leg.x() + 0.3 * u, long_leg.y() - 0.25 * u), text)
+        extras = "  ".join(item for item in (ann["lay"], ann["allowance"]) if item)
+        if extras:
+            painter.drawText(QPointF(long_leg.x() + 0.3 * u, long_leg.y() + 1.2 * u), extras)
+        bounds = bounds.united(QRectF(short_leg.x(), long_leg.y() - 1.6 * s,
+                                      bar_end.x() - short_leg.x(), 3.2 * s))
+    else:
+        s = 0.95 * u
+        direction = 1.0 if offset[0] >= 0 else -1.0
+        symbols = [ann["type"], ann["other"]]
+        text_width = max([metrics.horizontalAdvance(ann["tail"]) + u] + [0.0])
+        line_length = max(8.0 * s + (text_width if ann["tail"] else 0.0), 6.0 * s)
+        end = QPointF(anchor.x() + direction * line_length, anchor.y())
+        leader(anchor)
+        painter.setPen(pen)
+        painter.drawLine(anchor, end)
+        centre_x = anchor.x() + direction * 3.2 * s
+        painter.setPen(pen)
+        if symbols[0]:
+            _paint_weld_symbol(painter, symbols[0], centre_x, anchor.y(), s, 1)
+        if symbols[1]:
+            _paint_weld_symbol(painter, symbols[1], centre_x, anchor.y(), s, -1)
+        painter.setPen(ink)
+        if ann["size"]:
+            width = metrics.horizontalAdvance(ann["size"])
+            painter.drawText(QPointF(centre_x - direction * (0.7 * s) - (width if direction > 0 else 0.0),
+                                     anchor.y() + 1.1 * s), ann["size"])
+        if ann["tail"]:
+            painter.drawText(QPointF(end.x() + (0.3 * s if direction > 0 else -0.3 * s -
+                                                metrics.horizontalAdvance(ann["tail"])),
+                                     anchor.y() + 0.35 * s), ann["tail"])
+        painter.setPen(pen)
+        if ann["all_around"]:
+            painter.drawEllipse(anchor, 0.5 * s, 0.5 * s)
+        if ann["field"]:
+            painter.setBrush(ink)
+            painter.drawPolygon(QPolygonF([anchor, QPointF(anchor.x(), anchor.y() - 1.6 * s),
+                                           QPointF(anchor.x() + direction * 1.1 * s, anchor.y() - 1.2 * s)]))
+        bounds = bounds.united(QRectF(min(anchor.x(), end.x()), anchor.y() - 1.8 * s,
+                                      abs(end.x() - anchor.x()), 3.6 * s))
+    painter.restore()
+    return bounds.adjusted(-4, -4, 4, 4)
 
 
 def _paint_hz_dimension(painter, metrics, x0, x1, y, edge_y, sign, text):
@@ -17940,9 +18596,10 @@ def _paint_title_block(painter, options, scale_text):
         (("Version", options.get("version", ""), 0.35, DRAWING_TEXT),
          ("Sheet", options.get("page", ""), 0.30, DRAWING_TEXT),
          ("Scale", scale_text, 0.35, DRAWING_TEXT)),
-        (("General tolerances", options.get("tolerance", ""), 0.42, DRAWING_TEXT),
-         ("Unit", "mm", 0.14, DRAWING_TEXT),
-         ("Projection", None, 0.44, DRAWING_TEXT)),
+        (("General tolerances", options.get("tolerance", ""), 0.30, DRAWING_TEXT),
+         ("Surface", options.get("surface", ""), 0.22, DRAWING_TEXT),
+         ("Unit", "mm", 0.10, DRAWING_TEXT),
+         ("Projection", None, 0.38, DRAWING_TEXT)),
     )
     row_height = height / len(rows)
     label_font = _drawing_font(DRAWING_TEXT_SMALL)
@@ -18456,6 +19113,13 @@ def _paint_drawing_dimensions(painter, options, places, sections):
         if place is None:
             continue
         kind = dimension.get("type", "length")
+        if kind == "annotation":            # GD&T frame, datum, surface finish, weld symbol
+            annotation = tol_normalize_annotation(dimension.get("ann"))
+            if annotation is not None and dimension.get("points"):
+                _paint_annotation(painter, annotation, place.point(*dimension["points"][0]),
+                                  annotation["offset"], 1.0, _drawing_pen(DRAWING_THIN),
+                                  _drawing_color("dimension"))
+            continue
         dimension_offset = np.asarray(dimension.get("offset", (0.0, 0.0)), dtype=float)
         points = dimension.get("points") or [dimension.get("a"), dimension.get("b")]
         if kind == "angle":
@@ -18485,7 +19149,7 @@ def _paint_drawing_dimensions(painter, options, places, sections):
                 _paint_arrow(painter, tip, (outward * direction_sign * math.sin(t),
                                             outward * direction_sign * math.cos(t)))
             mid = math.radians(angle_a + sweep / 2)
-            label_text = f"{_drawing_fmt(float(dimension['value']))}°"
+            label_text = _drawing_dimension_value_text(dimension, unit="°")
             label = str(dimension.get("label", "")).strip()
             if label and label.lower() != "angle":
                 label_text = f"{label} {label_text}"
@@ -18512,8 +19176,7 @@ def _paint_drawing_dimensions(painter, options, places, sections):
         first = place.point(*points[0])
         second = place.point(*points[1])
         if kind in ("radius", "diameter"):
-            value_text = _drawing_fmt(float(dimension["value"]))
-            value_text = f"R{value_text}" if kind == "radius" else f"Ø{value_text}"
+            value_text = _drawing_dimension_value_text(dimension, "R" if kind == "radius" else "Ø")
             custom_label = str(dimension.get("label", "")).strip()
             if custom_label and custom_label.lower() not in (kind, "length"):
                 value_text = f"{custom_label} {value_text}"
@@ -18558,7 +19221,7 @@ def _paint_drawing_dimensions(painter, options, places, sections):
         painter.drawLine(start, end)
         _paint_arrow(painter, start, vector)
         _paint_arrow(painter, end, -vector)
-        value_text = _drawing_fmt(float(dimension["value"]))
+        value_text = _drawing_dimension_value_text(dimension)
         label = str(dimension.get("label", "")).strip()
         if label and label.lower() not in (kind, "length"):
             value_text = f"{label} {value_text}"
@@ -20043,6 +20706,7 @@ class TechnicalDrawingCanvas(QWidget):
     sheetEdited = pyqtSignal()
     viewSelected = pyqtSignal(object)
     dimensionPlaced = pyqtSignal(object)
+    annotationPlaced = pyqtSignal(object)      # {"view", "position" (view coordinates), "offset" (page)}
     cutPlaced = pyqtSignal(int, float)            # Cut tool: new section (plane, offset)
     cutMoved = pyqtSignal(str, float)             # section letter, offset (live while dragged)
     cutRotated = pyqtSignal(str, int, float)      # section letter, new plane, offset
@@ -20155,9 +20819,12 @@ class TechnicalDrawingCanvas(QWidget):
         self.active_view = view
         self.dimension_kind = (view or "length") if mode == "dimension" else "length"
         self._dimension_points = []
+        self._annotation_tip = None
         self.setFocus()
         self.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
-        if mode == "place_view":
+        if mode == "annotation":
+            self.statusChanged.emit("Annotation: click the feature on a view (the arrow tip)")
+        elif mode == "place_view":
             self.statusChanged.emit("Placement: imported graphic" if _graphic_id(view) else
                                     f"Placement: {view.title()} view")
         elif mode == "dimension":
@@ -20314,6 +20981,15 @@ class TechnicalDrawingCanvas(QWidget):
             painter.setBrush(Qt.NoBrush)
             kind = dimension.get("type", "length")
             points = dimension.get("points") or [dimension.get("a"), dimension.get("b")]
+            if kind == "annotation":
+                annotation = tol_normalize_annotation(dimension.get("ann"))
+                if annotation is not None and points and points[0] is not None:
+                    tip = self._screen_point(points[0], info, sheet_rect)
+                    _paint_annotation(painter, annotation, tip,
+                                      (annotation["offset"][0] * scale_x,
+                                       annotation["offset"][1] * scale_y), scale,
+                                      QPen(ink, line_width), ink)
+                continue
             if kind == "angle":
                 if len(points) != 3:
                     continue
@@ -20344,7 +21020,7 @@ class TechnicalDrawingCanvas(QWidget):
                     arrow(QPointF(vertex.x() + math.cos(t) * radius, vertex.y() - math.sin(t) * radius),
                           (outward * direction_sign * math.sin(t), outward * direction_sign * math.cos(t)))
                 mid = math.radians(angle_a + sweep / 2)
-                text = f"{_drawing_fmt(float(dimension['value']))}°"
+                text = _drawing_dimension_value_text(dimension, unit="°")
                 custom_label = str(dimension.get("label", "")).strip()
                 if custom_label and custom_label.lower() != "angle":
                     text = f"{custom_label} {text}"
@@ -20374,8 +21050,7 @@ class TechnicalDrawingCanvas(QWidget):
                         math.sin(float(dimension["angle"]))))
                 center = self._screen_point(center_values, info, sheet_rect)
                 edge = self._screen_point(edge_values, info, sheet_rect)
-                value_text = _drawing_fmt(float(dimension["value"]))
-                text = f"R{value_text}" if kind == "radius" else f"Ø{value_text}"
+                text = _drawing_dimension_value_text(dimension, "R" if kind == "radius" else "Ø")
                 label_rect = _paint_radial_dimension(
                     painter, center, edge, text, kind == "diameter", scale,
                     ink, background, font, line_width,
@@ -20410,7 +21085,7 @@ class TechnicalDrawingCanvas(QWidget):
             direction_screen /= max(float(np.linalg.norm(direction_screen)), 1e-12)
             arrow(start, direction_screen)
             arrow(end, -direction_screen)
-            text = _drawing_fmt(float(dimension["value"]))
+            text = _drawing_dimension_value_text(dimension)
             custom_label = str(dimension.get("label", "")).strip()
             if custom_label and custom_label.lower() != "length":
                 text = f"{custom_label} {text}"
@@ -20732,7 +21407,31 @@ class TechnicalDrawingCanvas(QWidget):
                 self.statusChanged.emit(f"Drag the cutting line {cut['letter']}-{cut['letter']}")
                 self.update()
                 return
-        hit = self._hit_view(page_point, 12.0 if self.mode == "dimension" else 0.0)
+        hit = self._hit_view(page_point, 12.0 if self.mode in ("dimension", "annotation") else 0.0)
+        if self.mode == "annotation":
+            tip = getattr(self, "_annotation_tip", None)
+            if tip is None:                      # first click: the feature the symbol refers to
+                if hit is None or not (hit[0]["name"] in ("front", "top", "right", "left") or
+                                       hit[0]["name"].startswith("section") or
+                                       _graphic_id(hit[0]["name"])):
+                    self.statusChanged.emit("Click on a view")
+                    return
+                info, _record = hit
+                tolerance = max(10.0 * self.page_w / max(self._sheet_rect().width(), 1.0) /
+                                max(info["scale"], 1e-9), 8.0 / max(info["scale"], 1e-9))
+                geometry = self._dimension_geometry(page_point, info, tolerance)
+                position = np.asarray(geometry["position"], dtype=float) if geometry is not None \
+                    else np.asarray(self._view_point(page_point, info), dtype=float)
+                self._annotation_tip = {"view": info["name"], "position": position.tolist(),
+                                        "page": np.asarray(self._view_page_point(position, info),
+                                                           dtype=float)}
+                self.statusChanged.emit("Annotation: click where the symbol should sit")
+            else:                                 # second click: where the frame / symbol goes
+                offset = page_point - tip["page"]
+                self.annotationPlaced.emit({"view": tip["view"], "position": tip["position"],
+                                            "offset": [float(offset[0]), float(offset[1])]})
+                self.set_mode()
+            return
         if self.mode == "place_view":
             record = next((item for item in self.view_placements
                            if item.get("name") == self.active_view), None)
@@ -22897,7 +23596,7 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
         math.isfinite(float(ratio)) and float(ratio) > 0 else None
     if options.get("projection") not in ("first", "third"):
         options.pop("projection", None)
-    for key in ("title", "number", "tolerance", "name"):
+    for key in ("title", "number", "tolerance", "surface", "name"):
         if key in options:
             options[key] = str(options[key])[:200]
     options["section_view"] = min(2, max(0, int(options.get("section_view", 0))))
@@ -22940,6 +23639,17 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
         kind = item.get("type")
         if kind in ("length", "radius", "diameter", "angle"):
             dimension["type"] = kind
+        elif kind == "annotation":
+            annotation = tol_normalize_annotation(item.get("ann"))
+            tip = item.get("points")
+            if annotation is None or item.get("view") not in valid_names or \
+                    not (isinstance(tip, list) and len(tip) == 1 and isinstance(tip[0], (list, tuple))
+                         and len(tip[0]) == 2 and np.isfinite([float(v) for v in tip[0]]).all()):
+                continue
+            options["dimensions"].append({"type": "annotation", "label": "", "value": 0.0,
+                                          "view": item["view"], "ann": annotation,
+                                          "points": [[float(v) for v in tip[0]]]})
+            continue
         if item.get("view") in valid_names:
             raw_points = item.get("points")
             if raw_points is None and isinstance(item.get("a"), (list, tuple)) and \
@@ -22962,6 +23672,9 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
             if isinstance(pair, (list, tuple)) and len(pair) == 2 and \
                     all(isinstance(v, (int, float)) and math.isfinite(v) for v in pair):
                 dimension[key] = [float(v) for v in pair]
+        tolerance = tol_normalize_tolerance(item.get("tol"))
+        if tolerance:
+            dimension["tol"] = tolerance
         options["dimensions"].append(dimension)
     return options
 
@@ -23080,6 +23793,199 @@ def write_technical_drawing_pdf_pages(path, jobs):
             _draw_technical_drawing(painter, vertices, triangles, options)
     finally:
         painter.end()
+
+
+class FitCalculatorDialog(QDialog):
+    """ISO 286 fit calculator: hole + shaft symbol → limits, clearance / interference, fit type.
+    `chosen` is the symbol the user wants to put on the dimension (hole or shaft), or None."""
+
+    def __init__(self, parent, size=25.0):
+        super().__init__(parent)
+        self.setWindowTitle("Fit calculator (ISO 286)")
+        self.chosen = None
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.size = QDoubleSpinBox()
+        self.size.setRange(0.1, 500.0)
+        self.size.setDecimals(3)
+        self.size.setSuffix(" mm")
+        self.size.setValue(min(500.0, max(0.1, abs(float(size)))))
+        self.preferred = QComboBox()
+        self.preferred.addItem("Choose a preferred fit…", None)
+        for hole, shaft in TOL_PREFERRED_FITS:
+            self.preferred.addItem(f"{hole}/{shaft}", (hole, shaft))
+        self.hole = QLineEdit("H7")
+        self.shaft = QLineEdit("g6")
+        self.hole.setToolTip("Hole symbol, capital letter (H7, F8, K7, JS6 …)")
+        self.shaft.setToolTip("Shaft symbol, lower-case letter (g6, h6, k6, p6 …)")
+        form.addRow("Nominal size:", self.size)
+        form.addRow("Preferred fits:", self.preferred)
+        form.addRow("Hole:", self.hole)
+        form.addRow("Shaft:", self.shaft)
+        layout.addLayout(form)
+        self.report = QLabel()
+        self.report.setTextFormat(Qt.PlainText)
+        self.report.setMinimumWidth(380)
+        self.report.setWordWrap(True)
+        layout.addWidget(self.report)
+        buttons = QHBoxLayout()
+        use_hole = QPushButton("Use hole symbol")
+        use_shaft = QPushButton("Use shaft symbol")
+        close = QPushButton("Close")
+        use_hole.clicked.connect(lambda: self._choose(self.hole.text()))
+        use_shaft.clicked.connect(lambda: self._choose(self.shaft.text()))
+        close.clicked.connect(self.reject)
+        for button in (use_hole, use_shaft):
+            button.setToolTip("Put this symbol on the selected dimension")
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self.size.valueChanged.connect(self._update)
+        self.hole.textChanged.connect(self._update)
+        self.shaft.textChanged.connect(self._update)
+        self.preferred.currentIndexChanged.connect(self._choose_preferred)
+        self._update()
+
+    def _choose_preferred(self):
+        pair = self.preferred.currentData()
+        if pair:
+            self.hole.setText(pair[0])
+            self.shaft.setText(pair[1])
+
+    def _choose(self, symbol):
+        try:
+            tol_deviations(symbol.strip(), self.size.value())
+        except ToleranceError as ex:
+            self.report.setText(f"⚠ {ex}")
+            return
+        self.chosen = symbol.strip()
+        self.accept()
+
+    def _update(self, *_):
+        try:
+            result = tol_analyse_fit(self.hole.text().strip(), self.shaft.text().strip(),
+                                            self.size.value())
+            self.report.setText("\n".join(tol_fit_report(result)))
+        except ToleranceError as ex:
+            self.report.setText(f"⚠ {ex}")
+
+
+class AnnotationDialog(QDialog):
+    """Parameters of a geometric tolerance frame, datum, surface finish or weld symbol."""
+
+    def __init__(self, parent, kind, annotation=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.setWindowTitle(TOL_ANNOTATION_TITLES[kind])
+        annotation = tol_normalize_annotation(annotation) if annotation else None
+        self._offset = annotation["offset"] if annotation else [60.0, -40.0]
+        form = QFormLayout()
+        if kind == "gdt":
+            self.symbol = QComboBox()
+            for key, (title, _datum, _diameter) in TOL_GDT_SYMBOLS.items():
+                self.symbol.addItem(title, key)
+            self.tolerance = QLineEdit()
+            self.tolerance.setPlaceholderText("0.05")
+            self.diameter = QCheckBox("Cylindrical tolerance zone (Ø)")
+            self.modifier = QComboBox()
+            for key, title in (("", "No modifier"), ("M", "(M) maximum material"),
+                               ("L", "(L) least material"), ("P", "(P) projected zone")):
+                self.modifier.addItem(title, key)
+            self.datums = [QLineEdit() for _ in range(3)]
+            for index, edit in enumerate(self.datums):
+                edit.setMaxLength(2)
+                edit.setPlaceholderText("A")
+                edit.setMaximumWidth(48)
+            datum_row = QHBoxLayout()
+            for edit in self.datums:
+                datum_row.addWidget(edit)
+            datum_row.addStretch(1)
+            form.addRow("Characteristic:", self.symbol)
+            form.addRow("Tolerance (mm):", self.tolerance)
+            form.addRow(self.diameter)
+            form.addRow("Modifier:", self.modifier)
+            form.addRow("Datums:", datum_row)
+            if annotation:
+                self.symbol.setCurrentIndex(max(0, self.symbol.findData(annotation["symbol"])))
+                self.tolerance.setText(annotation["tolerance"])
+                self.diameter.setChecked(annotation["diameter"])
+                self.modifier.setCurrentIndex(max(0, self.modifier.findData(annotation["modifier"])))
+                for edit, letter in zip(self.datums, annotation["datums"]):
+                    edit.setText(letter)
+        elif kind == "datum":
+            self.letter = QLineEdit(annotation["letter"] if annotation else "A")
+            self.letter.setMaxLength(2)
+            form.addRow("Datum letter:", self.letter)
+        elif kind == "surface":
+            self.removal = QComboBox()
+            for key, title in TOL_SURFACE_REMOVAL.items():
+                self.removal.addItem(title, key)
+            self.roughness = QLineEdit()
+            self.roughness.setPlaceholderText("Ra 1.6")
+            self.lay = QComboBox()
+            for symbol in TOL_LAY_SYMBOLS:
+                self.lay.addItem(symbol or "No lay symbol", symbol)
+            self.allowance = QLineEdit()
+            self.allowance.setPlaceholderText("Machining allowance, e.g. 0.5")
+            form.addRow("Machining:", self.removal)
+            form.addRow("Roughness:", self.roughness)
+            form.addRow("Lay:", self.lay)
+            form.addRow("Allowance:", self.allowance)
+            if annotation:
+                self.removal.setCurrentIndex(max(0, self.removal.findData(annotation["removal"])))
+                self.roughness.setText(annotation["value"])
+                self.lay.setCurrentIndex(max(0, self.lay.findData(annotation["lay"])))
+                self.allowance.setText(annotation["allowance"])
+        else:
+            self.weld_type = QComboBox()
+            self.weld_other = QComboBox()
+            self.weld_other.addItem("None", "")
+            for key, title in TOL_WELD_TYPES.items():
+                self.weld_type.addItem(title, key)
+                self.weld_other.addItem(title, key)
+            self.weld_size = QLineEdit()
+            self.weld_size.setPlaceholderText("a4")
+            self.all_around = QCheckBox("All around")
+            self.field_weld = QCheckBox("Field weld")
+            self.tail = QLineEdit()
+            self.tail.setPlaceholderText("Process / note, e.g. 111")
+            form.addRow("Arrow side:", self.weld_type)
+            form.addRow("Other side:", self.weld_other)
+            form.addRow("Size:", self.weld_size)
+            form.addRow(self.all_around)
+            form.addRow(self.field_weld)
+            form.addRow("Tail:", self.tail)
+            if annotation:
+                self.weld_type.setCurrentIndex(max(0, self.weld_type.findData(annotation["type"])))
+                self.weld_other.setCurrentIndex(max(0, self.weld_other.findData(annotation["other"])))
+                self.weld_size.setText(annotation["size"])
+                self.all_around.setChecked(annotation["all_around"])
+                self.field_weld.setChecked(annotation["field"])
+                self.tail.setText(annotation["tail"])
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def annotation(self):
+        data = {"kind": self.kind, "offset": list(self._offset)}
+        if self.kind == "gdt":
+            data.update(symbol=self.symbol.currentData(), tolerance=self.tolerance.text(),
+                        diameter=self.diameter.isChecked(), modifier=self.modifier.currentData(),
+                        datums=[edit.text() for edit in self.datums if edit.text().strip()])
+        elif self.kind == "datum":
+            data["letter"] = self.letter.text()
+        elif self.kind == "surface":
+            data.update(removal=self.removal.currentData(), value=self.roughness.text(),
+                        lay=self.lay.currentData(), allowance=self.allowance.text())
+        else:
+            data.update({"type": self.weld_type.currentData(), "other": self.weld_other.currentData(),
+                         "size": self.weld_size.text(), "all_around": self.all_around.isChecked(),
+                         "field": self.field_weld.isChecked(), "tail": self.tail.text()})
+        return tol_normalize_annotation(data)
 
 
 class TechnicalDrawingDialog(QDialog):
@@ -23341,7 +24247,33 @@ class TechnicalDrawingDialog(QDialog):
         self.title = QLineEdit(self._options.get("title", ""))
         self.number = QLineEdit(self._options.get("number", ""))
         self.tolerance = QLineEdit(self._options.get("tolerance", "ISO 2768-mK"))
-        self.tolerance.setToolTip("General tolerances (DIN ISO 2768), e.g. ISO 2768-mK")
+        self.tolerance.setToolTip(
+            "General tolerances (DIN ISO 2768): f / m / c / v for linear sizes, H / K / L for form "
+            "and position, e.g. ISO 2768-mK")
+        completer = QCompleter(TOL_GENERAL_PRESETS, self.tolerance)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self.tolerance.setCompleter(completer)
+        self.surface = QLineEdit(self._options.get("surface", ""))
+        self.surface.setToolTip("General surface finish note of the title block, e.g. Ra 3.2")
+        self.tolerance_presets = QToolButton()
+        self.tolerance_presets.setText("▾")
+        self.tolerance_presets.setToolTip("Choose a general tolerance class")
+        self.tolerance_presets.setPopupMode(QToolButton.InstantPopup)
+        presets_menu = QMenu(self.tolerance_presets)
+        for preset in TOL_GENERAL_PRESETS:
+            class_letter = preset[len("ISO 2768-"):][:1]
+            form_letter = preset[len("ISO 2768-"):][1:]
+            hint = TOL_GENERAL_CLASSES.get(class_letter, "")
+            if form_letter:
+                hint += f", form {TOL_GENERAL_FORM_CLASSES.get(form_letter, '')}"
+            presets_menu.addAction(f"{preset}   ({hint})",
+                                   lambda checked=False, text=preset: self._set_general_tolerance(text))
+        self.tolerance_presets.setMenu(presets_menu)
+        self.tolerance_row = QHBoxLayout()
+        self.tolerance_row.setContentsMargins(0, 0, 0, 0)
+        self.tolerance_row.addWidget(self.tolerance, 1)
+        self.tolerance_row.addWidget(self.tolerance_presets)
         self.projection = QComboBox()
         self.projection.addItem("First angle (DIN ISO 128-30, method 1)", "first")
         self.projection.addItem("Third angle (method 3)", "third")
@@ -23401,7 +24333,8 @@ class TechnicalDrawingDialog(QDialog):
         sheet_form.addRow("Date:", self.date)
         sheet_form.addRow("Version:", self.version)
         sheet_form.addRow("Page:", self.page)
-        sheet_form.addRow("General tolerances:", self.tolerance)
+        sheet_form.addRow("General tolerances:", self.tolerance_row)
+        sheet_form.addRow("Surface finish:", self.surface)
         sheet_form.addRow("Projection:", self.projection)
 
         view_page = QWidget()
@@ -23460,6 +24393,7 @@ class TechnicalDrawingDialog(QDialog):
                                        "Delete removes it.")
         self.dimension_list.currentRowChanged.connect(self._on_dimension_row)
         dimension_layout.addWidget(self.dimension_list, 1)
+        dimension_layout.addWidget(self._build_tolerance_editor())
         remove_dimension = QPushButton("Remove selected measurement")
         remove_dimension.setIcon(QIcon(os.path.join(icon_dir, "delete_selected.png")))
         remove_dimension.clicked.connect(self._remove_dimension)
@@ -23482,6 +24416,8 @@ class TechnicalDrawingDialog(QDialog):
         self.canvas.sheetEdited.connect(self._queue_refresh_preview)
         self.canvas.viewSelected.connect(self._on_view_selected)
         self.canvas.dimensionPlaced.connect(self._on_dimension_placed)
+        self.canvas.annotationPlaced.connect(self._on_annotation_placed)
+        self.dimension_list.itemDoubleClicked.connect(self._edit_dimension_item)
         self.canvas.cutPlaced.connect(self._on_cut_placed)
         self.canvas.cutMoved.connect(self._on_cut_moved)
         self.canvas.statusChanged.connect(self._on_canvas_status)
@@ -23691,7 +24627,7 @@ class TechnicalDrawingDialog(QDialog):
         for widget in [self.front_view, self.view_scale]:
             widget.currentIndexChanged.connect(self._refresh_preview)
         for widget in (self.project, self.author, self.date, self.version, self.page,
-                       self.title, self.number, self.tolerance):
+                       self.title, self.number, self.tolerance, self.surface):
             widget.editingFinished.connect(self._refresh_preview)
         self.projection.currentIndexChanged.connect(self._refresh_preview)
         self._activate_source(self.sheets[self.active_sheet].get("source"))
@@ -24089,7 +25025,7 @@ class TechnicalDrawingDialog(QDialog):
     # block fields (not grid / snap or the panel layout; imported files are kept apart, they are
     # never changed)
     SHARED_HISTORY_KEYS = ("projection", "project", "author", "date", "version", "tolerance",
-                           "logo_path")
+                           "surface", "logo_path")
 
     def _history_state(self):
         options = self.drawing_options()
@@ -24133,12 +25069,12 @@ class TechnicalDrawingDialog(QDialog):
         shared = state.get("shared") or {}
         self._restoring_history = True
         widgets = (self.projection, self.project, self.author, self.date, self.version,
-                   self.tolerance)
+                   self.tolerance, self.surface)
         for widget in widgets:
             widget.blockSignals(True)
         try:
             self.projection.setCurrentIndex(max(0, self.projection.findData(shared.get("projection"))))
-            for key in ("project", "author", "date", "version", "tolerance"):
+            for key in ("project", "author", "date", "version", "tolerance", "surface"):
                 getattr(self, key).setText(str(shared.get(key) or ""))
             path = shared.get("logo_path") or ""
             if path != self.logo_path:
@@ -24349,6 +25285,7 @@ class TechnicalDrawingDialog(QDialog):
             "version": self.version.text().strip(),
             "page": f"{self.active_sheet + 1} / {len(self.sheets)}",
             "tolerance": self.tolerance.text().strip(),
+            "surface": self.surface.text().strip(),
             "projection": self.projection.currentData(),
             "logo": self.logo_pixmap,
             "logo_path": self.logo_path,
@@ -24671,6 +25608,7 @@ class TechnicalDrawingDialog(QDialog):
         self.dimension_value.setValue(value)
         self.canvas.select_dimension(len(self.dimensions) - 1)     # the new one stays highlighted
         self._refresh_dimension_list()
+        self._load_tolerance_editor(len(self.dimensions) - 1)
         self._refresh_preview()
 
     def _on_cut_placed(self, plane, offset):
@@ -24681,11 +25619,7 @@ class TechnicalDrawingDialog(QDialog):
         self.dimension_list.blockSignals(True)
         self.dimension_list.clear()
         for dimension in self.dimensions:
-            kind = dimension.get("type", "length").title()
-            unit = "°" if kind == "Angle" else " mm"
-            label = str(dimension.get("label", "")).strip() or kind
-            self.dimension_list.addItem(
-                f"{kind} · {label}: {float(dimension['value']):.2f}{unit}")
+            self.dimension_list.addItem(self._dimension_list_text(dimension))
         selected = self.canvas.selected_dimension if hasattr(self, "canvas") else None
         self.dimension_list.setCurrentRow(-1 if selected is None else selected)
         if selected is None:
@@ -24704,6 +25638,7 @@ class TechnicalDrawingDialog(QDialog):
         self.dimension_list.setCurrentRow(index)
         if index < 0:
             self.dimension_list.clearSelection()
+            self._load_tolerance_editor(-1)
         self.dimension_list.blockSignals(False)
         if index >= 0:
             if self.dimensions_dock.isHidden():
@@ -24712,7 +25647,196 @@ class TechnicalDrawingDialog(QDialog):
             self.dimension_list.scrollToItem(self.dimension_list.item(index))
             self._show_dimension_value(index)
 
+    # ── tolerance of the selected dimension (Phase 1) ────────────────────────
+    def _build_tolerance_editor(self):
+        box = QFrame()
+        layout = QFormLayout(box)
+        layout.setContentsMargins(0, 4, 0, 4)
+        title = QLabel("<b>Tolerance of the selected dimension</b>")
+        layout.addRow(title)
+        self.tol_mode = QComboBox()
+        for mode in TOL_MODES:
+            self.tol_mode.addItem(TOL_MODE_TITLES[mode], mode)
+        self.tol_mode.setToolTip("How the tolerance is printed. It is stored with the dimension, "
+                                 "so the fit calculator and the export read the same numbers.")
+        self.tol_upper = QDoubleSpinBox()
+        self.tol_lower = QDoubleSpinBox()
+        for spin, text in ((self.tol_upper, "Upper deviation (+); ± value when symmetric"),
+                           (self.tol_lower, "Lower deviation (−)")):
+            spin.setRange(-1000.0, 1000.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.01)
+            spin.setSuffix(" mm")
+            spin.setToolTip(text)
+        self.tol_fit = QLineEdit()
+        self.tol_fit.setPlaceholderText("H7, g6, …")
+        self.tol_fit.setToolTip("ISO 286 fit symbol: capital letters for a hole (H7), lower case "
+                                "for a shaft (g6)")
+        self.tol_show_dev = QCheckBox("Print the deviations after the symbol")
+        self.tol_show_dev.setChecked(True)
+        self.tol_status = QLabel("")
+        self.tol_status.setWordWrap(True)
+        calculator = QPushButton("Fit calculator…")
+        calculator.clicked.connect(self._open_fit_calculator)
+        layout.addRow("Mode:", self.tol_mode)
+        layout.addRow("Upper:", self.tol_upper)
+        layout.addRow("Lower:", self.tol_lower)
+        layout.addRow("Fit:", self.tol_fit)
+        layout.addRow(self.tol_show_dev)
+        layout.addRow(self.tol_status)
+        layout.addRow(calculator)
+        layout.addRow(QLabel("<b>Annotations</b>"))
+        annotation_row = QGridLayout()
+        for index, kind in enumerate(TOL_ANNOTATION_KINDS):
+            button = QPushButton(TOL_ANNOTATION_TITLES[kind] + "…")
+            button.setToolTip("Set the values, click the feature on a view, then click where the "
+                              "symbol should sit. Double-click an entry in the list to edit it.")
+            button.clicked.connect(lambda checked=False, k=kind: self._start_annotation(k))
+            annotation_row.addWidget(button, index // 2, index % 2)
+        layout.addRow(annotation_row)
+        self._tol_widgets = (self.tol_mode, self.tol_upper, self.tol_lower, self.tol_fit,
+                             self.tol_show_dev)
+        self.tol_mode.currentIndexChanged.connect(self._apply_tolerance)
+        self.tol_upper.valueChanged.connect(self._apply_tolerance)
+        self.tol_lower.valueChanged.connect(self._apply_tolerance)
+        self.tol_fit.editingFinished.connect(self._apply_tolerance)
+        self.tol_show_dev.toggled.connect(self._apply_tolerance)
+        self._load_tolerance_editor(-1)
+        return box
+
+    def _load_tolerance_editor(self, row):
+        """Show the tolerance of dimension `row` in the editor (disabled without a selection)."""
+        valid = 0 <= row < len(self.dimensions) and \
+            self.dimensions[row].get("type") != "annotation"
+        tolerance = tol_normalize_tolerance(self.dimensions[row].get("tol")) if valid else None
+        for widget in self._tol_widgets:
+            widget.blockSignals(True)
+            widget.setEnabled(valid)
+        self.tol_mode.setCurrentIndex(self.tol_mode.findData(tolerance["mode"] if tolerance else "none"))
+        self.tol_upper.setValue(float(tolerance.get("upper", 0.0)) if tolerance else 0.0)
+        self.tol_lower.setValue(float(tolerance.get("lower", 0.0)) if tolerance else 0.0)
+        self.tol_fit.setText(tolerance.get("fit", "") if tolerance else "")
+        self.tol_show_dev.setChecked(bool(tolerance.get("show_deviations", True)) if tolerance else True)
+        for widget in self._tol_widgets:
+            widget.blockSignals(False)
+        self._update_tolerance_fields(row)
+
+    def _update_tolerance_fields(self, row):
+        mode = self.tol_mode.currentData()
+        valid = 0 <= row < len(self.dimensions) and \
+            self.dimensions[row].get("type") != "annotation"
+        self.tol_upper.setEnabled(valid and mode in ("symmetric", "deviations", "limits"))
+        self.tol_lower.setEnabled(valid and mode in ("deviations", "limits"))
+        self.tol_fit.setEnabled(valid and mode == "fit")
+        self.tol_show_dev.setEnabled(valid and mode == "fit")
+        message = ""
+        if valid and mode == "fit":
+            try:
+                value = float(self.dimensions[row]["value"])
+                upper, lower = tol_deviations(self.tol_fit.text().strip(), value)
+                message = (f"{self.tol_fit.text().strip()} at {value:g} mm: {upper:+.3f} / "
+                           f"{lower:+.3f} mm → {value + lower:.3f} … {value + upper:.3f} mm")
+            except ToleranceError as ex:
+                message = f"⚠ {ex}"
+            except (KeyError, ValueError):
+                message = ""
+        self.tol_status.setText(message)
+
+    def _apply_tolerance(self, *_):
+        """Editor → the selected dimension (stored on the dimension, not typed as text)."""
+        row = self.dimension_list.currentRow()
+        if not 0 <= row < len(self.dimensions):
+            return
+        mode = self.tol_mode.currentData()
+        tolerance = {"mode": mode, "upper": self.tol_upper.value(), "lower": self.tol_lower.value(),
+                     "fit": self.tol_fit.text().strip(), "show_deviations": self.tol_show_dev.isChecked()}
+        if mode == "symmetric":
+            tolerance["upper"] = abs(tolerance["upper"])
+        elif mode in ("deviations", "limits") and tolerance["upper"] < tolerance["lower"]:
+            self.tol_status.setText("⚠ The upper deviation is below the lower one.")
+            return
+        tolerance = tol_normalize_tolerance(tolerance)
+        if tolerance:
+            self.dimensions[row]["tol"] = tolerance
+        else:
+            self.dimensions[row].pop("tol", None)
+        self._update_tolerance_fields(row)
+        self._refresh_dimension_list_texts()
+        self._refresh_preview()
+
+    def _refresh_dimension_list_texts(self):
+        for row, dimension in enumerate(self.dimensions):
+            item = self.dimension_list.item(row)
+            if item is not None:
+                item.setText(self._dimension_list_text(dimension))
+
+    @staticmethod
+    def _dimension_list_text(dimension):
+        if dimension.get("type") == "annotation":
+            return "Annotation · " + tol_annotation_summary(dimension.get("ann"))
+        kind = dimension.get("type", "length").title()
+        unit = "°" if kind == "Angle" else " mm"
+        label = str(dimension.get("label", "")).strip() or kind
+        text = f"{kind} · {label}: {float(dimension['value']):.2f}{unit}"
+        summary = tol_tolerance_summary(abs(float(dimension["value"])), dimension.get("tol"))
+        return f"{text}  [{summary}]" if summary else text
+
+    def _open_fit_calculator(self):
+        row = self.dimension_list.currentRow()
+        size = float(self.dimensions[row]["value"]) if 0 <= row < len(self.dimensions) else 25.0
+        dialog = FitCalculatorDialog(self, size)
+        if dialog.exec_() == QDialog.Accepted and dialog.chosen and \
+                0 <= row < len(self.dimensions):
+            self.dimensions[row]["tol"] = {"mode": "fit", "fit": dialog.chosen,
+                                           "show_deviations": True}
+            self._load_tolerance_editor(row)
+            self._refresh_dimension_list_texts()
+            self._refresh_preview()
+
+    def _start_annotation(self, kind):
+        dialog = AnnotationDialog(self, kind)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        annotation = dialog.annotation()
+        if annotation is None:
+            QMessageBox.information(self, "Annotation", "The annotation needs its main value "
+                                    "(for example the datum letter).")
+            return
+        self._pending_annotation = annotation
+        self.canvas.set_mode("annotation")
+
+    def _on_annotation_placed(self, data):
+        annotation = getattr(self, "_pending_annotation", None)
+        if annotation is None:
+            return
+        annotation = dict(annotation, offset=data["offset"])
+        self.dimensions.append({"type": "annotation", "label": "", "value": 0.0,
+                                "view": data["view"], "points": [data["position"]],
+                                "ann": annotation})
+        self._pending_annotation = None
+        self.canvas.select_dimension(len(self.dimensions) - 1)
+        self._refresh_dimension_list()
+        self._load_tolerance_editor(len(self.dimensions) - 1)
+        self._refresh_preview()
+
+    def _edit_dimension_item(self, item):
+        """Double-click in the list: change the values of an annotation."""
+        row = self.dimension_list.row(item)
+        if not 0 <= row < len(self.dimensions) or self.dimensions[row].get("type") != "annotation":
+            return
+        annotation = self.dimensions[row].get("ann")
+        dialog = AnnotationDialog(self, (annotation or {}).get("kind", "gdt"), annotation)
+        if dialog.exec_() == QDialog.Accepted and dialog.annotation() is not None:
+            self.dimensions[row]["ann"] = dialog.annotation()
+            self._refresh_dimension_list_texts()
+            self._refresh_preview()
+
+    def _set_general_tolerance(self, text):
+        self.tolerance.setText(text)
+        self._refresh_preview()
+
     def _show_dimension_value(self, row):
+        self._load_tolerance_editor(row)
         if 0 <= row < len(self.dimensions):
             dimension = self.dimensions[row]
             self.dimension_value.setSuffix("°" if dimension.get("type") == "angle" else " mm")
@@ -24736,6 +25860,7 @@ class TechnicalDrawingDialog(QDialog):
         self.canvas._hover_dimension = None
         self.canvas._dimension_drag = None
         self._refresh_dimension_list()
+        self._load_tolerance_editor(-1)
         self.drawing_status.setText("Dimension removed")
         self._refresh_preview()
 

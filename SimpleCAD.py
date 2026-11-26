@@ -408,7 +408,6 @@ from OpenGL.GL import *
 APP_VERSION = "2.4b"
 
 QLocale.setDefault(QLocale.c())
-
 class CompactFormLayout(QGridLayout):
     def __init__(self):
         super().__init__()
@@ -4585,6 +4584,737 @@ def make_gear_sketch(name, parameters, frame=None):
     sketch.points_free.append(centerpoint)
     if bore:
         sketch.circles.append(Circle(Vertex(0.0, 0.0), bore / 2.0))
+    return sketch
+
+# ── pump: hollow housing, lid with smooth round intake, and a bladed impeller (three bodies) ──
+PUMP_ROLES = ("housing", "lid", "impeller")
+PUMP_AXIAL_CLEARANCE = 0.6      # mm between the impeller and the floor / lid
+PUMP_BLADE_ANGLE = 45.0         # blade angle from the tangent at every radius (backward curved)
+PUMP_SEAL_HOUSING_SHARE = 0.6   # of the seal height is cut into the housing rim, the rest into the lid
+PUMP_SEAL_LAND = 0.8            # mm of rim left standing on each side of the seal groove
+PUMP_MIN_RIM = 2.0              # mm radial casing wall without a seal
+PUMP_OUTLET_MIN_ROUND = 5.0     # mm of full round tube clear of the casing, before the extra length
+PUMP_OUTLET_EXTRA = 5.0         # mm added to the outlet
+PUMP_INTAKE_SHORTER = 5.0       # mm taken off the intake
+
+def pump_default_plate(diameter, seal_height):
+    """Thickness of floor and lid (it also sets the walls of the connection tubes)."""
+    return max(2.0, 0.06 * diameter, (1.2 * seal_height + 1.6) if seal_height > 0 else 0.0)
+
+def pump_min_rim(seal_thickness, seal_height):
+    """Smallest radial wall (outer minus inner radius) that holds the seal."""
+    if seal_thickness > 0 and seal_height > 0:
+        return max(PUMP_MIN_RIM, seal_thickness + 2.0 * PUMP_SEAL_LAND)
+    return PUMP_MIN_RIM
+
+def pump_dimensions(p):
+    """All derived dimensions of a pump from its parameters (outer and inner diameter, seal
+    thickness, height, inlet / outlet
+    angle, inlet / outlet bore diameter, shaft diameter, blade count, fixings, screw diameter,
+    seal height);
+    raises ValueError when the parts cannot fit."""
+    D, H = float(p["diameter"]), float(p["height"])
+    shaft, blades = float(p.get("shaft_diameter", 5.0)), int(p.get("blades", 6))
+    screw, fixings = float(p.get("screw_diameter", 3.0)), int(p.get("fixings", 4))
+    seal = float(p.get("seal_height", 0.0))
+    common = p.get("port_diameter") or 0.25 * D          # pumps saved with one diameter for both
+    d_in = float(p.get("inlet_diameter") or common)
+    d_out = float(p.get("outlet_diameter") or common)
+    if not all(math.isfinite(x) for x in (D, H, shaft, screw, seal, d_in, d_out)) \
+            or D < 20.0 or shaft <= 0:
+        raise ValueError("Pump diameter must be at least 20 mm and the shaft diameter positive.")
+    if not 0 <= fixings <= 8 or not 1.0 <= screw <= 10.0:
+        raise ValueError("Use 0 to 8 fixings and a screw diameter of 1 to 10 mm.")
+    if not 0.0 <= seal <= 6.0:
+        raise ValueError("The seal height is 0 (none) to 6 mm.")
+    wall = pump_default_plate(D, seal)                   # floor and lid
+    # pumps saved before inner diameter and seal thickness existed: rim = plate, seal 1.2 x height
+    inner = float(p.get("inner_diameter") or D - 2.0 * wall)
+    seal_t = float(p["seal_thickness"]) if p.get("seal_thickness") is not None else 1.2 * seal
+    if not math.isfinite(inner) or not math.isfinite(seal_t) or not 0.0 <= seal_t <= 20.0:
+        raise ValueError("The seal thickness is 0 (no seal) to 20 mm.")
+    if seal_t <= 0:
+        seal = 0.0                                       # no groove without a thickness
+    ro = D / 2.0
+    rc = inner / 2.0
+    rim = ro - rc
+    if rim < pump_min_rim(seal_t, seal) - 1e-6:
+        raise ValueError(f"The outer diameter must be at least {inner + 2.0 * pump_min_rim(seal_t, seal):.1f} mm "
+                         "for this inner diameter and seal.")
+    if rc < 6.0:
+        raise ValueError("The inner diameter is too small.")
+    floor = wall
+    chamber = H - floor
+    back = max(1.5, 0.04 * D)
+    d = {"D": D, "H": H, "wall": wall, "ro": ro, "rc": rc, "d_in": d_in, "d_out": d_out, "floor": floor,
+         "chamber": chamber, "back": back, "shaft": shaft, "blades": blades,
+         "gap": max(1.5, 0.06 * rc), "clr": PUMP_AXIAL_CLEARANCE,
+         "tw": 0.8 * wall, "fixings": fixings, "screw": screw,
+         "hub_r": shaft / 2.0 + max(2.0, 0.04 * D), "seal": seal}
+    d["ri"] = rc - d["gap"]
+    d["rb"] = d_in / 2.0                                # bore radius of the intake
+    d["rt"] = d["rb"] + d["tw"]                         # outer radius of the intake tube
+    d["rb_out"] = d_out / 2.0
+    # the outlet is reinforced: a thicker tube wall (as far as it stays within the casing
+    # height) and a solid full-height boss where the tube leaves the casing
+    d["tw_out"] = max(d["tw"], min(1.5 * wall, H / 2.0 - d["rb_out"]))
+    d["rt_out"] = d["rb_out"] + d["tw_out"]
+    d["boss"] = math.sqrt(max(ro * ro - rc * rc, 0.0)) + wall
+    # distance along the outlet at which the whole round tube has left the casing (its side
+    # towards the pump axis stays inside longest); a full circle must stand free beyond it
+    deepest = max(rc - 2.0 * d["rb_out"] - d["tw_out"], 0.0)
+    d["outlet_clear"] = math.sqrt(max(ro * ro - deepest * deepest, 0.0))
+    d["stub"] = max(d["boss"] + 0.25 * D, d["outlet_clear"] + PUMP_OUTLET_MIN_ROUND) + PUMP_OUTLET_EXTRA
+    d["bend"] = 1.4 * d["rt"]                           # centre-line radius of the intake elbow
+    d["zc"] = wall + d["bend"]                          # height of the intake axis when horizontal
+    tilt = float(p.get("inlet_tilt", 0.0))              # 0 = horizontal, 90 = straight up
+    if not 0.0 <= tilt <= 90.0:
+        raise ValueError("The inlet tilt is 0 (horizontal) to 90 degrees (straight up).")
+    d["tilt"] = math.radians(tilt)
+    d["straight"] = max(_pump_intake_length(d) - d["bend"], 0.2 * D)    # tube after the bend
+    d["eye"] = max(d["rb"], d["hub_r"] + 1.5)           # opening of the lid towards the impeller
+    d["h_imp"] = chamber - 2.0 * d["clr"]
+    d["lug_r"] = screw / 2.0 + 2.8                      # half width of a screw lug, and its round end
+    d["lug_ring"] = ro + screw / 2.0 + 1.0              # screw circle: the holes lie outside the casing
+    d["head_r"] = screw / 2.0 + 2.2                     # room a screw head needs
+    d["seal_housing"] = PUMP_SEAL_HOUSING_SHARE * seal
+    d["seal_lid"] = seal - d["seal_housing"]
+    d["rim"] = rim
+    d["seal_width"] = seal_t if seal > 0 else 0.0
+    d["seal_mid"] = rc + rim / 2.0
+    if blades < 2 or blades > 16:
+        raise ValueError("A pump impeller has 2 to 16 blades.")
+    for label, value in (("inlet", d_in), ("outlet", d_out)):
+        if value < 4.0 or value > 0.7 * rc:
+            raise ValueError(f"The {label} diameter does not fit the housing diameter "
+                             f"(4 to {0.7 * rc:.1f} mm).")
+    if d["rb_out"] > H / 2.0 - wall - 0.5:
+        raise ValueError(f"The outlet does not fit the housing height: increase the height or reduce the "
+                         f"outlet diameter (up to {max(H - 2.0 * wall - 1.0, 0.0):.1f} mm).")
+    if d["h_imp"] < d["back"] + 3.0:
+        raise ValueError("The pump is too low for the impeller: increase the height.")
+    if shaft / 2.0 + 1.0 >= d["hub_r"] or d["eye"] > 0.7 * d["ri"] or d["eye"] - d["rb"] > 2.5 * wall:
+        raise ValueError("The shaft or inlet diameter does not fit this pump diameter.")
+    sweep = math.pi / 2.0 - d["tilt"]                    # angle of the intake bend
+    end_z = wall + d["bend"] * math.sin(sweep) + d["straight"] * math.cos(sweep)
+    d["lid_h"] = max(wall + (d["bend"] + d["rt"]) * math.sin(sweep), end_z + d["rt"] * math.sin(sweep))
+    d["intake_s"] = d["bend"] * (1.0 - math.cos(sweep)) + d["straight"] * math.sin(sweep) \
+        + d["rt"] * math.cos(sweep)                      # how far the intake reaches sideways
+    return d
+
+# rough performance estimate (water, 20 degC); the factors are engineering guesses, not fits
+PUMP_ESTIMATE_SPEEDS = (60, 600, 3000)  # rpm always listed in the panel
+PUMP_SHUTOFF_FACTOR = 0.65      # share of the Euler head (with slip) that is left at zero flow
+PUMP_INTAKE_LOSS = 1.0          # loss coefficient on the intake bore velocity (bend, eye)
+PUMP_OUTLET_LOSS = 1.5          # on the outlet bore velocity (round chamber without volute, exit)
+PUMP_EFFICIENCY = 0.30          # shaft to water, around half of the free flow
+PUMP_LOW_REYNOLDS = 2.0e4       # below this tip Reynolds number the estimate is hardly meaningful
+
+def pump_performance(d, rpm):
+    """Rough pressure and flow of the pump at `rpm` from its dimensions `d`: Euler head with
+    Wiesner slip, less the velocity losses in the two bores; no hoses, no lift. Returns
+    shut-off pressure (Pa), free flow (L/min), pressure (Pa) and shaft power (W) at half
+    the free flow, and the impeller tip Reynolds number."""
+    rho, nu, g = 998.0, 1.0e-6, 9.81
+    thick = max(1.6, 0.03 * d["D"]) / 1000.0
+    d2 = 2.0 * d["ri"] / 1000.0 - thick                          # blade tip diameter (m)
+    width = (d["h_imp"] - d["back"]) / 1000.0                    # blade height
+    blades, beta = d["blades"], math.radians(PUMP_BLADE_ANGLE)
+    open_share = max(1.0 - blades * thick / (math.pi * d2 * math.sin(beta)), 0.3)
+    outflow_area = math.pi * d2 * width * open_share
+    slip = max(1.0 - math.sqrt(math.sin(beta)) / blades ** 0.7, 0.2)
+    u2 = math.pi * d2 * rpm / 60.0
+    shutoff = PUMP_SHUTOFF_FACTOR * slip * u2 * u2 / g           # head (m)
+    area_in = math.pi * (d["d_in"] / 2000.0) ** 2
+    area_out = math.pi * (d["d_out"] / 2000.0) ** 2
+    square = (PUMP_INTAKE_LOSS / area_in ** 2 + PUMP_OUTLET_LOSS / area_out ** 2) / (2.0 * g)
+    linear = PUMP_SHUTOFF_FACTOR * u2 / (g * outflow_area * math.tan(beta))   # backward curved blades
+    flow = (-linear + math.sqrt(linear * linear + 4.0 * square * shutoff)) / (2.0 * square)
+    half = flow / 2.0
+    half_head = shutoff - linear * half - square * half * half
+    return {"shutoff_pa": rho * g * shutoff, "free_lpm": flow * 60000.0,
+            "half_pa": rho * g * half_head, "half_power_w": rho * g * half_head * half / PUMP_EFFICIENCY,
+            "reynolds": u2 * d2 / nu}
+
+def pump_estimate_html(d, speeds):
+    """The estimate table of the pump panel."""
+    def number(value):
+        if value >= 100.0:
+            return f"{value:.0f}"
+        return f"{value:.1f}" if value >= 10.0 else f"{value:.2g}"
+    rows, slow = [], False
+    for rpm in sorted(set(speeds)):
+        r = pump_performance(d, rpm)
+        mark = "*" if r["reynolds"] < PUMP_LOW_REYNOLDS else ""
+        slow = slow or bool(mark)
+        cells = (f"{rpm:g}{mark}", number(r["shutoff_pa"] / 1000.0), number(r["free_lpm"]),
+                 number(r["half_pa"] / 1000.0), number(r["half_power_w"]))
+        rows.append("<tr>" + "".join(f"<td align='right'>{c}&nbsp;</td>" for c in cells) + "</tr>")
+    head = ("rpm", "max.<br>kPa", "max.<br>L/min", "kPa at<br>\u00bd flow", "shaft<br>W")
+    return ("<table cellspacing='0' cellpadding='1' width='100%'><tr>"
+            + "".join(f"<th align='right'>{c}&nbsp;</th>" for c in head) + "</tr>" + "".join(rows)
+            + "</table>Rough hand estimate for water without hoses or lift, about \u00b130\u201350 %; "
+              "not measured or simulated. 10 kPa \u2248 1 m of water."
+            + (" <br>* Very slow: viscosity and friction dominate; expect practically no pumping."
+               if slow else ""))
+
+def pump_part_height(role, d):
+    return {"housing": d["H"], "lid": d["lid_h"], "impeller": d["h_imp"]}[role]
+
+def pump_part_origin_z(role, d):
+    """World Z of the part's base: the casing on the floor, the lid on the casing rim, the
+    impeller lifted by the axial clearance (assembled position)."""
+    return {"housing": 0.0, "lid": d["H"], "impeller": d["floor"] + d["clr"]}[role]
+
+def _pump_part_reach(role, d):
+    """Largest distance of a part from its own axis, whatever the port angles are."""
+    if role == "impeller":
+        return d["ri"]
+    reach = max(d["ro"], d["lug_ring"] + d["lug_r"] if d["fixings"] else 0.0)
+    if role == "lid":
+        return max(reach, math.hypot(_pump_intake_length(d), d["rt"]))
+    corners = _pump_outlet_polygon(d, 0.0, -d["tw_out"], 2.0 * d["rb_out"] + d["tw_out"], d["stub"])
+    return max([reach] + [math.hypot(x, y) for x, y in corners])
+
+def pump_part_origins(d, side_by_side):
+    """Position of each part's base. Assembled: the pump axis with the parts stacked. Side by
+    side: all on the XY plane in a row along +X, housing at the origin; the spacing does not
+    depend on the port angles, so the parts stay put while an angle is turned."""
+    if not side_by_side:
+        return {role: np.array([0.0, 0.0, pump_part_origin_z(role, d)]) for role in PUMP_ROLES}
+    gap = max(5.0, 0.1 * d["D"])
+    origins, x, previous = {}, 0.0, None
+    for role in PUMP_ROLES:
+        reach = _pump_part_reach(role, d)
+        if previous is not None:
+            x += previous + gap + reach
+        origins[role] = np.array([x, 0.0, 0.0])
+        previous = reach
+    return origins
+
+def _pump_strip(angle, s0, s1, a0, a1):
+    """Rectangle in the XY plane: along direction `angle` from s0 to s1, lateral (counter-
+    clockwise side positive) from a0 to a1."""
+    ux, uy = math.cos(angle), math.sin(angle)
+    nx, ny = -uy, ux
+    return [(s0 * ux + a0 * nx, s0 * uy + a0 * ny), (s1 * ux + a0 * nx, s1 * uy + a0 * ny),
+            (s1 * ux + a1 * nx, s1 * uy + a1 * ny), (s0 * ux + a1 * nx, s0 * uy + a1 * ny)]
+
+def _pump_outlet_polygon(d, outlet_angle, a0, a1, length):
+    """Footprint of the tangential outlet: lateral 0 is the tangent line at the chamber circle
+    (the water leaves counter-clockwise), positive towards the pump centre."""
+    outlet = math.radians(float(outlet_angle))
+    px, py = d["rc"] * math.cos(outlet), d["rc"] * math.sin(outlet)
+    return [(x + px, y + py) for x, y in _pump_strip(outlet + math.pi / 2.0, 0.0, length, a0, a1)]
+
+def _pump_intake_length(d):
+    return d["ro"] + 0.3 * d["D"] - PUMP_INTAKE_SHORTER
+
+def _pump_point_polygon_distance(point, polygon):
+    x, y = point
+    inside = False
+    best = float("inf")
+    for i in range(len(polygon)):
+        (x0, y0), (x1, y1) = polygon[i], polygon[(i + 1) % len(polygon)]
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            inside = not inside
+        dx, dy = x1 - x0, y1 - y0
+        t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy)))
+        best = min(best, math.hypot(x - x0 - t * dx, y - y0 - t * dy))
+    return 0.0 if inside else best
+
+def _pump_fixing_margin(p, d, outlet_clearance):
+    """margin(angle in rad) of a screw lug: negative where its hole would come within
+    `outlet_clearance` of the outlet bore or its screw head under the intake tube."""
+    outlet = _pump_outlet_polygon(d, p["outlet_angle"], 0.0, d["d_out"], d["stub"] + d["wall"] + 1.0)
+    tube = _pump_strip(math.radians(float(p["inlet_angle"])), -d["rt"], max(d["rt"], d["intake_s"]),
+                       -d["rt"], d["rt"])
+
+    def margin(angle):
+        x, y = d["lug_ring"] * math.cos(angle), d["lug_ring"] * math.sin(angle)
+        return min(_pump_point_polygon_distance((x, y), outlet) - outlet_clearance,
+                   _pump_point_polygon_distance((x, y), tube) - d["head_r"])
+    return margin
+
+def _pump_even_angles(first_deg, count):
+    return [math.radians(first_deg) + 2.0 * math.pi * k / count for k in range(count)]
+
+def pump_free_fixing_angle(p, d, wanted):
+    """The fixing angle (deg) nearest to `wanted` at which all evenly spaced lugs are free,
+    or None when no rotation fits that many."""
+    count = d["fixings"]
+    if count <= 0:
+        return wanted
+    margin = _pump_fixing_margin(p, d, 0.5 * d["screw"] + 1.5)
+    for step in range(721):
+        for sign in (1.0, -1.0):
+            angle = wanted + sign * 0.5 * step
+            if all(margin(t) >= 0.0 for t in _pump_even_angles(angle, count)):
+                return (angle + 360.0) % 360.0 if abs(angle) > 360.0 else angle
+    return None
+
+def pump_fixing_angles(p, d):
+    """Angles (rad) of the screw lugs, shared by housing and lid: evenly spaced (360 / count)
+    from the fixing angle. Pumps saved without a fixing angle keep their automatic places."""
+    count = d["fixings"]
+    if count <= 0:
+        return []
+    if p.get("fixing_angle") is not None:
+        wanted = float(p["fixing_angle"])
+        margin = _pump_fixing_margin(p, d, 0.5 * d["screw"] + 1.5)
+        angles = _pump_even_angles(wanted, count)
+        if all(margin(t) >= 0.0 for t in angles):
+            return angles
+        free = pump_free_fixing_angle(p, d, wanted)
+        raise ValueError(
+            f"No evenly spaced place for {count} fixings between the outlet and the inlet: use fewer."
+            if free is None else
+            f"A fixing meets the outlet or the intake at this fixing angle; the nearest free one is "
+            f"{free:g}\u00b0.")
+    return _pump_automatic_fixing_angles(p, d)
+
+def _pump_automatic_fixing_angles(p, d):
+    """Placement of pumps saved before the fixing angle existed: the lugs are spread over
+    the free positions as evenly as those allow."""
+    count = d["fixings"]
+    outlet = _pump_outlet_polygon(d, p["outlet_angle"], 0.0, d["d_out"], d["stub"] + d["wall"] + 1.0)
+    tube = _pump_strip(math.radians(float(p["inlet_angle"])), -d["rt"], max(d["rt"], d["intake_s"]),
+                       -d["rt"], d["rt"])
+    need_outlet = 0.5 * d["screw"] + 1.2 + d["tw"]
+    need_tube = d["head_r"]
+
+    def margin(angle):
+        x, y = d["lug_ring"] * math.cos(angle), d["lug_ring"] * math.sin(angle)
+        return min(_pump_point_polygon_distance((x, y), outlet) - need_outlet,
+                   _pump_point_polygon_distance((x, y), tube) - need_tube)
+    free = [math.radians(a) for a in range(360) if margin(math.radians(a)) >= 0.0]
+    gap = 2.0 * math.asin(min(1.0, (2.0 * d["lug_r"] + 1.0) / (2.0 * d["lug_ring"])))   # lugs must not touch
+
+    def apart(a, b):
+        delta = abs(a - b) % (2.0 * math.pi)
+        return min(delta, 2.0 * math.pi - delta)
+    chosen = []
+    if free:
+        runs, run = [], [free[0]]
+        for angle in free[1:]:
+            if angle - run[-1] <= math.radians(1.01):
+                run.append(angle)
+            else:
+                runs.append(run); run = [angle]
+        runs.append(run)
+        if len(runs) > 1 and 2.0 * math.pi - runs[-1][-1] <= math.radians(1.01) + 1e-9 \
+                and runs[0][0] <= math.radians(1.01):
+            runs[0] = runs.pop() + runs[0]
+        largest = max(runs, key=len)
+        chosen = [largest[len(largest) // 2]]
+        while len(chosen) < count:
+            candidate = max(free, key=lambda a: min(apart(a, c) for c in chosen))
+            if min(apart(candidate, c) for c in chosen) < gap:
+                break
+            chosen.append(candidate)
+    if len(chosen) < count:
+        raise ValueError("No room for that many fixings between the outlet and the inlet: use fewer.")
+    return sorted(chosen)
+
+def _pump_prism(frame, z0, h, polygon=None, circles=()):
+    """Prism from one polygon and / or circles, each a radius or (radius, x, y); with a
+    polygon-free profile of several circles the inner ones are holes."""
+    sketch = Sketch("XY", name="pump", frame=frame)
+    if polygon is not None:
+        vertices = [Vertex(x, y) for x, y in polygon]
+        sketch.vertices.extend(vertices)
+        sketch.segments.extend(Segment(vertices[i], vertices[(i + 1) % len(vertices)])
+                               for i in range(len(vertices)))
+    for circle in circles:
+        radius, cx, cy = circle if isinstance(circle, tuple) else (circle, 0.0, 0.0)
+        sketch.circles.append(Circle(Vertex(cx, cy), radius))
+    return extrude_profile(sketch.profile_loop_edges(), h, frame, z0)
+
+def _pump_join(base, parts, union=True):
+    result = csg_subtract(base, parts, label="", union=union)
+    if not _mesh_is_closed(result[1]):
+        raise ValueError("The pump part could not be built as a closed solid.")
+    return result
+
+def _pump_lug(d, frame, angle, z0, h):
+    """One screw lug: a half circle around the screw hole whose two sides run straight into
+    the casing, so the lug keeps its full width where it joins (no narrow neck)."""
+    half = d["lug_r"]
+    ux, uy = math.cos(angle), math.sin(angle)
+    nx, ny = -uy, ux
+
+    def point(radial, across):
+        return Vertex(radial * ux + across * nx, radial * uy + across * ny)
+    inner = math.sqrt(max(d["ro"] ** 2 - half ** 2, 0.0)) - 0.5      # just inside the casing
+    start, begin = point(inner, -half), point(d["lug_ring"], -half)
+    end, finish = point(d["lug_ring"], half), point(inner, half)
+    centre = point(d["lug_ring"], 0.0)
+    sketch = Sketch("XY", name="pump", frame=frame)
+    sketch.vertices.extend((start, begin, end, finish, centre))
+    sketch.segments.extend((Segment(start, begin), Segment(end, finish), Segment(finish, start)))
+    sketch.arcs.append(Arc(centre, begin, end))
+    return extrude_profile(sketch.profile_loop_edges(), h, frame, z0)
+
+def _pump_lugs(d, frame, angles, z0, h):
+    return [_pump_lug(d, frame, t, z0, h) for t in angles]
+
+def _pump_holes(d, frame, angles, radius, z0, h):
+    return [_pump_prism(frame, z0, h, circles=((radius, d["lug_ring"] * math.cos(t),
+                                                d["lug_ring"] * math.sin(t)),))
+            for t in angles]
+
+def _pump_tube_frame(frame, point, angle):
+    """Frame whose Z axis runs horizontally along `angle` (rad from the part's +X) through
+    `point` (part coordinates): prisms made in it are round tubes along that direction."""
+    origin, u, v, w = (np.asarray(axis, float) for axis in frame)
+    direction = math.cos(angle) * u + math.sin(angle) * v
+    return (origin + point[0] * u + point[1] * v + point[2] * w, w, np.cross(direction, w), direction)
+
+def _pump_intake_sweep(frame, angle, bend, z_bend, radius, z_start, straight, tilt):
+    """One round solid along the whole intake centre line: up the part's Z axis from z_start
+    to z_bend, through the bend towards `angle`, then `straight` on, rising at `tilt` (rad,
+    0 = horizontal after a quarter bend, 90 degrees = straight up without a bend). It is a
+    single mesh on purpose: straight and bent pieces joined end to end leave thin walls
+    inside the passage wherever rounding keeps their end faces from coinciding."""
+    origin, u, v, w = (np.asarray(axis, float) for axis in frame)
+    direction = math.cos(angle) * u + math.sin(angle) * v
+    side = np.cross(w, direction)
+    sweep = math.pi / 2.0 - tilt
+    stations = []                                 # (point, tangent) as (along direction, height)
+    if z_bend - z_start > 1e-9:
+        stations.append(((0.0, z_start), (0.0, 1.0)))
+    if sweep > 1e-6:
+        quarter = max(12, curve_segments(bend, math.pi / 2.0, hi=96))
+        bend_steps = max(2, int(math.ceil(quarter * sweep / (math.pi / 2.0))))
+        angles = [sweep * i / bend_steps for i in range(bend_steps + 1)]
+    else:
+        sweep, angles = 0.0, [0.0]
+    for t in angles:
+        stations.append(((bend - bend * math.cos(t), z_bend + bend * math.sin(t)),
+                         (math.sin(t), math.cos(t))))
+    (s_last, z_last), (ts, tz) = stations[-1]
+    stations.append(((s_last + straight * ts, z_last + straight * tz), (ts, tz)))
+    count = max(24, curve_segments(radius, 2.0 * math.pi, hi=128))
+    verts, rings = [], []
+    for (s_pos, z_pos), (ts, tz) in stations:
+        centre = origin + s_pos * direction + z_pos * w
+        inward = -tz * direction + ts * w          # in the bend plane, square to the path
+        rings.append(range(len(verts), len(verts) + count))
+        for k in range(count):
+            phi = 2.0 * math.pi * k / count
+            verts.append(centre + radius * (math.cos(phi) * inward + math.sin(phi) * side))
+    tris = []
+    for lower, upper in zip(rings[:-1], rings[1:]):
+        for k in range(count):
+            k2 = (k + 1) % count
+            tris.append((lower[k], lower[k2], upper[k2]))
+            tris.append((lower[k], upper[k2], upper[k]))
+    side_ids = list(range(len(tris)))
+    caps = []
+    for ring, station, sign in ((rings[0], stations[0], -1.0), (rings[-1], stations[-1], 1.0)):
+        (s_pos, z_pos), (ts, tz) = station
+        centre_index = len(verts)
+        verts.append(origin + s_pos * direction + z_pos * w)
+        first = len(tris)
+        for k in range(count):
+            k2 = (k + 1) % count
+            pair = (ring[k], ring[k2]) if sign > 0 else (ring[k2], ring[k])
+            tris.append((centre_index, pair[0], pair[1]))
+        caps.append((list(range(first, len(tris))), centre_index, sign * (ts * direction + tz * w)))
+    V = np.asarray(verts, float)
+    T = np.asarray(tris, int)
+    if np.einsum("ij,ij->i", V[T[:, 0]], np.cross(V[T[:, 1]], V[T[:, 2]])).sum() < 0:
+        tris = [(i, k, j) for i, j, k in tris]    # wind the triangles outwards
+    faces = [{"kind": "side", "tris": side_ids, "planar": False}]
+    for ids, centre_index, normal in caps:
+        normal = _unit(normal)
+        x_axis = _unit(side)
+        faces.append({"kind": "top", "tris": ids, "planar": True,
+                      "frame": (V[centre_index], x_axis, np.cross(normal, x_axis), normal),
+                      "boundary": [("circle", V[centre_index], radius)]})
+    return [tuple(p) for p in V.tolist()], [tuple(int(i) for i in t) for t in tris], faces
+
+def _pump_revolved(frame, points):
+    """Solid of revolution about the part's Z axis from a polygon of (radius, z) points."""
+    origin, u, v, w = (np.asarray(axis, float) for axis in frame)
+    profile_frame = (origin, u, w, np.cross(u, w))
+    sketch = Sketch("XY", name="pump", frame=profile_frame)
+    vertices = [Vertex(r, z) for r, z in points]
+    sketch.vertices.extend(vertices)
+    sketch.segments.extend(Segment(vertices[i], vertices[(i + 1) % len(vertices)])
+                           for i in range(len(vertices)))
+    return revolve_profile(sketch.profile_loop_edges(), profile_frame, origin, w, 0.0, 2.0 * math.pi, 0.0)
+
+def pump_housing_mesh(d, frame, p):
+    rb, rt, wall, stub = d["rb_out"], d["rt_out"], d["wall"], d["stub"]
+    angles = pump_fixing_angles(p, d)
+    outlet = math.radians(float(p["outlet_angle"]))
+    # round outlet: the tube's inner edge touches the chamber circle at the outlet angle and
+    # leaves counter-clockwise along the tangent, at half the housing height
+    axis_point = ((d["rc"] - rb) * math.cos(outlet), (d["rc"] - rb) * math.sin(outlet), d["H"] / 2.0)
+    tube = _pump_tube_frame(frame, axis_point, outlet + math.pi / 2.0)
+    body = _pump_prism(frame, 0.0, d["H"], circles=(d["ro"],))
+    boss = _pump_outlet_polygon(d, p["outlet_angle"], -d["tw_out"], 2.0 * rb + d["tw_out"], d["boss"])
+    body = _pump_join(body, [_pump_prism(tube, 0.0, stub, circles=(rt,)),
+                             _pump_prism(frame, 0.0, d["H"], polygon=boss)]
+                      + _pump_lugs(d, frame, angles, 0.0, d["H"]))
+    cuts = [_pump_prism(frame, d["floor"], d["chamber"] + 1.0, circles=(d["rc"],)),
+            _pump_prism(tube, 0.0, stub + wall + 1.0, circles=(rb,)),
+            _pump_prism(frame, -1.0, d["floor"] + 2.0, circles=(d["shaft"] / 2.0 + 0.5,))]
+    cuts += _pump_holes(d, frame, angles, 0.85 * d["screw"] / 2.0, -1.0, d["H"] + 2.0)   # pilot holes
+    if d["seal_housing"] > 0:                                    # groove in the rim for the seal
+        r_in, r_out = d["seal_mid"] - d["seal_width"] / 2.0, d["seal_mid"] + d["seal_width"] / 2.0
+        cuts.append(_pump_prism(frame, d["H"] - d["seal_housing"], d["seal_housing"] + 1.0,
+                                circles=(r_out, r_in)))
+    return _pump_join(body, cuts, union=False)
+
+def pump_lid_mesh(d, frame, p):
+    """Lid: disc with screw lugs and a round intake. The intake arrives horizontally or tilted
+    upwards, bends and runs straight down into the eye above the impeller;
+    a cone widens the eye towards the impeller."""
+    wall, rb, rt, bend = d["wall"], d["rb"], d["rt"], d["bend"]
+    straight, tilt = d["straight"], d["tilt"]
+    angles = pump_fixing_angles(p, d)
+    inlet = math.radians(float(p["inlet_angle"]))
+    lid = _pump_prism(frame, 0.0, wall, circles=(d["ro"],))
+    lid = _pump_join(lid, [_pump_intake_sweep(frame, inlet, bend, wall, rt, wall / 2.0, straight, tilt)]
+                     + _pump_lugs(d, frame, angles, 0.0, wall))
+    cuts = [_pump_intake_sweep(frame, inlet, bend, wall, rb, -1.0, straight + 1.0, tilt)]
+    if d["eye"] - rb > 1e-6:                                     # bell mouth towards the impeller
+        cuts += [_pump_prism(frame, -1.0, 1.0, circles=(d["eye"],)),
+                 _pump_revolved(frame, [(0.6 * rb, -0.5), (d["eye"], -0.5), (d["eye"], 0.0),
+                                        (rb - 0.05, wall * (d["eye"] - rb + 0.05) / (d["eye"] - rb)),
+                                        (0.6 * rb, wall * (d["eye"] - rb + 0.05) / (d["eye"] - rb))])]
+    cuts += _pump_holes(d, frame, angles, (d["screw"] + 0.4) / 2.0, -1.0, wall + 2.0)
+    if d["seal_lid"] > 0:                                        # smaller groove for the seal
+        r_in, r_out = d["seal_mid"] - d["seal_width"] / 2.0, d["seal_mid"] + d["seal_width"] / 2.0
+        cuts.append(_pump_prism(frame, -1.0, d["seal_lid"] + 1.0, circles=(r_out, r_in)))
+    return _pump_join(lid, cuts, union=False)
+
+def pump_impeller_outline(d):
+    """Outline of the hub together with all blades, as one polygon (counter-clockwise): the
+    backward curved blades leave the hub through a fillet on both sides, so there is no step
+    or notch at the root. Returns (points, fillet radius, root circle radius); with many
+    blades the fillet gets smaller and, if the roots would still run into each other, the
+    root circle larger."""
+    ri, hub_r, bore, blades = d["ri"], d["hub_r"], d["shaft"] / 2.0, d["blades"]
+    thick = max(1.6, 0.03 * d["D"])
+    tan_b = math.tan(math.radians(PUMP_BLADE_ANGLE))
+    r_ref = hub_r - 0.4                  # where the centre line of blade 0 crosses angle 0
+    r_tip = ri - thick / 2.0             # so the square tip's corners stay within the backplate
+    r_low = max(hub_r - 2.0 * thick, bore + 0.2)
+
+    def side(r, sign):
+        """Point on one flank at centre line radius r, and the flank's outward normal."""
+        th = -math.log(r / r_ref) / tan_b                      # backward curved log spiral
+        tx, ty = math.cos(th) + math.sin(th) / tan_b, math.sin(th) - math.cos(th) / tan_b
+        length = math.hypot(tx, ty)
+        nx, ny = -sign * ty / length, sign * tx / length
+        return (r * math.cos(th) + nx * thick / 2.0, r * math.sin(th) + ny * thick / 2.0), (nx, ny)
+
+    def root(sign, circle, fillet):
+        """The fillet touching the flank and the root circle from outside: (flank parameter,
+        fillet centre)."""
+        def centre(r):
+            (x, y), (nx, ny) = side(r, sign)
+            return x + fillet * nx, y + fillet * ny
+
+        def beyond(r):
+            return math.hypot(*centre(r)) - (circle + fillet)
+        low = r_low
+        if beyond(low) >= 0.0:
+            raise ValueError("The blade roots do not fit this hub.")
+        for i in range(1, 401):
+            high = r_low + (r_tip - r_low) * i / 400.0
+            if beyond(high) >= 0.0:
+                for _ in range(50):
+                    middle = (low + high) / 2.0
+                    low, high = (low, middle) if beyond(middle) >= 0.0 else (middle, high)
+                return high, centre(high)
+            low = high
+        raise ValueError("The blades are too short for this hub.")
+
+    pitch = 2.0 * math.pi / blades
+    circle, fillet = hub_r, 1.2 * thick
+    for _ in range(300):
+        (r_right, f_right), (r_left, f_left) = root(-1.0, circle, fillet), root(1.0, circle, fillet)
+        on_right = math.atan2(f_right[1], f_right[0])          # where the fillets meet the circle
+        on_left = math.atan2(f_left[1], f_left[0])
+        gap = pitch - (on_left - on_right) % (2.0 * math.pi)
+        if 0.02 <= gap < pitch:
+            break
+        if fillet > 0.4:
+            fillet *= 0.9
+        else:
+            circle += 0.1
+    else:
+        raise ValueError("The blade roots run into each other: use fewer blades or a larger pump.")
+
+    def on_circle(angle):
+        return circle * math.cos(angle), circle * math.sin(angle)
+
+    def fillet_arc(centre, start, end):
+        a0 = math.atan2(start[1] - centre[1], start[0] - centre[0])
+        a1 = math.atan2(end[1] - centre[1], end[0] - centre[0])
+        turn = (a1 - a0 + math.pi) % (2.0 * math.pi) - math.pi
+        steps = max(4, int(math.ceil(abs(turn) / math.radians(8.0))))
+        return [(centre[0] + fillet * math.cos(a0 + turn * i / steps),
+                 centre[1] + fillet * math.sin(a0 + turn * i / steps)) for i in range(steps + 1)]
+    samples = 32
+    flank_right = [side(r_right + (r_tip - r_right) * i / samples, -1.0)[0] for i in range(samples + 1)]
+    flank_left = [side(r_tip + (r_left - r_tip) * i / samples, 1.0)[0] for i in range(samples + 1)]
+    steps = max(1, int(math.ceil(gap / math.radians(6.0))))
+    one = (fillet_arc(f_right, on_circle(on_right), flank_right[0])[:-1]
+           + flank_right                                           # out along one flank, the tip,
+           + flank_left                                            # and back along the other
+           + fillet_arc(f_left, flank_left[-1], on_circle(on_left))[1:]
+           + [on_circle(on_left + gap * i / steps) for i in range(1, steps)])
+    points = []
+    for k in range(blades):
+        c, sn = math.cos(pitch * k), math.sin(pitch * k)
+        points += [(x * c - y * sn, x * sn + y * c) for x, y in one]
+    return points, fillet, circle
+
+def _pump_merge_smooth_walls(mesh, axis):
+    """Join the upright face records that run smoothly into each other (flank strips, fillets,
+    hub arcs) to one curved face each, so they shade smoothly and are picked as one surface.
+    Sharp corners (more than 25 degrees) stay face borders."""
+    V = np.asarray(mesh[0], float).reshape(-1, 3)
+    T = np.asarray(mesh[1], int).reshape(-1, 3)
+    faces = mesh[2]
+    N = np.cross(V[T[:, 1]] - V[T[:, 0]], V[T[:, 2]] - V[T[:, 0]])
+    N /= np.maximum(np.linalg.norm(N, axis=1), 1e-30)[:, None]
+    upright = np.abs(N @ np.asarray(axis, float)) < 0.2
+    parent = list(range(len(faces)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    owner = {}
+    for index, face in enumerate(faces):
+        for k in face["tris"]:
+            if not upright[k]:
+                continue
+            a, b, c = (int(i) for i in T[k])
+            for edge in ((a, b), (b, c), (c, a)):
+                key = (min(edge), max(edge))
+                if key not in owner:
+                    owner[key] = (index, k)
+                    continue
+                other, k_other = owner[key]
+                if other != index and float(N[k] @ N[k_other]) > math.cos(math.radians(25.0)):
+                    parent[root(index)] = root(other)
+    groups = {}
+    for index, face in enumerate(faces):
+        if face["tris"]:
+            groups.setdefault(root(index), []).append(index)
+
+    def line_key(prim):
+        return tuple(sorted(tuple(np.round(np.asarray(p, float), 5)) for p in prim[1:3]))
+    merged = []
+    for members in sorted(groups.values(), key=min):
+        if len(members) == 1:
+            merged.append(faces[members[0]])
+            continue
+        prims = [prim for i in members for prim in faces[i].get("boundary", [])]
+        lines = {}
+        for prim in prims:
+            if prim[0] == "line":
+                lines[line_key(prim)] = lines.get(line_key(prim), 0) + 1
+        merged.append({"kind": "side", "planar": False,
+                       "tris": [k for i in members for k in faces[i]["tris"]],
+                       # the borders between two strips are no edges of the joined surface
+                       "boundary": [prim for prim in prims
+                                    if prim[0] != "line" or lines[line_key(prim)] == 1]})
+    return mesh[0], mesh[1], merged
+
+def pump_impeller_mesh(d, frame):
+    bore, back, h = d["shaft"] / 2.0, d["back"], d["h_imp"]
+    plate = _pump_prism(frame, 0.0, back, circles=(d["ri"], bore))
+    points = pump_impeller_outline(d)[0]
+    sketch = Sketch("XY", name="pump", frame=frame)
+    vertices = [Vertex(x, y) for x, y in points]
+    sketch.vertices.extend(vertices)
+    sketch.segments.extend(Segment(vertices[i], vertices[(i + 1) % len(vertices)])
+                           for i in range(len(vertices)))
+    sketch.circles.append(Circle(Vertex(0.0, 0.0), bore))          # shaft bore: a hole
+    upper = extrude_profile(sketch.profile_loop_edges(), h - back + 0.2, frame, back - 0.2)
+    return _pump_join(plate, [upper])
+
+def _pump_merge_flat_faces(mesh):
+    """Join the face records of one flat surface. The booleans keep a record per tool, so the
+    casing's bottom came out as disc + outlet boss + one per screw lug, and every border
+    between them showed as a line across the surface. Records are joined when they lie in the
+    same plane (same outward normal) and share a triangle edge."""
+    V = np.asarray(mesh[0], float).reshape(-1, 3)
+    T = np.asarray(mesh[1], int).reshape(-1, 3)
+    faces = mesh[2]
+    planes = {}
+    for index, face in enumerate(faces):
+        if not face["tris"]:
+            continue
+        P = V[T[face["tris"]]]
+        normals = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+        total = normals.sum(axis=0)
+        length = float(np.linalg.norm(total))
+        if length < 1e-12:
+            continue
+        normal = total / length
+        offsets = P.reshape(-1, 3) @ normal
+        if float(np.ptp(offsets)) < 1e-5:                           # flat
+            planes[index] = (normal, float(offsets.mean()))
+    parent = list(range(len(faces)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    owner = {}
+    for index in planes:
+        for k in faces[index]["tris"]:
+            a, b, c = (int(i) for i in T[k])
+            for edge in ((a, b), (b, c), (c, a)):
+                other = owner.setdefault((min(edge), max(edge)), index)
+                if other != index and float(planes[other][0] @ planes[index][0]) > 1.0 - 1e-8 \
+                        and abs(planes[other][1] - planes[index][1]) < 1e-5:
+                    parent[root(index)] = root(other)
+    groups = {}
+    for index, face in enumerate(faces):
+        if face["tris"]:
+            groups.setdefault(root(index), []).append(index)
+    merged = []
+    for members in sorted(groups.values(), key=min):
+        largest = max(members, key=lambda i: len(faces[i]["tris"]))
+        face = dict(faces[largest], tris=[k for i in members for k in faces[i]["tris"]])
+        if len(members) > 1 and "frame" in face:
+            face["planar"] = True
+        merged.append(face)
+    return mesh[0], mesh[1], refresh_face_boundaries(mesh[0], mesh[1], merged)
+
+def pump_mesh(parameters, frame):
+    """Mesh (verts, tris, faces) of one pump part (parameters["role"]) in its own frame."""
+    d = pump_dimensions(parameters)
+    role = parameters.get("role", "housing")
+    if role == "housing":
+        mesh = pump_housing_mesh(d, frame, parameters)
+    elif role == "lid":
+        mesh = pump_lid_mesh(d, frame, parameters)
+    else:
+        return _pump_merge_smooth_walls(_pump_merge_flat_faces(pump_impeller_mesh(d, frame)), frame[3])
+    return _pump_merge_flat_faces(mesh)
+
+def make_pump_sketch(name, parameters, frame=None):
+    """Reference profile of a pump part: its outer circle (the shape itself is generated)."""
+    d = pump_dimensions(parameters)
+    role = parameters.get("role", "housing")
+    sketch = Sketch("XY", name=name, frame=frame)
+    sketch.circles.append(Circle(Vertex(0.0, 0.0), d["ri"] if role == "impeller" else d["ro"]))
+    centerpoint = Vertex(0.0, 0.0, locked=True)
+    sketch.vertices.append(centerpoint)
+    sketch.points_free.append(centerpoint)
     return sketch
 
 def make_internal_gear_sketch(name, parameters, frame=None):
@@ -9105,7 +9835,8 @@ def measurement_report(items):
 
 # ── View3D ────────────────────────────────────────────────────────────────────
 AXIS_HANDLE_COLORS = {"axis_x": (1.0, 0.35, 0.30, 1.0), "axis_y": (0.35, 0.90, 0.35, 1.0),
-                      "axis_z": (0.40, 0.60, 1.0, 1.0)}     # move arrows of the Cut Surface
+                      "axis_z": (0.40, 0.60, 1.0, 1.0),     # move arrows of the Cut Surface
+                      "orange": (1.0, 0.60, 0.10, 1.0)}     # handles that turn no single part
 
 def dimension_drag_step(pixels_per_mm, fine=False):
     target = min(1.0, 16.0 / max(float(pixels_per_mm), 1e-9))
@@ -9684,6 +10415,39 @@ class View3D(QGLWidget):
                                      ring, "axis_" + "xyz"[index]))
             handle_specs = self._visible_move_rotate(handle_specs, mw.chk_surface_show_move,
                                                      mw.chk_surface_show_rotate)
+        elif getattr(mw, "_pump_preview", None) is not None and not mw._dock_pump.isHidden() \
+                and mw._pump_preview.get("dimensions"):
+            # rotation rings as for the Surface / Cut Surface: the same fixed 270 degree ring,
+            # coloured by the axis it turns about. The outlet ring is larger, so the two rings
+            # about Z stay apart when the parts are stacked
+            dims = mw._pump_preview["dimensions"]
+            origins = mw._pump_preview["origins"]
+            inlet = math.radians(mw.sp_pump_inlet.value())
+            toward = np.array([math.cos(inlet), math.sin(inlet), 0.0])
+            up = np.array([0.0, 0.0, 1.0])
+            tilt_axis = np.cross(toward, up)             # the tilt lifts the intake towards +Z
+            handle_specs = []
+            for control, name, centre, axis, arm, color, pixels in (
+                    (mw.sp_pump_outlet, "Pump outlet angle",
+                     origins["housing"] + up * 0.5 * dims["H"], up, None, "axis_z", 62.0),
+                    (mw.sp_pump_inlet, "Pump inlet angle",
+                     origins["lid"] + up * dims["lid_h"], up, None, "axis_z", 38.0),
+                    (mw.sp_pump_tilt, "Pump inlet tilt",          # centre of the intake bend
+                     origins["lid"] + toward * dims["bend"] + up * dims["wall"], tilt_axis, toward,
+                     "axis_x" if abs(tilt_axis[0]) >= abs(tilt_axis[1]) else "axis_y", 38.0)):
+                if arm is None:
+                    helper = np.eye(3)[int(np.argmin(np.abs(axis)))]
+                    arm = _unit(np.cross(axis, helper))
+                ring = {"center": centre, "u": arm, "v": np.cross(axis, arm),
+                        "start": _GIZMO_ARC[0], "stop": _GIZMO_ARC[1], "pixels": pixels}
+                handle_specs.append((centre, axis, control, name, "\u00b0", 1.0, ring, color))
+            if mw.sp_pump_fixings.value():              # about Z on the rim, the largest ring
+                centre = origins["housing"] + up * dims["H"]
+                arm = _unit(np.cross(up, np.array([1.0, 0.0, 0.0])))
+                ring = {"center": centre, "u": arm, "v": np.cross(up, arm),
+                        "start": _GIZMO_ARC[0], "stop": _GIZMO_ARC[1], "pixels": 86.0}
+                handle_specs.append((centre, up, mw.sp_pump_fix_angle, "Pump fixing angle", "\u00b0",
+                                     1.0, ring, "orange"))
         elif self._mode == MODE_THREADPICK and mw._thread_targets and \
                 mw.cb_thread_extent.currentData() != "whole" and mw.sp_thread_length.isEnabled():
             target = mw._thread_targets[-1]
@@ -9846,7 +10610,9 @@ class View3D(QGLWidget):
         mw = self._main_window
         step = 0.1 if control is mw.sp_thread_length else \
             1.0 if control in (mw.sp_feat_angle, mw.sp_ring_rotation,
-                               mw.sp_angle_draft, *mw.sp_cut_rotation) else None
+                               mw.sp_angle_draft, *mw.sp_cut_rotation,
+                               mw.sp_pump_inlet, mw.sp_pump_outlet, mw.sp_pump_tilt,
+                               mw.sp_pump_fix_angle) else None
         fine = Qt.ControlModifier if control in (mw.sp_thread_length, mw.sp_angle_draft) else \
             Qt.ControlModifier | Qt.ShiftModifier
         return step, fine, (4.0 if control is mw.sp_angle_draft else None)
@@ -9931,7 +10697,7 @@ class View3D(QGLWidget):
         centre = np.asarray(ring["center"], float)
         depth = float((self._mvp @ np.r_[centre, 1.0])[3])
         pixels_per_unit = self.height() / (2.0 * max(depth, 0.1) * math.tan(math.radians(22.5)))
-        radius = self.RING_HANDLE_PIXELS / max(pixels_per_unit, 1e-9)
+        radius = ring.get("pixels", self.RING_HANDLE_PIXELS) / max(pixels_per_unit, 1e-9)
         angles = np.radians(np.linspace(ring["start"], ring["stop"], 61))
         points = centre + radius * (np.cos(angles)[:, None] * np.asarray(ring["u"], float) +
                                     np.sin(angles)[:, None] * np.asarray(ring["v"], float))
@@ -10011,10 +10777,12 @@ class View3D(QGLWidget):
                                               (arc[-1], arc[-1] - arc[-2])):
                         tangent = tangent / max(float(np.linalg.norm(tangent)), 1e-12)
                         side = np.array([-tangent[1], tangent[0]])
+                        # as on the gizmo rings: the head starts where the arc ends and points
+                        # on along it (drawn back over the arc it seemed to point inwards)
                         glBegin(GL_TRIANGLES)
-                        glVertex2f(*endpoint)
-                        glVertex2f(*(endpoint - head_length*tangent + head_width*side))
-                        glVertex2f(*(endpoint - head_length*tangent - head_width*side))
+                        glVertex2f(*(endpoint + head_length*tangent))
+                        glVertex2f(*(endpoint + head_width*side))
+                        glVertex2f(*(endpoint - head_width*side))
                         glEnd()
             glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
             glPopAttrib()
@@ -29769,7 +30537,7 @@ class MainWindow(QMainWindow):
                     else:
                         label.setMaximumWidth(120)
                         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        for dock in (self._dock_ext, self._dock_gear, self._dock_thread):
+        for dock in (self._dock_ext, self._dock_gear, self._dock_thread, self._dock_pump):
             self._refresh_dock_minimum(dock)
         self._apply_editor_field_width()
 
@@ -29926,7 +30694,7 @@ class MainWindow(QMainWindow):
     def _command_docks(self):
         """Panels that belong to one running tool and are shown/hidden only by that tool."""
         return (self._dock_ext, self._dock_surface, self._dock_feat, self._dock_angle_draft,
-                self._dock_cut, self._dock_gear, self._dock_thread)
+                self._dock_cut, self._dock_gear, self._dock_thread, self._dock_pump)
 
     def createPopupMenu(self):
         # Qt's right-click menu on toolbars and dock title bars lists every dock; opening a
@@ -30084,6 +30852,9 @@ class MainWindow(QMainWindow):
         self.act_thread=QAction(QIcon(os.path.join(icon_dir, "thread.png")),
                     "Thread", self, triggered=self._open_thread_panel,
                                 toolTip="Thread - Preview and apply an ISO or Unified thread")
+        self.act_pump=QAction(QIcon(os.path.join(icon_dir, "pump.png")),
+                              "Pump", self, triggered=self._create_pump,
+                              toolTip="Pump - Generate a simple water pump housing with inlet and outlet")
         self.act_extrude=QAction(QIcon(os.path.join(icon_dir, "extrusion.png")), "Extrusion", self,
                                  triggered=self._open_extrude_panel,
                                  toolTip="Extrusion — Extrude the selected sketch")
@@ -30119,7 +30890,8 @@ class MainWindow(QMainWindow):
         self.act_measure=QAction(QIcon(os.path.join(icon_dir, "measurement.png")), "Measurement", self,
                                  checkable=True,toggled=self._set_measure_mode,
                                  toolTip="Measurement — Click edges and corners to measure")
-        tb2.addAction(self.act_gear); tb2.addAction(self.act_thread); tb2.addAction(self.act_measure)
+        tb2.addAction(self.act_gear); tb2.addAction(self.act_thread); tb2.addAction(self.act_pump)
+        tb2.addAction(self.act_measure)
         tb2.addSeparator()
         view_actions = (
             ("Isometric", "view_isometric.png",
@@ -31148,6 +31920,7 @@ class MainWindow(QMainWindow):
         self._thread_preview_entry=None
         self._thread_preview_mesh=None
         self._thread_edit=None
+        self._build_pump_dock()
         self.cb_gear_type.currentIndexChanged.connect(self._gear_type_changed)
         self.chk_gear_mate.toggled.connect(self._gear_mate_changed)
         self.sp_planet_teeth.valueChanged.connect(self._planetary_teeth_changed)
@@ -31239,7 +32012,7 @@ class MainWindow(QMainWindow):
         self._dock_collapse_states = {}
         for dock in (self._dock_obj, self._dock_sketch_levels, self._dock_ext, self._dock_surface, self._dock_feat,
                  self._dock_angle_draft, self._dock_cut,
-                     self._dock_gear, self._dock_thread):
+                     self._dock_gear, self._dock_thread, self._dock_pump):
             self._install_dock_collapse_button(dock)
 
         self.setCentralWidget(self.view3d)
@@ -31366,7 +32139,7 @@ class MainWindow(QMainWindow):
         if width is None: return
         rule = "min-width: %dpx; max-width: %dpx;" % (width, width)
         for name in ("_dock_ext", "_dock_surface", "_dock_feat", "_dock_angle_draft",
-                     "_dock_cut", "_dock_gear", "_dock_thread"):
+                     "_dock_cut", "_dock_gear", "_dock_thread", "_dock_pump"):
             dock = getattr(self, name, None)
             if dock is None: continue
             for spin in dock.findChildren(QDoubleSpinBox) + dock.findChildren(QSpinBox):
@@ -31375,7 +32148,8 @@ class MainWindow(QMainWindow):
 
     def _align_editor_inputs(self):
         for dock in (self._dock_ext, self._dock_surface, self._dock_feat,
-                 self._dock_angle_draft, self._dock_cut, self._dock_gear, self._dock_thread):
+                 self._dock_angle_draft, self._dock_cut, self._dock_gear, self._dock_thread,
+                 self._dock_pump):
             for spin in dock.findChildren(QDoubleSpinBox) + dock.findChildren(QSpinBox):
                 layout = spin.parentWidget().layout()
                 if layout is not None:
@@ -31519,7 +32293,7 @@ class MainWindow(QMainWindow):
         on=bool(on)
         if on and (self.state["mode"]!=MODE_NORMAL or self._ext_pending is not None
                    or self.view3d._feat_mode or self.view3d._bridge_mode
-                   or self._gear_preview is not None):
+                   or self._gear_preview is not None or self._pump_preview is not None):
             self._st("Finish or cancel the current sketch / extrusion / bridge / chamfer / fillet / gear first")
             on=False
         if self.act_measure.isChecked()!=on:
@@ -31899,6 +32673,8 @@ class MainWindow(QMainWindow):
         word = "Undo" if undo else "Redo"
         if getattr(self, "_dock_thread", None) is not None and self._dock_thread.isVisible():
             self._st(f"{word}: finish or cancel the thread tool first"); return
+        if self._pump_preview is not None:
+            self._st(f"{word}: finish or cancel the pump tool first"); return
         if self._gear_preview is not None:
             self._st(f"{word}: finish or cancel the gear generator first"); return
         if getattr(self, "_cut_panel_active", False):
@@ -31983,7 +32759,7 @@ class MainWindow(QMainWindow):
         self.act_new_sketch.setVisible(not in_sk); self.act_extrude.setVisible(not in_sk)
         self.act_surface.setVisible(not in_sk); self.act_gear.setVisible(not in_sk)
         self.act_cut_surface.setVisible(not in_sk)
-        self.act_thread.setVisible(not in_sk)
+        self.act_thread.setVisible(not in_sk); self.act_pump.setVisible(not in_sk)
         self.act_ring.setVisible(not in_sk)
         self.act_bridge.setVisible(not in_sk)
         self.act_chamfer.setVisible(not in_sk); self.act_fillet.setVisible(not in_sk)
@@ -32002,7 +32778,7 @@ class MainWindow(QMainWindow):
         self.act_new_sketch.setEnabled(mode==MODE_NORMAL)
         self.act_surface.setEnabled(mode==MODE_NORMAL); self.act_gear.setEnabled(mode==MODE_NORMAL)
         self.act_cut_surface.setEnabled(mode==MODE_NORMAL)
-        self.act_thread.setEnabled(mode==MODE_NORMAL)
+        self.act_thread.setEnabled(mode==MODE_NORMAL); self.act_pump.setEnabled(mode==MODE_NORMAL)
         self.act_extrude.setEnabled(mode==MODE_NORMAL)
         self.act_ring.setEnabled(mode==MODE_NORMAL)
         self.act_bridge.setEnabled(mode==MODE_NORMAL)
@@ -32021,6 +32797,8 @@ class MainWindow(QMainWindow):
             self._st("Finish or cancel the Cut Surface first"); return True
         if self._gear_preview is not None:
             self._st("Finish or cancel the gear generator first"); return True
+        if self._pump_preview is not None:
+            self._st("Finish or cancel the pump tool first"); return True
         if self.state["mode"] != MODE_NORMAL or self._ext_pending is not None or \
                 self.view3d._bridge_mode:
             self._st("Finish or cancel the current sketch / extrusion / bridge first"); return True
@@ -32492,6 +33270,386 @@ class MainWindow(QMainWindow):
             return
         self._set_measure_mode(False)
         self._begin_gear_preview()
+
+    # -- Pump: hollow housing, lid with round intake and a bladed impeller -----------------
+    def _build_pump_dock(self):
+        self._pump_preview = None
+        self._pump_new_separate = True      # layout a new pump starts with (last one created)
+        self._pump_timer = QTimer(self); self._pump_timer.setSingleShot(True)
+        self._pump_timer.setInterval(200)
+        self._pump_timer.timeout.connect(self._update_pump_preview)
+        self._dock_pump = QDockWidget("Pump", self)
+        self._dock_pump.setObjectName("dock_pump")
+        self._dock_pump.setFeatures(QDockWidget.DockWidgetMovable)
+        widget = QWidget(); layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8); layout.setSpacing(6)
+        layout.addWidget(QLabel("<b>Water Pump</b>"))
+        form = CompactFormLayout()
+        form.setContentsMargins(0, 0, 0, 0); form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(4); form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        def spin(low, high, value, suffix, decimals=2):
+            box = QDoubleSpinBox(); box.setRange(low, high); box.setDecimals(decimals)
+            box.setValue(value); box.setSuffix(suffix); box.setKeyboardTracking(False)
+            box.valueChanged.connect(self._queue_pump_preview)
+            return box
+        def count(low, high, value):
+            box = QSpinBox(); box.setRange(low, high); box.setValue(value)
+            box.setKeyboardTracking(False); box.valueChanged.connect(self._queue_pump_preview)
+            return box
+        self.sp_pump_diameter = spin(20.0, 2000.0, 60.0, " mm")
+        self.sp_pump_inner = spin(12.0, 1996.0, 52.0, " mm")
+        self.sp_pump_height = spin(5.0, 2000.0, 25.0, " mm")
+        self.sp_pump_inlet = spin(-360.0, 360.0, 180.0, " \u00b0", 1)
+        self.sp_pump_outlet = spin(-360.0, 360.0, 90.0, " \u00b0", 1)
+        self.sp_pump_tilt = spin(0.0, 90.0, 0.0, " \u00b0", 1)
+        self.sp_pump_tilt.setToolTip("Tilt of the intake about the horizontal axis square to it (X or Y, "
+                                     "depending on the inlet angle): 0 = horizontal, 90 = straight up. "
+                                     "Drag the ring in the 3-D view.")
+        self.sp_pump_in_d = spin(4.0, 500.0, 15.0, " mm")
+        self.sp_pump_out_d = spin(4.0, 500.0, 15.0, " mm")
+        self.sp_pump_shaft = spin(1.0, 100.0, 5.0, " mm")
+        self.sp_pump_blades = count(2, 16, 6)
+        self.sp_pump_fixings = count(0, 8, 3)
+        self.sp_pump_fix_angle = spin(-360.0, 360.0, 90.0, " \u00b0", 1)
+        self.sp_pump_fix_angle.setToolTip("Rotates the screw lugs, which are evenly spaced (3 lugs: 120 "
+                                          "degrees apart). When a port is moved onto a lug, this angle "
+                                          "moves on to the nearest free place. Drag the ring in the 3-D view.")
+        self._pump_fixing_edited = False
+        self.sp_pump_fix_angle.valueChanged.connect(self._pump_fixing_angle_edited)
+        self.sp_pump_screw = spin(1.0, 10.0, 3.0, " mm")
+        self.sp_pump_seal = spin(0.0, 6.0, 2.0, " mm")
+        self.sp_pump_seal_t = spin(0.0, 20.0, 2.4, " mm")
+        self.sp_pump_diameter.setToolTip("Outer diameter of housing and lid. Made smaller than the inner "
+                                         "diameter plus the seal allows, it takes the inner one with it.")
+        self.sp_pump_inner.setToolTip("Diameter of the pump chamber. Made larger than the outer diameter "
+                                      "allows with this seal, it takes the outer one with it.")
+        self.sp_pump_seal_t.setToolTip(f"Width of the seal groove in the rim; {PUMP_SEAL_LAND:g} mm of rim "
+                                       "stays on each side. 0 for no seal.")
+        for box, source in ((self.sp_pump_diameter, "outer"), (self.sp_pump_inner, "inner"),
+                            (self.sp_pump_seal_t, "seal"), (self.sp_pump_seal, "seal")):
+            box.valueChanged.connect(lambda _value, source=source: self._link_pump_diameters(source))
+        self.sp_pump_in_d.setToolTip("Bore diameter of the round intake on the lid.")
+        self.sp_pump_out_d.setToolTip("Bore diameter of the round outlet on the housing.")
+        self.sp_pump_seal.setToolTip("Height of the seal (O-ring cord or gasket); 0 for none. A groove is cut "
+                                     "into the housing rim (60 %) and a shallower one into the lid (40 %): "
+                                     "together they are this height.")
+        self.sp_pump_inlet.setToolTip("Direction of the round intake on the lid, degrees from +X "
+                                      "(counter-clockwise). Drag the ring in the 3-D view.")
+        self.sp_pump_outlet.setToolTip("Position of the tangential outlet on the housing, degrees from +X; "
+                                       "the water leaves counter-clockwise (the impeller turns "
+                                       "counter-clockwise). Drag the ring in the 3-D view.")
+        self.sp_pump_fixings.setToolTip("Number of screw lugs on housing and lid, evenly spaced; 0 for none.")
+        self.sp_pump_screw.setToolTip("Screw diameter: the lid gets clearance holes, the housing "
+                                      "pilot holes for self-tapping screws or heat-set inserts.")
+        form.addRow("Outer diameter:", self.sp_pump_diameter)
+        form.addRow("Inner diameter:", self.sp_pump_inner)
+        form.addRow("Height:", self.sp_pump_height)
+        form.addRow("Inlet angle:", self.sp_pump_inlet)
+        form.addRow("Inlet tilt:", self.sp_pump_tilt)
+        form.addRow("Outlet angle:", self.sp_pump_outlet)
+        form.addRow("Inlet diameter:", self.sp_pump_in_d)
+        form.addRow("Outlet diameter:", self.sp_pump_out_d)
+        form.addRow("Shaft diameter:", self.sp_pump_shaft)
+        form.addRow("Blades:", self.sp_pump_blades)
+        form.addRow("Fixings:", self.sp_pump_fixings)
+        form.addRow("Fixing angle:", self.sp_pump_fix_angle)
+        form.addRow("Screw diameter:", self.sp_pump_screw)
+        form.addRow("Seal thickness:", self.sp_pump_seal_t)
+        form.addRow("Seal height:", self.sp_pump_seal)
+        self.chk_pump_separate = QCheckBox("Place parts side by side")
+        _style_checkbox_like_explorer(self.chk_pump_separate)
+        self.chk_pump_separate.setChecked(True)
+        self.chk_pump_separate.setToolTip("Housing, lid and impeller are laid out next to each other on the "
+                                          "XY plane (to look at or print). Off: placed as assembled.")
+        self.chk_pump_separate.toggled.connect(self._queue_pump_preview)
+        form.addRow(self.chk_pump_separate)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("<b>Estimated performance</b>"))
+        speed_form = CompactFormLayout()
+        speed_form.setContentsMargins(0, 0, 0, 0); speed_form.setHorizontalSpacing(8)
+        speed_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.sp_pump_rpm = QSpinBox(); self.sp_pump_rpm.setRange(1, 30000); self.sp_pump_rpm.setValue(1500)
+        self.sp_pump_rpm.setSingleStep(100); self.sp_pump_rpm.setSuffix(" rpm")
+        self.sp_pump_rpm.setKeyboardTracking(False)
+        self.sp_pump_rpm.setToolTip("Your motor speed, listed next to 60, 600 and 3000 rpm. It does not "
+                                    "change the shape of the pump.")
+        self.sp_pump_rpm.valueChanged.connect(self._refresh_pump_estimate)
+        speed_form.addRow("Motor speed:", self.sp_pump_rpm)
+        layout.addLayout(speed_form)
+        self.lbl_pump_estimate = QLabel(); self.lbl_pump_estimate.setWordWrap(True)
+        self.lbl_pump_estimate.setTextFormat(Qt.RichText)
+        self.lbl_pump_estimate.setStyleSheet("font-size:12px;")
+        layout.addWidget(self.lbl_pump_estimate)
+        self.lbl_pump_info = QLabel(); self.lbl_pump_info.setWordWrap(True)
+        self.lbl_pump_info.setStyleSheet("color:#aab2bd;font-size:12px;")
+        layout.addWidget(self.lbl_pump_info)
+        layout.addStretch()
+        buttons = QHBoxLayout()
+        self.btn_pump_ok = QPushButton("\u2714 Create")
+        self.btn_pump_ok.clicked.connect(self._confirm_pump)
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self._cancel_pump)
+        buttons.addWidget(self.btn_pump_ok); buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        scroll = QScrollArea()                  # the panel is tall: it scrolls on small screens
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(widget)
+        self._dock_pump.setWidget(scroll)
+        self.addDockWidget(Qt.RightDockWidgetArea, self._dock_pump)
+        self._dock_pump.hide()
+
+    def _pump_parameters_from_controls(self):
+        return {"kind": "pump", "diameter": self.sp_pump_diameter.value(),
+                "height": self.sp_pump_height.value(),
+                "inlet_angle": self.sp_pump_inlet.value(),
+                "inlet_tilt": self.sp_pump_tilt.value(),
+                "outlet_angle": self.sp_pump_outlet.value(),
+                "shaft_diameter": self.sp_pump_shaft.value(),
+                "blades": self.sp_pump_blades.value(),
+                "fixings": self.sp_pump_fixings.value(),
+                "fixing_angle": self.sp_pump_fix_angle.value(),
+                "motor_speed": self.sp_pump_rpm.value(),
+                "screw_diameter": self.sp_pump_screw.value(),
+                "inlet_diameter": self.sp_pump_in_d.value(),
+                "outlet_diameter": self.sp_pump_out_d.value(),
+                "seal_height": self.sp_pump_seal.value(),
+                "seal_thickness": self.sp_pump_seal_t.value(),
+                "inner_diameter": self.sp_pump_inner.value(),
+                "side_by_side": self.chk_pump_separate.isChecked()}
+
+    def _pump_controls_from_parameters(self, parameters):
+        common = parameters.get("port_diameter") or 0.25 * parameters.get("diameter", 60.0)
+        height = parameters.get("seal_height", 0.0)
+        old_inner = parameters.get("diameter", 60.0) - 2.0 * pump_default_plate(
+            parameters.get("diameter", 60.0), height)
+        for box, key, default in ((self.sp_pump_diameter, "diameter", 60.0),
+                                  (self.sp_pump_inner, "inner_diameter", old_inner),
+                                  (self.sp_pump_seal_t, "seal_thickness", 1.2 * height if height else 2.4),
+                                  (self.sp_pump_height, "height", 25.0),
+                                  (self.sp_pump_inlet, "inlet_angle", 180.0),
+                                  (self.sp_pump_tilt, "inlet_tilt", 0.0),
+                                  (self.sp_pump_outlet, "outlet_angle", 90.0),
+                                  (self.sp_pump_shaft, "shaft_diameter", 5.0),
+                                  (self.sp_pump_blades, "blades", 6),
+                                  (self.sp_pump_fixings, "fixings", 0),     # pumps saved before fixings existed
+                                  (self.sp_pump_fix_angle, "fixing_angle", 90.0),
+                                  (self.sp_pump_rpm, "motor_speed", 1500),
+                                  (self.sp_pump_screw, "screw_diameter", 3.0),
+                                  (self.sp_pump_in_d, "inlet_diameter", common),
+                                  (self.sp_pump_out_d, "outlet_diameter", common),
+                                  (self.sp_pump_seal, "seal_height", 0.0)):     # older pumps: no seal
+            box.blockSignals(True); box.setValue(parameters.get(key, default)); box.blockSignals(False)
+        self.chk_pump_separate.blockSignals(True)       # older pumps were created assembled
+        self.chk_pump_separate.setChecked(bool(parameters.get("side_by_side", False)))
+        self.chk_pump_separate.blockSignals(False)
+
+    def _link_pump_diameters(self, source):
+        """Keep outer >= inner + two rims for the seal: the diameter that was not edited
+        follows. A changed seal widens the pump outwards (the chamber stays as it is)."""
+        need = 2.0 * pump_min_rim(self.sp_pump_seal_t.value(), self.sp_pump_seal.value())
+        outer, inner = self.sp_pump_diameter.value(), self.sp_pump_inner.value()
+        if outer - inner >= need - 1e-6:
+            return
+        # the fields show two decimals: round away from the other diameter so the rim still fits
+        if source == "outer":
+            box, value = self.sp_pump_inner, math.floor((outer - need) * 100.0 + 1e-6) / 100.0
+        else:
+            box, value = self.sp_pump_diameter, math.ceil((inner + need) * 100.0 - 1e-6) / 100.0
+        box.blockSignals(True); box.setValue(value); box.blockSignals(False)
+        self._queue_pump_preview()
+
+    def _refresh_pump_estimate(self, *_):
+        preview = self._pump_preview
+        if preview is None or not preview.get("dimensions"):
+            self.lbl_pump_estimate.setText(""); return
+        self.lbl_pump_estimate.setText(pump_estimate_html(
+            preview["dimensions"], PUMP_ESTIMATE_SPEEDS + (self.sp_pump_rpm.value(),)))
+
+    def _pump_fixing_angle_edited(self, *_):
+        self._pump_fixing_edited = True      # keep the user's value; the preview says if it is taken
+
+    def _queue_pump_preview(self, *_):
+        if self._pump_preview is not None:
+            self._pump_timer.start()
+
+    PUMP_COLORS = {"housing": (0.3, 0.75, 0.95), "lid": (0.55, 0.85, 0.7), "impeller": (0.95, 0.65, 0.25)}
+
+    def _create_pump(self, _checked=False):
+        if self._pump_preview is not None:
+            self._show_compact_dock(self._dock_pump); return
+        if self._busy():
+            return
+        self._set_measure_mode(False)
+        parts = []
+        for role in PUMP_ROLES:
+            sketch = Sketch("XY", name=self._unique_name(f"Pump {role} profile "))
+            sketch_entry = {"type": "sketch", "name": sketch.name, "sketch": sketch,
+                            "tree_item": None, "parent": None, "face": None,
+                            "visible": False, "opacity": 1.0, "preview": True}
+            entry = {"type": "extrusion", "name": f"Pump {role} preview", "parent": sketch_entry,
+                     "height": 10.0, "opacity": 1.0, "direction": "one", "cut": False,
+                     "through": False, "to_surface": False, "ring": None,
+                     "color": self.PUMP_COLORS[role], "material": DEFAULT_MATERIAL,
+                     "visible": True, "preview": True}
+            self.state["objects"].extend((sketch_entry, entry))
+            parts.append({"role": role, "sketch": sketch_entry, "entry": entry})
+        self._pump_preview = {"parts": parts, "selected": self.state.get("selected"), "edit": None}
+        self.btn_pump_ok.setText("\u2714 Create")
+        self.chk_pump_separate.blockSignals(True)
+        self.chk_pump_separate.setChecked(self._pump_new_separate)     # not the last edited pump's
+        self.chk_pump_separate.blockSignals(False)
+        self._show_compact_dock(self._dock_pump)
+        self._update_pump_preview()
+
+    def _open_pump_editor(self, entry):
+        """Re-edit a generated pump: housing, lid and impeller of the same group are rebuilt
+        together from the panel (their positions return to the assembled pose)."""
+        parameters = entry.get("pump_parameters") or {}
+        group = parameters.get("group")
+        members = [e for e in self.state["objects"]
+                   if e.get("type") == "extrusion" and e.get("pump_parameters") and not e.get("preview")
+                   and (e is entry or (group and e["pump_parameters"].get("group") == group))]
+        by_role = {e["pump_parameters"].get("role"): e for e in members}
+        parts, backups = [], []
+        for role in PUMP_ROLES:
+            member = by_role.get(role)
+            if member is None or member.get("parent") is None or member["parent"].get("type") != "sketch":
+                continue
+            parts.append({"role": role, "sketch": member["parent"], "entry": member})
+            backups.append({"entry": member, "sketch": copy.deepcopy(member["parent"]["sketch"]),
+                            "parameters": dict(member["pump_parameters"]), "height": member.get("height"),
+                            "base": member.get("base")})
+        if not parts:
+            self._st("This pump has no editable parameter data"); return
+        self._pump_controls_from_parameters(parameters)
+        self._pump_preview = {"parts": parts, "selected": self.state.get("selected"),
+                              "edit": {"group": group, "backups": backups}}
+        self.btn_pump_ok.setText("\u2714 Apply")
+        self._show_compact_dock(self._dock_pump)
+        self._update_pump_preview()
+
+    def _update_pump_preview(self, *_):
+        preview = self._pump_preview
+        if preview is None:
+            return
+        self._pump_timer.stop()
+        base = Sketch("XY").frame
+        built = []
+        try:
+            parameters = self._pump_parameters_from_controls()
+            d = pump_dimensions(parameters)
+            origins = pump_part_origins(d, parameters["side_by_side"])
+            # the rings stay usable even when the parts cannot be built at these values
+            preview["dimensions"], preview["origins"] = d, origins
+            self._refresh_pump_estimate()
+            edited, self._pump_fixing_edited = self._pump_fixing_edited, False
+            if not edited:
+                free = pump_free_fixing_angle(parameters, d, parameters["fixing_angle"])
+                if free is not None and abs(free - parameters["fixing_angle"]) > 1e-6:
+                    self.sp_pump_fix_angle.blockSignals(True)
+                    self.sp_pump_fix_angle.setValue(free)
+                    self.sp_pump_fix_angle.blockSignals(False)
+                    parameters["fixing_angle"] = free
+            for part in preview["parts"]:
+                role = part["role"]
+                frame = (origins[role], base[1], base[2], base[3])
+                part_parameters = dict(parameters, role=role)
+                sketch = make_pump_sketch(part["sketch"]["name"], part_parameters, frame=frame)
+                built.append((part, sketch, part_parameters, pump_mesh(part_parameters, frame)))
+        except (ValueError, ArithmeticError) as ex:
+            for part in preview["parts"]:
+                part["entry"].pop("solid", None); part["entry"].pop("base", None)
+            self.lbl_pump_info.setText(f"Preview unavailable: {ex}")
+            self.btn_pump_ok.setEnabled(False)
+            self.view3d.update(); return
+        preview["dimensions"] = d
+        preview["origins"] = origins
+        for part, sketch, part_parameters, mesh in built:
+            part["sketch"]["sketch"] = sketch
+            part["parameters"] = part_parameters
+            part["entry"]["height"] = pump_part_height(part["role"], d)
+            self._set_solid(part["entry"], mesh)
+        self.lbl_pump_info.setText(
+            f"Live preview \u00b7 housing, lid and impeller as separate bodies, "
+            f"{'side by side' if parameters['side_by_side'] else 'placed as assembled'}. "
+            f"Rim {d['rim']:.1f} mm, floor and lid {d['wall']:.1f} mm; inlet bore \u00d8 {d['d_in']:.1f} (outside \u00d8 {2 * d['rt']:.1f}), "
+            f"outlet bore \u00d8 {d['d_out']:.1f} (outside \u00d8 {2 * d['rt_out']:.1f}) mm; "
+            f"impeller \u00d8 {2 * d['ri']:.1f} mm, {d['clr']:.1f} mm axial and {d['gap']:.1f} mm radial clearance."
+            + (f" Seal {d['seal']:.1f} mm: groove {d['seal_housing']:.2f} mm deep in the housing rim and "
+               f"{d['seal_lid']:.2f} mm in the lid, {d['seal_width']:.1f} mm wide." if d["seal"] > 0 else ""))
+        self.btn_pump_ok.setEnabled(True)
+        self.view3d.update()
+
+    def _confirm_pump(self):
+        preview = self._pump_preview
+        if preview is None:
+            return
+        self._update_pump_preview()
+        if not self.btn_pump_ok.isEnabled():
+            return
+        for part in preview["parts"]:
+            part["parameters"]["motor_speed"] = self.sp_pump_rpm.value()
+        edit = preview.get("edit")
+        if edit is None:
+            self._pump_new_separate = self.chk_pump_separate.isChecked()
+        if edit is not None:
+            for part in preview["parts"]:
+                part["entry"]["pump_parameters"] = dict(part["parameters"], group=edit["group"])
+            for part in preview["parts"]:
+                self._regenerate(part["entry"])
+            self._apply_cuts()
+            self._pump_preview = None
+            self._dock_pump.hide()
+            self.btn_pump_ok.setText("\u2714 Create")
+            self._rebuild_tree(); self._mark_dirty(); self.view3d.update()
+            self._st("Updated pump: " + ", ".join(p["entry"]["name"] for p in preview["parts"]))
+            return
+        labels = {"housing": "Pump housing", "lid": "Pump lid", "impeller": "Pump impeller"}
+        diameter = preview["parts"][0]["parameters"]["diameter"]
+        group = self._unique_name(f"Pump {diameter:g} mm ")
+        generated = []
+        for part in preview["parts"]:
+            sketch_entry, entry = part["sketch"], part["entry"]
+            sketch_entry["preview"] = False; entry["preview"] = False
+            sketch_entry["name"] = self._unique_name(f"{labels[part['role']]} profile ")
+            sketch_entry["sketch"].name = sketch_entry["name"]
+            entry["name"] = self._unique_name(f"{labels[part['role']]} ")
+            entry["pump_parameters"] = dict(part["parameters"], group=group)
+            generated.append(entry)
+        self.state["selected"] = generated[0]
+        self._pump_preview = None
+        self._dock_pump.hide()
+        self._rebuild_tree(); self._mark_dirty(); self._fit_all()
+        self._st(f"Generated pump {group}: housing, lid and impeller")
+
+    def _cancel_pump(self):
+        preview = self._pump_preview
+        self._pump_timer.stop()
+        self._dock_pump.hide()
+        self.btn_pump_ok.setText("\u2714 Create")
+        if preview is None:
+            return
+        edit = preview.get("edit")
+        if edit is not None:
+            for backup in edit["backups"]:
+                member = backup["entry"]
+                member["parent"]["sketch"] = backup["sketch"]
+                member["pump_parameters"] = backup["parameters"]
+                member["height"] = backup["height"]
+                if backup["base"] is not None:
+                    self._set_solid(member, backup["base"])
+            self._apply_cuts()
+            self._pump_preview = None
+            self.view3d.update()
+            self._st("Pump editing cancelled")
+            return
+        temporary = [item for part in preview["parts"] for item in (part["sketch"], part["entry"])]
+        self.state["objects"][:] = [e for e in self.state["objects"]
+                                     if not any(e is t for t in temporary)]
+        self.state["selected"] = preview["selected"]
+        self._pump_preview = None
+        self.view3d.update()
+        self._st("Pump generation cancelled")
 
     def _schedule_thread_preview(self, *_):
         if len(self._thread_targets) != 1:
@@ -36537,6 +37695,9 @@ class MainWindow(QMainWindow):
         if entry["type"] == "extrusion" and entry.get("gear_parameters"):
             self._open_gear_editor(entry)
             return
+        if entry["type"] == "extrusion" and entry.get("pump_parameters"):
+            self._open_pump_editor(entry)
+            return
         if entry["type"] == "cut_surface":
             self._edit_cut_surface(entry)
             return
@@ -37648,6 +38809,10 @@ class MainWindow(QMainWindow):
         if dock is self._dock_gear and content is not None:
             minimum = QSize(max(minimum.width(), content.minimumSizeHint().width()),
                             minimum.height())
+        if dock is getattr(self, "_dock_pump", None) and content is not None:
+            bar = dock.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+            minimum = QSize(max(minimum.width(), content.minimumSizeHint().width() + bar),
+                            minimum.height())
         dock_state["minimum"] = QSize(minimum.width(), previous_minimum.height())
         dock.setMinimumSize(dock_state["minimum"])
 
@@ -38349,7 +39514,7 @@ class MainWindow(QMainWindow):
 
     def _build_extrusion(self, sel, h, direction="one", through=False, cut=False,
                          to_surface=False, exclude=None, objects=None, target=None, ring=None,
-                         draft=None, apply_draft=True, gear_parameters=None):
+                         draft=None, apply_draft=True, gear_parameters=None, pump_parameters=None):
         """Extrude every closed profile loop along the sketch normal (support geometry is
         ignored). h < 0 extrudes the other way; direction "rev" goes against the normal, "sym"
         puts |h| half on each side of the sketch plane. through=True (cuts) spans the parent
@@ -38395,7 +39560,11 @@ class MainWindow(QMainWindow):
         # rebuilt, or passed explicitly on project load), not on the profile sketch
         gear_parameters = gear_parameters or sel.get("gear_parameters") or \
                           (exclude.get("gear_parameters") if isinstance(exclude, dict) else None) or {}
-        if gear_parameters:
+        pump_parameters = pump_parameters or sel.get("pump_parameters") or \
+                          (exclude.get("pump_parameters") if isinstance(exclude, dict) else None)
+        if pump_parameters:
+            mesh = pump_mesh(pump_parameters, sk.frame)
+        elif gear_parameters:
             mesh = gear_extrusion(loops, hh, sk.frame, gear_parameters, z0)
         else:
             mesh = extrude_profile(loops, hh, sk.frame, z0)
@@ -40041,6 +41210,7 @@ class MainWindow(QMainWindow):
             self._cancel_thread()
         if getattr(self, "_cut_panel_active", False): self._cancel_cut_surface()
         if self._gear_preview is not None: self._cancel_gear()
+        if self._pump_preview is not None: self._cancel_pump()
         if self.state["mode"] != MODE_NORMAL: self._cancel_sketch()
         if self._ext_pending is not None: self._cancel_extrude()
         if self._assembly_dialog is not None:
@@ -40363,6 +41533,8 @@ class MainWindow(QMainWindow):
                    "color":tuple(od.get("color", DEFAULT_SOLID_COLOR)),
                          "material":od.get("material", DEFAULT_MATERIAL), "draft":od.get("draft"),
                    "visible":od.get("visible", True), "ring":od.get("ring")}
+                if od.get("pump_parameters"):
+                    e["pump_parameters"] = dict(od["pump_parameters"])
                 if od.get("gear_parameters"):
                     e["gear_parameters"] = dict(od["gear_parameters"])
                     e["gear_position"] = list(od.get("gear_position", (0.0, 0.0, 0.0)))
@@ -40393,7 +41565,8 @@ class MainWindow(QMainWindow):
                     res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
                                               e["to_surface"], objects=objs, target=e.get("target"),
                                               ring=e["ring"], draft=e.get("draft"),
-                                              gear_parameters=e.get("gear_parameters"))
+                                              gear_parameters=e.get("gear_parameters"),
+                                              pump_parameters=e.get("pump_parameters"))
                     if res is None and e["to_surface"] and e.get("target"):   # target gone: automatic
                         res=self._build_extrusion(par, e["height"], e["direction"], e["through"], e["cut"],
                                                   True, objects=objs, ring=e["ring"])
@@ -40493,6 +41666,8 @@ class MainWindow(QMainWindow):
                 d["color"]=list(o.get("color", DEFAULT_SOLID_COLOR))
                 if not o.get("cut"):
                     d["material"]=o.get("material", DEFAULT_MATERIAL)
+                if o.get("pump_parameters"):
+                    d["pump_parameters"]=dict(o["pump_parameters"])
                 if o.get("gear_parameters"):
                     d["gear_parameters"]=dict(o["gear_parameters"])
                     d["gear_position"]=list(o.get("gear_position", (0.0, 0.0, 0.0)))

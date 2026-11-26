@@ -1599,7 +1599,7 @@ class MotionController(QObject):
         page = QWidget()
         form = QFormLayout(page)
         form.setContentsMargins(0, 4, 0, 4)
-        form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         return page, form
 
     def _joint_page(self):
@@ -1734,7 +1734,7 @@ class MotionController(QObject):
         box = QWidget()
         form = QFormLayout(box)
         form.setContentsMargins(0, 6, 0, 0)
-        form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form.addRow(QLabel("<b>Settings</b>"))
         self.sp_duration = _spin(1e-4, 1e6, " s", 0.5, 4, 110)
         form.addRow("Duration:", self.sp_duration)
@@ -2748,8 +2748,9 @@ class MotionController(QObject):
 
     @staticmethod
     def _ring(handle, count=48):
+        """The arc of a rotation handle (20 to 290 degrees, as the Assembly's rotate rings)."""
         n2 = np.cross(handle["axis"], handle["perp"])
-        angles = np.linspace(0.0, 2.0 * math.pi, count + 1)
+        angles = np.radians(np.linspace(20.0, 290.0, count + 1))
         return handle["origin"] + handle["size"] * (np.cos(angles)[:, None] * handle["perp"] +
                                                     np.sin(angles)[:, None] * n2)
 
@@ -2810,7 +2811,7 @@ class MotionController(QObject):
                 ("Y", np.array([0.0, 1.0, 0.0]), (0.4, 1.0, 0.4)),
                 ("Z", np.array([0.0, 0.0, 1.0]), (0.45, 0.6, 1.0)))
 
-    def _world_axis_at(self, pos, tolerance=7.0):
+    def _world_axis_at(self, pos, tolerance=10.0):
         length = 0.6 * _model_size(self.dialog.assembly)
         mouse = np.array([pos.x(), pos.y()], float)
         best, best_distance = None, tolerance
@@ -2827,13 +2828,21 @@ class MotionController(QObject):
         return best
 
     def press(self, view, event):
+        if event.button() == Qt.RightButton:
+            self._right_press = (event.pos().x(), event.pos().y(), bool(
+                self._pick is not None and (self._pick.get("axis_ref") is not None or self.view._meas_sel)))
+            return False
         if event.button() == Qt.LeftButton and self._pick is not None and \
                 self._pick["purpose"] in ("joint", "space", "axis") and self._pick.get("axis_ref") is None:
             axis = self._world_axis_at(event.pos())
-            if axis is None or (self._pick["purpose"] == "joint" and self.view._meas_sel):
+            first = list(self.view._meas_sel)
+            if axis is None or (self._pick["purpose"] != "joint" and first) or len(first) > 1:
                 return False
             name, direction = axis
             self._pick["axis_ref"] = (np.zeros(3), direction, f"the world {name} axis")
+            if first:                                  # a part first, then the world axis: fixed in space
+                self._on_picks()
+                return True
             self.view.measure_clear()
             self.view.update()
             self.dialog._set_status(f"World {name} axis — now click the part that "
@@ -2911,7 +2920,33 @@ class MotionController(QObject):
         self.view.update()
         return True
 
+    def _right_click(self, had_pick=False):
+        """A right click (no drag) takes back the last pick, ends a pick, or clears the selection."""
+        if self._pick is not None:
+            if had_pick or self._pick.get("axis_ref") is not None or self.view._meas_sel:
+                self._pick.pop("axis_ref", None)
+                self.view.measure_clear()
+                self.view.update()
+                self.dialog._set_status("Pick cleared - click the reference again (right click again "
+                                        "or Esc cancels)")
+            else:
+                self._end_pick()
+                self.dialog._set_status("Pick cancelled")
+            return
+        if self._selection is not None:
+            self._selection = None
+            self.tree.clearSelection()
+            self.tree.setCurrentItem(None)
+            self._sync_remove()
+            self._show_page()
+            self.view.update()
+
     def release(self, view, event):
+        if event.button() == Qt.RightButton:
+            start, self._right_press = getattr(self, "_right_press", None), None
+            if start is not None and self.active and                     abs(event.pos().x() - start[0]) + abs(event.pos().y() - start[1]) < 5:
+                self._right_click(start[2])
+            return False
         if self._drag is None:
             return False
         self._drag = None
@@ -3030,30 +3065,31 @@ class MotionController(QObject):
                     hot["coord"] == handle["coord"]
                 colour = self.HOT_COLOR if is_hot else \
                     (self.ANGLE_COLOR if handle["coord"] == "angle" else self.SLIDE_COLOR)
-                width = 3.5 if is_hot or handle["joint"]["name"] == selected else 2.2
-                gl.glLineWidth(width)
-                gl.glColor3f(*colour)
+                active = is_hot or handle["joint"]["name"] == selected
+                if is_hot:
+                    colour = tuple(0.45 + 0.55 * c for c in colour)
+                pixel = self.view._gizmo_pixel(handle["origin"])
+                height, radius = 16.0 * pixel, 9.0 * pixel
                 if handle["coord"] == "angle":
                     ring = self._ring(handle)
+                    n2 = np.cross(handle["axis"], handle["perp"])
+                    a0, a1 = math.radians(20.0), math.radians(290.0)
+                    tangent0 = math.sin(a0) * handle["perp"] - math.cos(a0) * n2          # backwards
+                    tangent1 = -math.sin(a1) * handle["perp"] + math.cos(a1) * n2
+                    cones = ((ring[0], tangent0), (ring[-1], tangent1))
+                else:
+                    a, b = self._arrow(handle)
+                    ring = np.array([a, b])
+                    cones = ((a, -handle["axis"]), (b, handle["axis"]))
+                for outline in (True, False):               # dark outline first, then the colour
+                    gl.glLineWidth((11.0 if active else 8.0) if outline else (6.0 if active else 4.0))
+                    gl.glColor3f(*((0.07, 0.08, 0.09) if outline else colour))
                     gl.glBegin(gl.GL_LINE_STRIP)
                     for point in ring:
                         gl.glVertex3f(*[float(x) for x in point])
                     gl.glEnd()
-                    tip, before = ring[12], ring[10]            # an arrow head shows the turning sense
-                    side = (tip - handle["origin"]) * 0.18
-                    gl.glBegin(gl.GL_LINES)
-                    for a in (tip - (tip - before) * 1.6 + side, tip - (tip - before) * 1.6 - side):
-                        gl.glVertex3f(*[float(x) for x in a]); gl.glVertex3f(*[float(x) for x in tip])
-                    gl.glEnd()
-                else:
-                    a, b = self._arrow(handle)
-                    side = handle["perp"] * handle["size"] * 0.15
-                    head = handle["axis"] * handle["size"] * 0.25
-                    gl.glBegin(gl.GL_LINES)
-                    for p, q in ((a, b), (b, b - head + side), (b, b - head - side),
-                                 (a, a + head + side), (a, a + head - side)):
-                        gl.glVertex3f(*[float(x) for x in p]); gl.glVertex3f(*[float(x) for x in q])
-                    gl.glEnd()
+                    for tip, direction in cones:
+                        self.view._draw_cone(tip, direction, height, radius if outline else radius * 0.67)
             if frame is None and not self._display:
                 components = {c["name"]: c for c in assembly["components"]}
                 for n, trace in enumerate(study["traces"]):

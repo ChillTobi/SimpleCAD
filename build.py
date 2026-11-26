@@ -38,12 +38,15 @@ PACKAGES = {
 }
 # optional add-ons: bundled when their file sits next to SimpleCAD.py (SimpleCAD loads them
 # with importlib, so PyInstaller has to be told about them)
-ADDONS = {"simplecad_thermal": {
+ADDONS = {"simplecad_simulation": {
     "scipy>=1.16": ("scipy", "Thermal add-on: sparse solvers"),
     "gmsh>=4.15": ("gmsh", "Thermal add-on: tetrahedral meshing (also from STEP)"),
     "pyamg>=5.4": ("pyamg", "Thermal add-on: multigrid preconditioner"),
     "scikit-fem>=12.0": ("skfem", "Thermal add-on: FEM assembly"),
-}}
+},
+    # Motion mode of the Assembly window: no extra packages (GIF export uses Pillow if present)
+    "simplecad_motion": {},
+}
 for _addon, _packages in ADDONS.items():
     if (ROOT / f"{_addon}.py").exists():
         PACKAGES.update(_packages)
@@ -55,12 +58,13 @@ COLLECT_ALL = ["cadquery", "OCP", "manifold3d", "ezdxf"]       # (qt_modern_styl
 COPY_METADATA = ["numpy", "PyOpenGL", "manifold3d", "ezdxf", "cadquery", "cadquery-ocp",
                  "qt-modern-style"]
 # what each add-on needs in the executable, used only when its file is there:
-#   hidden      imported by name (gmsh: its PyInstaller hook then adds the gmsh DLL)
+#   hidden      imported by name (gmsh: its PyInstaller hook then adds the gmsh DLL;
+#               simplecad_structural: the Structural solver, loaded by the add-on when needed)
 #   submodules  all submodules (scipy.sparse / spatial / ndimage are imported lazily; pyamg and
 #               skfem have compiled or lazily loaded parts)
 #   metadata    package data (pyamg reads its own version from it at import; About shows them)
-ADDON_BUNDLE = {"simplecad_thermal": {
-    "hidden": ["gmsh"],
+ADDON_BUNDLE = {"simplecad_simulation": {
+    "hidden": ["gmsh", "simplecad_structural"],
     "submodules": ["scipy", "pyamg", "skfem"],
     "metadata": ["scipy", "gmsh", "pyamg", "scikit-fem"],
 }}

@@ -9944,7 +9944,7 @@ class ProfileEditor(QWidget):
         self.sp_duty.setToolTip("Share of each cycle with the power on (at the start of the cycle)")
         self.sp_ramp = _spin(0.001, 1e7, " s", 1.0, decimals=3)
         self.sp_ramp.setToolTip("Time to rise linearly from 0 to the full power")
-        self.btn_table = QPushButton("Import CSV…")
+        self.btn_table = QPushButton("Import CSV")
         self.btn_table.setFixedWidth(value_width)
         self.btn_table.setToolTip("Text / CSV file with two columns: time in s, power in W "
                                   "(separated by comma, semicolon or tab; a header line is fine)")
@@ -10367,7 +10367,7 @@ class PropertyTable(QWidget):
         buttons = QHBoxLayout()
         self.btn_add = QPushButton("Add row")
         self.btn_remove = QPushButton("Remove row")
-        self.btn_import = QPushButton("Import CSV…")
+        self.btn_import = QPushButton("Import CSV")
         self.btn_import.setToolTip("Two columns: temperature in °C, value (comma, semicolon or "
                                    "tab separated; a header line is fine)")
         for button in (self.btn_add, self.btn_remove, self.btn_import):
@@ -10817,7 +10817,7 @@ class SweepDialog(QDialog):
         self.lbl_axis = QLabel("Axis:")
         form.addRow(self.lbl_axis, self.cb_axis)
         self.cb_spacing = QComboBox()
-        self.cb_spacing.addItem("Evenly from … to …", "range")
+        self.cb_spacing.addItem("Evenly from start to end", "range")
         self.cb_spacing.addItem("List of values", "list")
         self.lbl_spacing = QLabel("Values:")
         form.addRow(self.lbl_spacing, self.cb_spacing)
@@ -11131,12 +11131,12 @@ class RunHistoryDialog(QDialog):
         self.btn_restore = QPushButton("Restore setup")
         self.btn_restore.setToolTip("Put the study back to the values this run was made with")
         self.btn_restore.clicked.connect(self._restore)
-        self.btn_csv = QPushButton("Export results CSV…")
+        self.btn_csv = QPushButton("Export results CSV")
         self.btn_csv.setToolTip("The runs ticked in the first column, else the selected ones")
         self.btn_csv.clicked.connect(lambda: self._export("csv"))
-        self.btn_vtu = QPushButton("Export for ParaView…")
+        self.btn_vtu = QPushButton("Export for ParaView")
         self.btn_vtu.clicked.connect(lambda: self._export("vtu"))
-        self.btn_table = QPushButton("Export comparison CSV…")
+        self.btn_table = QPushButton("Export comparison CSV")
         self.btn_table.setToolTip("One row per selected run: result and all parameters")
         self.btn_table.clicked.connect(lambda: self._export("summary"))
         self.btn_delete = QPushButton("Delete")
@@ -11275,7 +11275,7 @@ class SweepResultsDialog(QDialog):
         buttons = QHBoxLayout()
         self.btn_show = QPushButton("Show run in the view")
         self.btn_show.clicked.connect(self._show)
-        self.btn_csv = QPushButton("Export CSV…")
+        self.btn_csv = QPushButton("Export CSV")
         self.btn_csv.clicked.connect(self._export_csv)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
@@ -11438,10 +11438,10 @@ class PcbImportDialog(QDialog):
         self.ed_path.setPlaceholderText("KiCad board (.kicad_pcb), Gerber job (.gbrjob) or a folder "
                                         "of Gerber and drill files")
         row.addWidget(self.ed_path, 1)
-        board_button = QPushButton("Board file…")
+        board_button = QPushButton("Board file")
         board_button.clicked.connect(self._choose_file)
         row.addWidget(board_button)
-        folder_button = QPushButton("Gerber folder…")
+        folder_button = QPushButton("Gerber folder")
         folder_button.clicked.connect(self._choose_folder)
         row.addWidget(folder_button)
         layout.addLayout(row)
@@ -11717,6 +11717,7 @@ class PackageDialog(QDialog):
 
 _VIEWS = (("view_isometric.png", "Isometric", -54.735610317245346, -135.0),
           ("view_top.png", "Top (XY)", 0.0, 0.0),
+          ("view_bottom.png", "Bottom (XY)", 180.0, 0.0),
           ("view_front.png", "Front (XZ)", -90.0, 0.0),
           ("view_right.png", "Right (YZ)", -90.0, -90.0),
           ("view_left.png", "Left (YZ)", -90.0, 90.0))
@@ -11812,40 +11813,40 @@ class ThermalDialog(QDialog):
 
         self.act_new = action("new_file.png", "New study", "New — start an empty thermal study",
                               self._new_file, shortcut=QKeySequence.New)
-        self.act_open = action("open.png", "Open study…", f"Open a thermal study (*{THERMAL_EXTENSION})",
+        self.act_open = action("open.png", "Open study", f"Open a thermal study (*{THERMAL_EXTENSION})",
                                self._open_file, shortcut=QKeySequence.Open)
         self.act_save = action("save.png", "Save study", "Save the thermal study", self._save,
                                shortcut=QKeySequence.Save)
-        self.act_save_as = action("save_as.png", "Save study as…",
+        self.act_save_as = action("save_as.png", "Save study as",
                                   "Save the thermal study under a new name",
                                   lambda: self._save(True), shortcut="Ctrl+Shift+S")
         self.import_menu = QMenu("&Import", self)
         self.import_menu.setIcon(_icon("import.png"))
-        self.import_menu.addAction("STEP file…", lambda: self._import_files("step"))
-        self.import_menu.addAction("STL file…", lambda: self._import_files("stl"))
-        self.import_menu.addAction("OBJ file / SimpleCAD project…", lambda: self._import_files("obj"))
-        self.import_menu.addAction("Assembly file (.asby)…", self._import_assembly_file)
+        self.import_menu.addAction("STEP file", lambda: self._import_files("step"))
+        self.import_menu.addAction("STL file", lambda: self._import_files("stl"))
+        self.import_menu.addAction("OBJ file / SimpleCAD project", lambda: self._import_files("obj"))
+        self.import_menu.addAction("Assembly file (.asby)", self._import_assembly_file)
         self.import_menu.addSeparator()
         self.import_menu.addAction("Assembly of the open project", self._import_project_assembly)
-        self.import_menu.addAction("Parts of the open project…", self._import_project_parts)
+        self.import_menu.addAction("Parts of the open project", self._import_project_parts)
         self.import_menu.addSeparator()
-        self.import_menu.addAction("PCB (KiCad board or Gerber files)…", self._import_pcb)
+        self.import_menu.addAction("PCB (KiCad board or Gerber files)", self._import_pcb)
         self.act_import = action(
             "import.png", "Import", "Import — STEP, STL or OBJ files, a SimpleCAD project, an "
             "assembly, or parts of the open project", lambda: None)
         self.act_import.setMenu(self.import_menu)
         self.export_menu = QMenu("&Export", self)
         self.export_menu.setIcon(_icon("export.png"))
-        self.act_report = self.export_menu.addAction("PDF report…", self._export_pdf)
+        self.act_report = self.export_menu.addAction("PDF report", self._export_pdf)
         self.export_menu.addSeparator()
-        self.act_export_csv = self.export_menu.addAction("Results table (CSV)…", self._export_csv)
-        self.act_export_series = self.export_menu.addAction("Values over time (CSV)…",
+        self.act_export_csv = self.export_menu.addAction("Results table (CSV)", self._export_csv)
+        self.act_export_series = self.export_menu.addAction("Values over time (CSV)",
                                                             self._export_series_csv)
-        self.act_export_vtu = self.export_menu.addAction("Result for ParaView (VTU)…",
+        self.act_export_vtu = self.export_menu.addAction("Result for ParaView (VTU)",
                                                          self._export_vtu)
         self.act_export_vtu.setToolTip("Temperatures (and air velocities) of the whole mesh as a "
                                        "VTK file for ParaView; a transient run also as a series")
-        self.act_export_png = self.export_menu.addAction("Image of the view (PNG)…", self._export_png)
+        self.act_export_png = self.export_menu.addAction("Image of the view (PNG)", self._export_png)
         self.export_menu.aboutToShow.connect(self._update_export_menu)
         self.act_export = action(
             "export.png", "Export", "Export — a PDF report (setup, pictures, temperatures, sweep), "
@@ -11878,12 +11879,12 @@ class ThermalDialog(QDialog):
                                  self._remove_selected)
         self.heat_menu = QMenu("&Heat Source", self)
         self.heat_menu.setIcon(_icon("heat_source_extrusion.png"))
-        self.heat_menu.addAction("Block…", lambda: self._add_heat_source("block"))
-        self.heat_menu.addAction("Cylinder…", lambda: self._add_heat_source("cylinder"))
-        self.heat_menu.addAction("Extrusion on a face…", self._start_extrusion)
-        self.heat_menu.addAction("Component package (junction model)…", self._add_package)
+        self.heat_menu.addAction("Block", lambda: self._add_heat_source("block"))
+        self.heat_menu.addAction("Cylinder", lambda: self._add_heat_source("cylinder"))
+        self.heat_menu.addAction("Extrusion on a face", self._start_extrusion)
+        self.heat_menu.addAction("Component package (junction model)", self._add_package)
         self.heat_menu.addSeparator()
-        self.heat_menu.addAction("Power of the selected body…", self._focus_power)
+        self.heat_menu.addAction("Power of the selected body", self._focus_power)
         self.act_heat = action(
             "heat_source_extrusion.png", "Heat Source",
             "Heat Source — place a block or cylinder heat source (on top of the selected part), "
@@ -11901,7 +11902,7 @@ class ThermalDialog(QDialog):
         self.contact_menu = QMenu("&Contacts", self)
         self.contact_menu.setIcon(_icon("fit_together.png"))
         self.contact_menu.addAction("Detect touching parts", self._detect_contacts)
-        self.contact_menu.addAction("Contact between two bodies…", self._add_contact)
+        self.contact_menu.addAction("Contact between two bodies", self._add_contact)
         self.act_contact = action(
             "heat_contact.png", "Contacts",
             "Contacts — touching bodies are bonded", lambda: None)
@@ -11912,8 +11913,8 @@ class ThermalDialog(QDialog):
             "parts (and in the air of an airflow result)", self._on_section_toggled, checkable=True)
         self.flow_menu = QMenu("&Airflow", self)
         self.flow_menu.setIcon(_icon("air_flow_on.png"))
-        self.flow_menu.addAction("Fan…", lambda: self._add_flow_item("fan"))
-        self.flow_menu.addAction("Vent / opening…", lambda: self._add_flow_item("vent"))
+        self.flow_menu.addAction("Fan", lambda: self._add_flow_item("fan"))
+        self.flow_menu.addAction("Vent / opening", lambda: self._add_flow_item("vent"))
         self.act_flow = action(
             "air_flow_on.png", "Airflow",
             "Airflow — fans and vents for the Airflow + heat (CHT) solver", lambda: None)
@@ -11990,7 +11991,7 @@ class ThermalDialog(QDialog):
         edit_menu = menu_bar.addMenu("&Edit")
         for item in (self.act_undo, self.act_redo, None, self.act_remove):
             edit_menu.addSeparator() if item is None else edit_menu.addAction(item)
-        edit_menu.addAction("Rename…", self._rename_selected)
+        edit_menu.addAction("Rename", self._rename_selected)
         edit_menu.addSeparator()
         edit_menu.addAction(self.act_update_selected)
         edit_menu.addAction(self.act_update_all)
@@ -13048,7 +13049,7 @@ class ThermalDialog(QDialog):
         self.sp_flow_max_m3h.setToolTip("Free-blowing flow from the datasheet (at 0 Pa)")
         self.sp_flow_max_pa = _spin(0.0, 100000.0, " Pa", 1.0, decimals=1)
         self.sp_flow_max_pa.setToolTip("Maximum static pressure from the datasheet (at 0 flow)")
-        self.btn_flow_curve = QPushButton("Import curve CSV…")
+        self.btn_flow_curve = QPushButton("Import curve CSV")
         self.btn_flow_curve.setFixedWidth(value_width)
         self.btn_flow_curve.setToolTip("Fan curve as two columns: flow in m³/h, pressure in Pa "
                                        "(replaces the two datasheet values)")
@@ -13773,9 +13774,9 @@ class ThermalDialog(QDialog):
             run_rows = [r for r in rows if r[0] == "run"]
             menu = QMenu(self)
             show = menu.addAction("Show") if len(run_rows) == 1 else None
-            export = menu.addAction("Export results CSV...")
-            compare = menu.addAction("Export comparison CSV...")
-            history = menu.addAction("Run history...")
+            export = menu.addAction("Export results CSV")
+            compare = menu.addAction("Export comparison CSV")
+            history = menu.addAction("Run history")
             menu.addSeparator()
             remove = menu.addAction(f"Remove {len(run_rows)} selected" if len(run_rows) > 1 else "Remove")
             chosen = menu.exec_(self.tree.viewport().mapToGlobal(pos))
@@ -13809,7 +13810,7 @@ class ThermalDialog(QDialog):
                 self._select_probe(index)
             menu = QMenu(self)
             pick = menu.addAction("Pick faces") if kind == "condition" else None
-            rename = menu.addAction("Rename…")
+            rename = menu.addAction("Rename")
             remove = menu.addAction("Remove")
             chosen = menu.exec_(self.tree.viewport().mapToGlobal(pos))
             if chosen is not None and chosen is pick:
@@ -13825,9 +13826,9 @@ class ThermalDialog(QDialog):
         self._select(component, body_index)
         menu = QMenu(self)
         update = menu.addAction("Update") if component.get("kind") in SOURCE_KINDS else None
-        power = menu.addAction("Set power…") if self._body() is not None and \
+        power = menu.addAction("Set power") if self._body() is not None and \
             component.get("kind") not in FLOW_KINDS else None
-        rename = menu.addAction("Rename…")
+        rename = menu.addAction("Rename")
         remove = menu.addAction("Remove")
         chosen = menu.exec_(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
@@ -14735,7 +14736,7 @@ class ThermalDialog(QDialog):
         for kind in condition_kinds(mode):
             if mode == "structural" and kind == "force":
                 self.condition_menu.addSeparator()
-            self.condition_menu.addAction(f"{CONDITION_KINDS[kind][0]}…", lambda k=kind: self._add_condition(k))
+            self.condition_menu.addAction(f"{CONDITION_KINDS[kind][0]}", lambda k=kind: self._add_condition(k))
 
     def _condition(self):
         index = self._selected_condition

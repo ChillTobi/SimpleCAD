@@ -16,6 +16,12 @@ menu entries are not shown. Like an assembly, a study made with parts of the ope
 the project as a "Thermal N" item of its own (top level) in the Objects explorer: Save stores it
 there, double-click / Edit opens it, Save As writes a .thml file; a study without such an item
 is saved to its file (the first Save asks for it).
+Bearing tool (Technical Drawing Phase 5): inserts a rolling or plain bearing from the built-in
+catalogue (deep-groove 60/62/63, angular-contact 72/73 B, needle HK, plain bushes) as a part
+with its ISO 492 ring tolerances and the recommended shaft / housing seat for the load case.
+The Assembly window's Fit check lists the fits of coaxial bore / shaft pairs (clearance,
+transition, interference from bearing data, drawing fits or the general tolerance) and the
+clearances between parts (overlaps and worst-case contact flagged; a row selects the pair).
 Measure tool (toolbar "Measure" / Edit → Measure): click edges and corners of the solids (any
 number); lengths, the relations between edges (connected / same face / parallel / perpendicular
 with 3-D and 2-D XY values) and, for corners, the 3-D distance, ΔX / ΔY / ΔZ and angles are shown
@@ -23,7 +29,8 @@ in the status bar and in the Measurement panel on the right (shown with the Meas
 corners are highlighted in the inverted colour of their body. RMB on a measured
 item removes it, RMB elsewhere (or Esc) clears the measurement.
 Toolbars: 1st row Undo / Redo; 2nd row New Sketch / Surface / Cut Surface / Extrude / Ring Extrusion /
-Angle Extrusion / Bridge / Chamfer / Fillet / Gear / Thread / Measurement, replaced in sketch mode by the
+Angle Extrusion / Bridge / Chamfer / Fillet / Gear / Thread / Pump / Bearing / Measurement, replaced in
+sketch mode by the
 grouped sketch tools: Mode (Select / Draw / Constrain / Scissor / Delete), Draw tools (Line,
 Rect, Circle, Ellipse, Polygon, Arc, Point, SVG import, Support), Constraints and Grid / snap. Select
 is the default sketch mode. The right "Sketch Status"
@@ -40,9 +47,11 @@ Workflow:
      use an automatic tangent at their highest point. Set local XYZ offsets, local XYZ rotations
      and display size. Select a Surface and click New Sketch (or click it while picking a sketch
      plane) to sketch on it.
-     While sketching on an attached Surface, its visible supporting solid is shown as a shaded
-     silhouette and feature edges behind the sketch, including attached extrusions. The Surface
-     rectangle does not limit this underlay. This visual underlay is not editable sketch geometry.
+     While sketching on a base plane, a Surface or a face, all visible solids (the supporting
+     one with its attached extrusions as well as separate bodies) are shown as a shaded silhouette and
+     feature edges behind the sketch. The Surface rectangle does not limit this underlay. This
+     visual underlay is not editable sketch geometry; the "Solid bodies" row of the Sketch
+     Explorer hides / shows it (remembered for the session).
      On a face sketch, faces of other visible solids that lie in the same plane (e.g. the end
      of an extrusion that runs up to this face's plane) are shown grey with a dashed outline.
      They are display only: no reference, snap or constraint target.
@@ -211,6 +220,32 @@ Workflow:
     Every dimension can carry a tolerance (±, deviations, limits or an ISO 286 fit symbol such as H7,
     ISO 286 / ISO 2768 in the "Tolerances" section below) and the Dimensions panel has a fit calculator and the annotations
     geometric tolerance frame, datum, surface finish and weld symbol.
+    More dimensions (toolbar drop-down): chamfer ('2 × 45°' on a leader), arc length (⌒), baseline
+    and chain series (horizontal / vertical, right-click ends) and ordinate dimensions (origin 0,
+    then X and Y of every point); any dimension can be a reference dimension (in brackets) and a
+    length can be aligned, horizontal or vertical. Hole callouts ('4× Ø6.6 THRU', '⌴ Ø11 ↧6.8',
+    '⌵ Ø12 × 90°') and thread callouts ('M8-6H ↧16') are read from the model where they are
+    clicked (coaxial rims of the mesh, threads found on it) and follow it; notes with or without
+    a leader, balloons with the item numbers of the parts list. The Sheet tab adds material and
+    surface treatment (title block), general notes and a parts list above the title block, the
+    unit of the sheet (mm / inch, optionally the other unit in brackets) and a hole table of one
+    view (IDs on the view, X / Y from its lower left corner, sizes). Annotations can be dragged.
+    Sections (Views panel → Kind): full, half (one half cut, a centre line between), offset (a
+    stepped cut through two parallel planes, no line at the step), aligned (a second leg at an
+    angle turned into the plane), removed (only the cut face, beside) and revolved (the cut face
+    turned 90° on the views). Detail views (a circle on a view enlarged), auxiliary views (square
+    onto an inclined face picked by its edge), breaks of long views (dimensions keep the real
+    length) and broken-out sections (a rectangle cut to a depth) are made from the Views panel.
+    The hatching follows the material (or is chosen on the Sheet tab); touching bodies are
+    hatched in opposite directions. The automatic layout fits every sheet size and orientation.
+    Gears made with the Gear tool are drawn simplified (ISO 2203: tip circle / lines thick, pitch
+    circle / line as chain line, root thin, helix lines; Sheet tab → Gears) and get a gear data
+    table (module, teeth, pressure and helix angle, profile shift, diameters, face width, quality,
+    mating gear and centre distance). Thread callouts take the designation, tolerance class, hand
+    (LH) and length from the Thread tool's feature; chamfered thread ends are drawn. The Thread
+    tool offers metric fine, G and NPT pipe (NPT modelled straight), trapezoidal and self-tapping
+    sizes with their own profiles, tolerance classes (6H / 6g, 2A / 2B, 7H / 7e, A / B) and
+    left-hand threads.
     Rotate the model in XYZ quarter-turns, position cuts by clicking a projection, and place
     entered dimensions between two picked points. The drawing is saved as a child of the extrusion.
     The editor shows the sheet like the sketcher (dark background and grid; thin lines of constant
@@ -351,6 +386,26 @@ Key implementation notes:
     sliver edges shorter than MICRO_EDGE do not stop that (weld_micro_chains). Where a fillet
     runs round a corner about as tight as its radius or tighter, the section ends are pulled
     into the pivot point of the rolling ball (_unfold_fillet_sections) instead of folding over.
+    A chamfer / fillet wider than its faces (it would run past the body) is made smaller
+    until it fits (_feature_fit_scale in edge_cutter; chain ends and an exact fit count as
+    fitting) — cut edges, inner-corner fillers and joint fillers alike; sections and segment
+    middles are sampled, and a curved face counts by the material a little below its tangent
+    line. Fillets, equal-length and length+angle chamfers keep their shape (one factor); a
+    chamfer by two lengths limits each length by its own face only (_scaled_feature).
+    The limited size is shown in the panel, the status bar and the tree tooltip.
+  - Cut chamfer / fillet tools: the section ends snap onto the real faces even where the face
+    turns up to 45° over the feature's width (SNAP_NORMAL_DOT; a concave round left the end
+    inside the material), and are then lifted 1 % of the size, at most 5 µm, off the faces
+    (_lift_section_ends, not at open chain ends): a tool edge lying exactly in the face left
+    slivers of its side band ("… tool" faces, stray edge lines) on the part. Any sliver that
+    still survives (where several features meet) is handed to a real neighbouring face —
+    the feature's own face first, a planar one last (_absorb_tool_slivers); face numbers stay.
+  - Joint fillets (auto material, added where an edge meets another body) use the touching
+    body's finished shape: bodies whose touching neighbours come later in the list are rebuilt
+    once more against them (_rejoin_joint_fillets, cached), and the fillet only reaches as far
+    as that body's face in the contact plane (_bound_outer_feature), not past a rounded rim.
+    Like a cut feature it is then made smaller until each end lies on its own body (this body
+    / the touching one: a pair of probes to _feature_fit_scale), with the same note.
   - SketchSystem: unknowns = vertex x/y + circle radii; DOF = unknowns − rank(Jacobian).
   - circ.radius always stores the true radius. CDimension.dim_mode ("diameter"/"radius")
     selects what the value means; extrusion reads circ.radius directly.
@@ -405,7 +460,7 @@ import numpy as np
 import qt_modern_style
 from OpenGL.GL import *
 
-APP_VERSION = "2.4b"
+APP_VERSION = "2.5b"
 
 QLocale.setDefault(QLocale.c())
 class CompactFormLayout(QGridLayout):
@@ -778,6 +833,8 @@ FACE_OUTLINE_COLOR = (255, 255, 255, 235)    # outline of the face a sketch lies
 FACE_OUTLINE_ROW = "face outline"             # Sketch Explorer row id (other rows: level in mm)
 CUT_UNDERLAY_ROW = "cut extrusions"           # Sketch Explorer row: hatched cut tool bodies
 CUT_UNDERLAY_COLOR = (165, 165, 165, 235)     # grey hatch / dashed outline of those
+SOLID_UNDERLAY_ROW = "solid bodies"           # Sketch Explorer row: shaded visible solids behind
+SOLID_UNDERLAY_COLOR = (150, 185, 215, 190)   # outline / feature edges of those (light blue)
 
 def face_outline_vertices(sk):
     """Vertices of the face outline references of sk (the face's own edges)."""
@@ -6493,12 +6550,40 @@ THREAD_UNIFIED = (
     ("3/4-10 UNC", 0.750, 10, "UNC"), ("3/4-16 UNF", 0.750, 16, "UNF"),
     ("1-8 UNC", 1.000, 8, "UNC"), ("1-12 UNF", 1.000, 12, "UNF"),
 )
+# more thread families (Technical Drawing Phase 4): metric fine (ISO 261), pipe threads G
+# (ISO 228-1, parallel, 55°) and NPT (ASME B1.20.1, modelled without its 1:16 taper),
+# trapezoidal (ISO 2904, 30°) and self-tapping screws (ISO 1478)
+THREAD_METRIC_FINE = ((3, 0.35), (4, 0.5), (5, 0.5), (6, 0.75), (8, 1.0), (10, 1.0), (10, 1.25),
+                      (12, 1.25), (12, 1.5), (14, 1.5), (16, 1.5), (18, 1.5), (20, 1.5), (22, 1.5),
+                      (24, 2.0), (27, 2.0), (30, 2.0))
+THREAD_PIPE_G = (("G1/8", 9.728, 28), ("G1/4", 13.157, 19), ("G3/8", 16.662, 19),
+                 ("G1/2", 20.955, 14), ("G3/4", 26.441, 14), ("G1", 33.249, 11),
+                 ("G1 1/4", 41.910, 11), ("G1 1/2", 47.803, 11), ("G2", 59.614, 11))
+THREAD_NPT = (("1/8-27 NPT", 10.287, 27), ("1/4-18 NPT", 13.716, 18), ("3/8-18 NPT", 17.145, 18),
+              ("1/2-14 NPT", 21.336, 14), ("3/4-14 NPT", 26.670, 14), ("1-11.5 NPT", 33.401, 11.5))
+THREAD_TRAPEZOIDAL = ((8, 1.5), (10, 2), (12, 3), (14, 3), (16, 4), (18, 4), (20, 4), (22, 5),
+                      (24, 5), (26, 5), (28, 5), (30, 6), (32, 6), (36, 6), (40, 7))
+THREAD_SELF_TAPPING = (("ST2.2", 2.24, 0.8), ("ST2.9", 2.90, 1.1), ("ST3.5", 3.53, 1.3),
+                       ("ST3.9", 3.91, 1.3), ("ST4.2", 4.22, 1.4), ("ST4.8", 4.80, 1.6),
+                       ("ST5.5", 5.46, 1.8), ("ST6.3", 6.25, 1.8), ("ST8", 8.00, 2.1))
 THREAD_SIZES = [
     (f"M{nominal:g} × {pitch:g}", nominal, pitch, "ISO")
     for nominal, pitch in THREAD_METRIC_COARSE.items()
 ] + [
+    (f"M{nominal:g} × {pitch:g} (fine)", float(nominal), float(pitch), "ISO fine")
+    for nominal, pitch in THREAD_METRIC_FINE
+] + [
     (label, diameter_in * 25.4, 25.4 / tpi, standard)
     for label, diameter_in, tpi, standard in THREAD_UNIFIED
+] + [
+    (label, diameter, 25.4 / tpi, "G") for label, diameter, tpi in THREAD_PIPE_G
+] + [
+    (label, diameter, 25.4 / tpi, "NPT") for label, diameter, tpi in THREAD_NPT
+] + [
+    (f"Tr{nominal:g} × {pitch:g}", float(nominal), float(pitch), "Tr")
+    for nominal, pitch in THREAD_TRAPEZOIDAL
+] + [
+    (label, diameter, pitch, "ST") for label, diameter, pitch in THREAD_SELF_TAPPING
 ]
 
 
@@ -6509,19 +6594,90 @@ def thread_size_label(nominal, pitch, standard="ISO"):
     return f"M{nominal:g} × {pitch:g}"
 
 
-THREAD_PHASES = ((1 / 16, 0.0), (6 / 16, 1.0), (10 / 16, 1.0), (15 / 16, 0.0))   # (phase / pitch, depth fraction)
+def thread_designation(nominal, pitch, standard="ISO", show_pitch=False):
+    """Designation on a drawing: M8 (metric coarse, the pitch only on request), M8×1 (fine),
+    Tr20×4, G1/2, 1/2-14 NPT, 1/4-20 UNC, ST3.5; a custom thread as M<d>×<P>."""
+    if standard == "ISO":
+        return f"M{nominal:g}×{pitch:g}" if show_pitch else f"M{nominal:g}"
+    if standard in ("ISO fine", "Custom"):
+        return f"M{nominal:g}×{round(pitch, 3):g}"
+    if standard == "Tr":
+        return f"Tr{nominal:g}×{pitch:g}"
+    for label, size, thread_pitch, family in THREAD_SIZES:
+        if family == standard and abs(size - nominal) < 1e-6 and abs(thread_pitch - pitch) < 1e-6:
+            return label
+    return f"M{nominal:g}×{round(pitch, 3):g}"
 
-def thread_depth(kind, pitch, fit):
-    """Radial depth of the printable ISO profile below the nominal cylinder surface."""
-    clearance = 0.15 if fit == "6" else 0.25
+
+# thread profile per family: (half width of the crest flat, distance from the crest centre where
+# the root flat begins) as fractions of the pitch
+THREAD_PROFILES = {"ISO": (1 / 16, 3 / 8),                           # 60° (ISO, UN, NPT, ST)
+                   "G": (0.0835, 0.4165),                            # 55° Whitworth
+                   "Tr": (0.183, 0.317)}                             # 30° trapezoidal
+
+
+def thread_profile(standard):
+    return THREAD_PROFILES.get("G" if standard == "G" else "Tr" if standard == "Tr" else "ISO")
+
+
+def thread_phases(standard="ISO"):
+    """Corners of the profile within one pitch: (phase / pitch, depth fraction)."""
+    crest, root = thread_profile(standard)
+    return ((crest, 0.0), (root, 1.0), (1 - root, 1.0), (1 - crest, 0.0))
+
+
+THREAD_PHASES = thread_phases("ISO")
+
+
+# tolerance classes of the Thread tool: ISO 965 (metric), ASME B1.1 (Unified), ISO 2903 (Tr),
+# ISO 228-1 (G: A / B for external, none for internal); "6" / "7" are the older clearance grades
+THREAD_CLASSES = {
+    "ISO": {"external": ("6g", "6h", "6e", "4h", "8g"), "internal": ("6H", "5H", "7H", "6G")},
+    "UN": {"external": ("2A", "1A", "3A"), "internal": ("2B", "1B", "3B")},
+    "Tr": {"external": ("7e", "7c", "8e"), "internal": ("7H", "8H")},
+    "G": {"external": ("A", "B"), "internal": ("",)},
+}
+
+
+def thread_class_family(standard):
+    return "UN" if standard in ("UNC", "UNF") else "Tr" if standard == "Tr" else \
+        "G" if standard == "G" else "ISO"
+
+
+def thread_clearance(fit):
+    """Radial clearance (mm) of the printable thread for a tolerance class or an old grade:
+    fine grades / classes 1-6 0.15, coarse ones 0.25, plus a little for the e / f / g / G
+    allowances."""
+    fit = str(fit or "6").strip()
+    if fit in ("6", "7"):
+        return 0.15 if fit == "6" else 0.25
+    digits = "".join(ch for ch in fit if ch.isdigit())
+    letter = "".join(ch for ch in fit if ch.isalpha())
+    if letter in ("A", "B") and digits:                     # Unified: 1 loose, 2 normal, 3 tight
+        return {"1": 0.25, "2": 0.15, "3": 0.10}.get(digits, 0.15)
+    grade = int(digits) if digits else 6
+    base = 0.15 if grade <= 6 else 0.25
+    return base + {"e": 0.06, "c": 0.08, "f": 0.04, "g": 0.02, "G": 0.02}.get(letter, 0.0)
+
+
+def thread_depth(kind, pitch, fit, standard="ISO"):
+    """Radial depth of the printable profile below the nominal cylinder surface."""
+    clearance = thread_clearance(fit)
+    if standard == "Tr":                                   # ISO 2904: h3 = H4 = 0.5 P + ac
+        allowance = 0.15 if pitch <= 1.5 else 0.25 if pitch <= 5 else 0.5
+        return 0.5 * pitch + allowance + (clearance / 2 if kind == "external" else -clearance / 2)
+    if standard == "G":                                    # Whitworth: h = 0.640327 P
+        return 0.640327 * pitch + (clearance / 2 if kind == "external" else -clearance / 2)
+    if standard == "ST":                                   # ISO 1478: about 0.34 P
+        return 0.34 * pitch + clearance / 2
     return 0.61343 * pitch + clearance / 2 if kind == "external" else 0.54127 * pitch - clearance / 2
 
 def thread_available(start, low, high):
     """Cylinder length a thread starting at `start` can use; it runs toward the far end."""
     return max(high - start, start - low)
 
-def _thread_fraction(distance, pitch):
-    crest, root = pitch / 16, pitch * 3 / 8
+def _thread_fraction(distance, pitch, profile=(1 / 16, 3 / 8)):
+    crest, root = pitch * profile[0], pitch * profile[1]
     return 0.0 if distance <= crest else 1.0 if distance >= root else (distance - crest) / (root - crest)
 
 def cylinder_face_thread_kind(entry, face_index, center, axis):
@@ -6585,7 +6741,10 @@ def apply_thread_feature(mesh, feat):
     kind = cylinder_face_thread_kind({"solid": (verts, tris), "faces": faces}, face_index, center, axis)
     if kind != feat["kind"]:
         raise ValueError("the cylindrical face changed from inside to outside")
-    depth = float(feat.get("depth", thread_depth(kind, pitch, feat["fit"])))
+    standard = feat.get("standard", "ISO")
+    profile = thread_profile(standard)
+    left_hand = feat.get("hand") == "left"                    # a left-hand helix turns the other way
+    depth = float(feat.get("depth", thread_depth(kind, pitch, feat["fit"], standard)))
     if not math.isfinite(depth) or depth <= 0:
         raise ValueError("the thread depth must be a finite positive number")
     if radius <= depth + 0.1:
@@ -6645,10 +6804,12 @@ def apply_thread_feature(mesh, feat):
 
     # Thread depth tapers to zero over `ramp` at both ends so the end rings stay on the original surface.
     ramp = min(pitch / 2, (t1 - t0) / 2)
+    turn = -1.0 if left_hand else 1.0
     def radius_at(angle, t):
-        phase = (t - t0 - pitch * angle / (2 * math.pi)) % pitch
+        phase = (t - t0 - turn * pitch * angle / (2 * math.pi)) % pitch
         weight = min(1.0, (t - t0) / ramp, (t1 - t) / ramp)
-        return radius - depth * _thread_fraction(min(phase, pitch - phase), pitch) * max(weight, 0.0)
+        return radius - depth * _thread_fraction(min(phase, pitch - phase), pitch, profile) * \
+            max(weight, 0.0)
 
     ring0 = ring_lo if attach0 else [add(a, t0, radius) for a in angles]
     ring1 = ring_hi if attach1 else [add(a, t1, radius) for a in angles]
@@ -6675,10 +6836,10 @@ def apply_thread_feature(mesh, feat):
     columns = []
     for j, angle in enumerate(angles):
         marks = {t0 + ramp, t1 - ramp}
-        origin = t0 + pitch * angle / (2 * math.pi)
+        origin = t0 + turn * pitch * angle / (2 * math.pi)
         first = math.floor((t0 - origin) / pitch) - 1
         for k in range(first, first + int((t1 - t0) / pitch) + 3):
-            marks.update(origin + (k + phase) * pitch for phase, _ in THREAD_PHASES)
+            marks.update(origin + (k + phase) * pitch for phase, _ in thread_phases(standard))
         column, last = [(t0, ring0[j])], t0
         for t in sorted(marks):
             if t > last + eps and t < t1 - eps:
@@ -8217,6 +8378,7 @@ def chamfer_other_values(th, d, mode, length2=None, angle=None):
     d2 = d if mode != "dist" or length2 is None else length2
     return d2, math.degrees(math.atan2(d2*math.sin(th), d - d2*math.cos(th)))
 EDGE_SMOOTH_DOT = math.cos(math.radians(5.0))   # flatter creases are no edges
+SNAP_NORMAL_DOT = math.cos(math.radians(45.0))  # chamfer / fillet ends snap onto faces this close
 _PROBE_DIR = np.array([0.5772, 0.5781, 0.5766])
 
 def is_feature(entry):
@@ -8451,7 +8613,10 @@ def _snap_offset(q, n, smax, surface):
     the surface, so the section ends are moved back onto it (the part then follows the curve
     instead of ending in a straight block)."""
     v0, e1, e2, N = surface
-    use = np.nonzero(N @ n > EDGE_SMOOTH_DOT)[0]
+    # the face may turn noticeably over the feature's width (a 0.5 mm fillet on a 2 mm round
+    # slot end: 14°): a tight 5° limit would leave the end on the tangent line, inside a
+    # concave face — the tool then leaves slivers of its side band on the part
+    use = np.nonzero(N @ n > SNAP_NORMAL_DOT)[0]
     if not len(use): return None
     a, b, c = v0[use], e1[use], e2[use]
     h = np.cross(n, c); det = np.einsum('ij,ij->i', b, h)
@@ -8617,7 +8782,112 @@ def _unfold_fillet_sections(P, secs, closed, r):
                      for i, p in enumerate(pts)], d1, d2, L, b))
     return out
 
-def edge_cutter(chain, feat, probe, filler=False, surface=None):
+def _feature_fit_scale(P, frames, secs, probe, closed):
+    """A chamfer / fillet cut along a convex edge must end on its two faces: where a face is
+    narrower than the feature (a 2 mm fillet on an edge with 1 mm of material below it, or
+    around a tongue thinner than the fillet), the tool runs past the body, folds and leaves a
+    torn surface. → (face 1, face 2): the fraction (0..1] of the feature's reach on that face
+    that fits; 1.0 = it fits (a face exactly as wide as the feature counts as fitting).
+    probe(point) → True inside the body, or a pair of such tests, one per face: a joint fillet
+    lands on face 1 / face 2 of two different bodies (the one on the plane that is only
+    continued is the touching body). Near the ends of an open chain (within the feature's
+    width) the sections are not checked: there it meets the neighbouring faces / the feature
+    of the next edge in a corner and may run over them."""
+    m = len(secs)
+    if not m:
+        return 1.0
+    probes = tuple(probe) if isinstance(probe, (tuple, list)) else (probe, probe)
+    ends = () if closed else (np.asarray(P[0], float), np.asarray(P[m - 1], float))
+    # samples: every section, and the middle of every segment between two (a straight edge has
+    # sections only at its two ends) — (edge point, face-1 end, face-2 end, n1, n2, d1, d2)
+    samples = []
+    for j in range(m):
+        pts, d1, d2 = secs[j][0], secs[j][1], secs[j][2]
+        samples.append((np.asarray(P[j], float), np.asarray(pts[0], float),
+                        np.asarray(pts[-1], float), frames[j][1], frames[j][2], d1, d2))
+    for j in range(m if closed else m - 1):
+        k = (j + 1) % m
+        a, b = samples[j], samples[k]
+        samples.append(((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2,
+                        _unit(np.asarray(a[3], float) + np.asarray(b[3], float)),
+                        _unit(np.asarray(a[4], float) + np.asarray(b[4], float)),
+                        (a[5] + b[5]) / 2, (a[6] + b[6]) / 2))
+    checked = [s for s in samples
+               if not any(np.linalg.norm(s[0] - end) <= 1.05 * max(s[5], s[6]) for end in ends)]
+    if not checked:                          # a short edge: its middle is checked anyway
+        middle = (np.asarray(P[0], float) + np.asarray(P[m - 1], float)) / 2
+        checked = [min(samples, key=lambda s: float(np.linalg.norm(s[0] - middle)))]
+    worst = [1.0, 1.0]                       # per face (face 1, face 2)
+    for point, end1, end2, n1, n2, d1, d2 in checked:
+        for side, (tip, normal, depth, probe) in enumerate(
+                ((end1, n1, d1, probes[0]), (end2, n2, d2, probes[1]))):
+            n = _unit(np.asarray(normal, float))
+            reach = tip - point
+            # material just below the face, or a little deeper: on a curved (convex) face the
+            # section end lies on the tangent line, which leaves the surface by d²/2R
+            depths = (max(1e-3, 0.03 * depth), max(2e-3, 0.25 * depth))
+            solid = lambda s, _p=probe, _n=n, _r=reach: any(
+                _p(point + s * _r - k * _n) for k in depths)
+            if solid(1.0):
+                continue
+            inside, outside = 0.0, 1.0       # how far along the face the material goes:
+            for s in np.linspace(0.05, 0.95, 19):        # first gap, then narrowed down
+                if not solid(s):
+                    outside = s
+                    break
+                inside = s
+            for _ in range(8):
+                s = (inside + outside) / 2
+                if solid(s):
+                    inside = s
+                else:
+                    outside = s
+            worst[side] = min(worst[side], inside)
+    return tuple(1.0 if w >= 0.98 else w for w in worst)
+
+CUT_EDGE_LIFT = 0.01     # cut chamfer / fillet: section ends lifted off the faces (× size) …
+CUT_EDGE_LIFT_MAX = 0.005  # … but at most this many mm (a tolerance, not a visible size change)
+
+def _lift_section_ends(secs, frames, lift, ends=None):
+    """Lift both ends of every cut section a hair off its face (along the face normals; the
+    points between follow smoothly). Snapped onto the surface, the tool's edge would lie
+    exactly in the body's face, and the boolean then keeps micro-strips of the tool's side band
+    on the part ("… tool" slivers with stray edge lines). Lifted, the tool cuts into the face
+    at a tiny angle a little before the tangent line: no slivers, no visible step.
+    ends: per section (lift end 1, lift end 2), default both."""
+    if lift <= 0:
+        return secs
+    out = []
+    for j, ((pts, d1, d2, L, b), frame) in enumerate(zip(secs, frames)):
+        lift1, lift2 = (True, True) if ends is None else ends[j]
+        a = (lift if lift1 else 0.0) * _unit(np.asarray(frame[1], float))
+        c = (lift if lift2 else 0.0) * _unit(np.asarray(frame[2], float))
+        n = len(pts) - 1
+        out.append(([np.asarray(p, float) + (1 - i/n)*a + (i/n)*c for i, p in enumerate(pts)],
+                    d1, d2, L, b))
+    return out
+
+def _scaled_feature(feat, scale):
+    """The chamfer / fillet entry made smaller to fit. scale: one factor, or (face 1, face 2)
+    factors. A chamfer by two lengths has one length per face, so each is scaled by its own
+    face's factor ("length" lies on face 1, on face 2 when flipped); every other kind keeps its
+    shape (equal lengths / angle / radius) and is scaled by the smaller factor."""
+    s1, s2 = (scale, scale) if np.isscalar(scale) else (float(scale[0]), float(scale[1]))
+    scaled = dict(feat)
+    if feat["type"] == "fillet":
+        scaled["radius"] = float(feat.get("radius", 2.0)) * min(s1, s2)
+    elif feat.get("mode") == "dist":
+        on_length, on_length2 = (s2, s1) if feat.get("flip") else (s1, s2)
+        scaled["length"] = float(feat.get("length", 2.0)) * on_length
+        scaled["length2"] = float(feat.get("length2", feat.get("length", 2.0))) * on_length2
+    else:
+        scaled["length"] = float(feat.get("length", 2.0)) * min(s1, s2)
+        if "length2" in feat:
+            scaled["length2"] = float(feat["length2"]) * min(s1, s2)
+    return scaled
+
+def edge_cutter(chain, feat, probe, filler=False, surface=None, fit_probe=None, notes=None,
+                requested=None):
     """Closed tool body removing the chamfer / fillet material along one convex edge chain.
     filler: the body is added to the part instead — True for an inner (concave) chain,
     "outer1" / "outer2" for a convex chain whose corner is filled on the outside, with face 1 /
@@ -8625,7 +8895,11 @@ def edge_cutter(chain, feat, probe, filler=False, surface=None):
     meets in a corner, chain["_miter"] = {end index: (point, normal)} ends the body on the
     mitre plane.
     probe(point) → True if the point is inside the body (decides whether the cutter may run
-    past an open chain end). Returns (verts, tris, faces)."""
+    past an open chain end). fit_probe: the plain inside test of the body (for an outer filler a
+    pair: the test for face 1's side, face 2's side — one of them the touching body) — when
+    given, a cut or outer-filler feature wider than its faces is made smaller until it fits
+    (_feature_fit_scale), and a line about it is added to notes (a list), if given, measured
+    against requested (the entry as the user set it; default feat). Returns (verts, tris, faces)."""
     chain = _simplify_closed_chain(chain)
     m = len(chain["frames"]); closed = chain["closed"]; P = chain["P"]
     frames = chain["frames"]
@@ -8633,26 +8907,67 @@ def edge_cutter(chain, feat, probe, filler=False, surface=None):
         frames = [(t, -n1, n2, -u1, u2) for t, n1, n2, u1, u2 in frames]
     elif filler == "outer2":
         frames = [(t, n1, -n2, u1, -u2) for t, n1, n2, u1, u2 in frames]
-    secs = [_section(frames[j], P[j], feat) for j in range(m)]
-    K0 = max(len(s[0]) for s in secs)
-    if any(len(s[0]) != K0 for s in secs):         # keep the same point count on every ring
-        n = K0 - 1; f2 = dict(feat, type="fillet")
-        secs = [s if len(s[0]) == K0 else s for s in secs]
-        if feat["type"] == "fillet":
-            secs = []
-            for j in range(m):
-                pts, d1, d2, L, b = _section(frames[j], P[j], f2)
+
+    def build_sections(feat):
+        secs = [_section(frames[j], P[j], feat) for j in range(m)]
+        K0 = max(len(s[0]) for s in secs)
+        if any(len(s[0]) != K0 for s in secs) and feat["type"] == "fillet":
+            # keep the same point count on every ring: resample the arc polylines to K0 points
+            n = K0 - 1
+            resampled = []
+            for pts, d1, d2, L, b in secs:
                 if len(pts) != K0:
-                    Cc = None
                     T1, T2 = pts[0], pts[-1]
-                    # resample the arc polyline to K0 points
-                    seg = np.asarray(pts); acc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(seg, axis=0), axis=1))]
+                    seg = np.asarray(pts)
+                    acc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(seg, axis=0), axis=1))]
                     tt = np.linspace(0, acc[-1], n + 1)
                     pts = [np.array([np.interp(x, acc, seg[:, i]) for i in range(3)]) for x in tt]
                     pts[0], pts[-1] = T1, T2
-                secs.append((pts, d1, d2, L, b))
-    if surface is not None:
-        secs = [_snap_section(sec, chain["frames"][j], filler, surface) for j, sec in enumerate(secs)]
+                resampled.append((pts, d1, d2, L, b))
+            secs = resampled
+        if surface is not None:
+            secs = [_snap_section(sec, chain["frames"][j], filler, surface)
+                    for j, sec in enumerate(secs)]
+        return secs, K0
+
+    secs, K0 = build_sections(feat)
+    requested = feat if requested is None else requested
+    if fit_probe is not None:               # (cut, inner-corner filler or outer filler)
+        # too large for its faces: shrink (a few rounds — snapping onto curved faces is not
+        # quite linear in the size) to just inside what fits
+        for _ in range(3):
+            fits = _feature_fit_scale(P, frames, secs, fit_probe, closed)
+            if min(fits) >= 1.0:
+                break
+            if min(fits) <= 0.02:
+                raise ValueError("the faces at this edge are too narrow for a "
+                                 f"{'fillet' if feat['type'] == 'fillet' else 'chamfer'}")
+            feat = _scaled_feature(feat, tuple(0.95 * f if f < 1.0 else 1.0 for f in fits))
+            secs, K0 = build_sections(feat)
+    if notes is not None:
+        keys = ("radius",) if feat["type"] == "fillet" else \
+               ("length", "length2") if feat.get("mode") == "dist" else ("length",)
+        default = lambda k: 2.0 if k != "length2" else requested.get("length", 2.0)
+        changed = [k for k in keys
+                   if float(feat.get(k, default(k))) < float(requested.get(k, default(k))) - 1e-9]
+        if changed:
+            names = {"radius": "radius", "length": "length", "length2": "second length"}
+            notes.append(", ".join(
+                f"{names[k]} limited to {float(feat[k]):.2f} mm (from "
+                f"{float(requested.get(k, default(k))):g} mm)" for k in changed)
+                + " — the faces are narrower")
+    if not filler and CUT_EDGE_LIFT > 0:
+        lift = min(CUT_EDGE_LIFT_MAX, CUT_EDGE_LIFT * float(
+            feat.get("radius" if feat["type"] == "fillet" else "length", 2.0)))
+        ends = None
+        if not closed:
+            # an open chain's end sections run on past the end into the next face / feature
+            # (e.g. a 1 mm fillet on a 1 mm high step meeting the rounding of the step's tip):
+            # not lifted there, else the two meet in a visible ridge
+            ends = [(True, True)] * m
+            for j in set(range(min(2, m))) | set(range(max(0, m - 2), m)):
+                ends[j] = (False, False)
+        secs = _lift_section_ends(secs, frames, lift, ends)
     if feat["type"] == "fillet" and not filler:      # corners tighter than the fillet: pivot
         secs = _unfold_fillet_sections(P, secs, closed, float(feat.get("radius", 2.0)))
     if feat["type"] == "chamfer" and not filler:
@@ -8992,10 +9307,14 @@ def _fillet_contact_bodies(chain, radius, others, cache=None):
     index = len(chain["frames"]) // 2
     point = chain["P"][index]
     step = max(1e-5, min(1e-3, float(radius) * 1e-3))
-    normals = chain["frames"][index][1:3]
+    n1, n2 = (np.asarray(normal, float) for normal in chain["frames"][index][1:3])
+    # just off each face, and pulled back behind the plane of the other face: a body joined
+    # onto one face has its contact face in exactly that plane, where an inside test is a
+    # coin toss (a step along n2 alone lies on it and could read as inside the knob)
+    probes = (point + step * (n1 - n2), point + step * (n2 - n1))
     contacts = []
     for mesh in others:
-        blocked = [_point_in_mesh(point + step * normal, mesh, cache) for normal in normals]
+        blocked = [_point_in_mesh(probe, mesh, cache) for probe in probes]
         if blocked[0] != blocked[1]:
             contacts.append(mesh)
     return contacts
@@ -9051,24 +9370,36 @@ def _bound_inner_feature(chain, feat, V, T, faces):
             bounded["length2"] = float(feat.get("length2", feat["length"])) * scale
     return bounded
 
-def _bound_outer_feature(chain, feat, mode, verts, others):
+def _bound_outer_feature(chain, feat, mode, verts, others, plane_tol=1e-4):
     frames = [(t, -n1, n2, -u1, u2) if mode == "outer1" else
               (t, n1, -n2, u1, -u2) for t, n1, n2, u1, u2 in chain["frames"]]
-    points = np.vstack([np.asarray(verts, float),
-                        *(np.asarray(other[0], float) for other in others)])
+    host = np.asarray(verts, float).reshape(-1, 3)
+    support = np.vstack([host[:0], *(np.asarray(other[0], float).reshape(-1, 3)
+                                     for other in others)])
+    points = np.vstack([host, support])
+    # The continued face (face 1 for outer1) runs on along the touching body: there the tool
+    # may only reach as far as that body's face in this plane, not the body's whole extent
+    # (a knob with a rounded rim must not get a lip of fillet sticking out past its flat face).
+    support_side = 0 if mode == "outer1" else 1
     sections = [_section(frame, point, feat)
                 for frame, point in zip(frames, chain["P"])]
     limits = []
     for side in range(2):
-        available = [max(0.0, float(np.max((points - point) @ frame[3 + side])))
-                     for frame, point in zip(frames, chain["P"])]
+        available = []
+        for frame, point in zip(frames, chain["P"]):
+            candidates = points
+            if side == support_side and len(support):
+                in_plane = support[np.abs((support - point) @ frame[1 + side]) < plane_tol]
+                if len(in_plane):
+                    candidates = in_plane
+            available.append(max(0.0, float(np.max((candidates - point) @ frame[3 + side]))))
         requested = max(section[1 + side] for section in sections)
         if requested > 1e-9:
             limits.append(min(available) / requested)
     if not limits:
         return feat
     scale = min(1.0, *limits)
-    if scale >= 1.0:
+    if scale >= 0.99:            # fits (a polygonal round face falls a hair short of its radius)
         return feat
     scale *= 0.95
     if scale <= 1e-8:
@@ -9107,10 +9438,11 @@ def _clip_to_feature_envelope(mesh, envelope):
             face["kind"] = feature_kind
     return clipped
 
-def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
+def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False, notes=None):
     """Apply a chamfer / fillet entry to a body mesh. Returns (new mesh, matched chains).
     chains: the (cached) mesh_edge_chains of mesh, if known. others: meshes (verts, tris) of
-    the other bodies — used by feat["outside"] to find the body the part sits on.
+    the other bodies — used by feat["outside"] to find the body the part sits on. notes: a list
+    that gets a line for every edge whose chamfer / fillet had to be made smaller to fit.
     Raises ValueError with a readable message if it cannot be applied."""
     if feat["type"] == "thread": return apply_thread_feature(mesh, feat), []
     verts, tris, faces = mesh
@@ -9191,13 +9523,17 @@ def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
     use_probe = probe_corner if corner_pts else probe
     res = mesh
     if matched_cut:
-        res = csg_subtract(res, [edge_cutter(c, feat, use_probe, surface=surface) for c in matched_cut], label="")
+        res = csg_subtract(res, [edge_cutter(c, feat, use_probe, surface=surface, fit_probe=probe,
+                                             notes=notes)
+                                 for c in matched_cut], label="")
     envelope = _feature_envelope(mesh) if concave else None
     fillers = []
     fallback_cuts = []
     for c in concave:
         tool_feat = feat if envelope is not None else _bound_inner_feature(c, feat, V, T, faces)
-        filler = edge_cutter(c, tool_feat, probe, filler=True, surface=surface)
+        # an inner-corner fillet lands on both faces of this body: smaller until both ends do
+        filler = edge_cutter(c, tool_feat, probe, filler=True, surface=surface,
+                             fit_probe=probe, notes=notes, requested=feat)
         if envelope is not None:
             filler = _clip_to_feature_envelope(filler, envelope)
         if filler[1]:
@@ -9225,7 +9561,13 @@ def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
                 if clip_outer and automatic else []
             tool_feat = _bound_outer_feature(c, feat, c["_mode"], V, supports) \
                 if clip_outer else feat
-            filler = edge_cutter(c, tool_feat, probe, filler=c["_mode"], surface=surface) \
+            # the joint fillet lands on this body's face and on the touching body's face (the
+            # continued plane): each end must lie on its own body, else it is made smaller
+            on_support = (lambda p, _s=supports: any(_point_in_mesh(p, om, ray_cache) for om in _s)) \
+                if supports else (lambda p: True)
+            fit = (on_support, probe) if c["_mode"] == "outer1" else (probe, on_support)
+            filler = edge_cutter(c, tool_feat, probe, filler=c["_mode"], surface=surface,
+                                 fit_probe=fit, notes=notes, requested=feat) \
                 if tool_feat is not None else ([], [], [])
             if clip_outer:
                 fill_envelope = _feature_envelope(mesh, supports)
@@ -9245,7 +9587,71 @@ def apply_edge_feature(mesh, feat, chains=None, others=None, clip_outer=False):
     if fillers:
         res = csg_subtract(res, fillers, label="", union=True)
     if not res[1]: raise ValueError("the result would be empty")
-    return res, matched
+    return _absorb_tool_slivers(res), matched
+
+def _absorb_tool_slivers(mesh):
+    """Triangles of a chamfer / fillet tool's side band ("… tool" faces) that survived the
+    boolean as micro-slivers (where several features meet, e.g. two 1 mm fillets on a 1 mm
+    tip) are handed to a real face they hang on (preferably the feature's own face, never a
+    planar one while another neighbour is there), so no stray face can be hovered, picked or
+    outlined. The geometry is unchanged; the empty
+    tool faces keep their place so face numbers stay the same."""
+    verts, tris, faces = mesh
+    tool = [fi for fi, face in enumerate(faces)
+            if face.get("kind", "").endswith(" tool") and face.get("tris")]
+    if not tool:
+        return mesh
+    T = np.asarray(tris, np.int64).reshape(-1, 3)
+    owner = np.full(len(T), -1, np.int64)
+    for fi, face in enumerate(faces):
+        owner[np.asarray(face.get("tris", ()), np.int64)] = fi
+    is_tool = np.zeros(len(faces) + 1, bool); is_tool[tool] = True
+    # triangle neighbours through shared edges
+    keys = np.sort(np.concatenate([T[:, [0, 1]], T[:, [1, 2]], T[:, [2, 0]]]), axis=1)
+    tri_of = np.tile(np.arange(len(T)), 3)
+    code = keys[:, 0] * (int(T.max()) + 1) + keys[:, 1]
+    order = np.argsort(code, kind="stable")
+    code_s, tri_s = code[order], tri_of[order]
+    pairs = np.nonzero(code_s[1:] == code_s[:-1])[0]
+    neighbours = {}
+    for a, b in zip(tri_s[pairs], tri_s[pairs + 1]):
+        neighbours.setdefault(int(a), []).append(int(b))
+        neighbours.setdefault(int(b), []).append(int(a))
+    pending = [int(k) for fi in tool for k in faces[fi]["tris"]]
+    while pending:                    # a sliver touching only slivers waits for its neighbours
+        left = []
+        for k in pending:
+            votes = {}
+            for nb in neighbours.get(k, ()):
+                fi = int(owner[nb])
+                if fi >= 0 and not is_tool[fi]:
+                    votes[fi] = votes.get(fi, 0) + 1
+            if votes:
+                # a sliver is a piece of the feature: its rounding / chamfer face first, then
+                # another curved face; a planar face last (it must stay flat for sketching)
+                owner[k] = max(votes, key=lambda fi: (
+                    faces[fi].get("kind", "").startswith(("fillet", "chamfer")),
+                    not faces[fi].get("planar"), votes[fi]))
+            else:
+                left.append(k)
+        if len(left) == len(pending):  # isolated from every real face: leave them as they are
+            break
+        pending = left
+    moved = [int(k) for fi in tool for k in faces[fi]["tris"] if owner[k] != fi]
+    if not moved:
+        return mesh
+    gained = {}
+    for k in moved:
+        gained.setdefault(int(owner[k]), []).append(k)
+    moved_set = set(moved)
+    new_faces = []
+    for fi, face in enumerate(faces):
+        if fi in tool:
+            face = dict(face, tris=[k for k in face["tris"] if k not in moved_set])
+        elif fi in gained:
+            face = dict(face, tris=list(face["tris"]) + gained[fi])
+        new_faces.append(face)
+    return verts, tris, new_faces
 
 def _feat_chains_cached(entry):
     """mesh_edge_chains for an entry, cached by mesh identity.
@@ -11761,17 +12167,17 @@ class View3D(QGLWidget):
 
     def _paint_solid_underlay(self, painter):
         underlay = self.state.get("sketch_view_state", {}).get("solid_underlay")
-        if underlay is None:
+        if underlay is None or not underlay.get("visible", True):
             return
         transform = QTransform(self.scale, 0.0, 0.0, -self.scale,
                                self.width()/2 + self.offset.x(),
                                self.height()/2 + self.offset.y())
         painter.save()
         painter.setBrush(QColor(120, 155, 185, 45))
-        painter.setPen(QPen(QColor(150, 185, 215, 190), 1.5))
+        painter.setPen(QPen(QColor(*SOLID_UNDERLAY_COLOR), 1.5))
         painter.drawPath(transform.map(underlay["outline"]))
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor(150, 185, 215, 190), 1.0))
+        painter.setPen(QPen(QColor(*SOLID_UNDERLAY_COLOR), 1.0))
         painter.drawPath(transform.map(underlay["edges"]))
         painter.restore()
 
@@ -17280,7 +17686,7 @@ def tol_normalize_tolerance(raw):
 def tol_decimals(*values):
     count = 0
     for value in values:
-        text = f"{abs(value):.4f}".rstrip("0")
+        text = f"{abs(value):.5f}".rstrip("0")
         count = max(count, len(text.split(".")[1]) if "." in text else 0)
     return count
 
@@ -17297,31 +17703,36 @@ def tol_plain(value, places=2):
     return text or "0"
 
 
-def tol_format_dimension(value, tolerance, prefix="", unit=""):
+def tol_format_dimension(value, tolerance, prefix="", unit="", factor=1.0, places=2):
     """The printed text of a toleranced dimension: '25 ±0.1', '25 +0.1/-0.2', '25.1/24.9' or
-    'Ø25 H7 (+0.021/0)'. `prefix` is R / Ø, `unit` the degree sign of angles."""
+    'Ø25 H7 (+0.021/0)'. `prefix` is R / Ø, `unit` the degree sign of angles. Values and
+    tolerances are stored in mm; `factor` converts them to the printed unit (1 / 25.4 for inch)
+    with at least `places` decimals."""
     tolerance = tol_normalize_tolerance(tolerance)
-    base = f"{prefix}{tol_plain(value)}{unit}"
+    base = f"{prefix}{tol_plain(value * factor, places)}{unit}"
     if tolerance is None:
         return base
     mode = tolerance["mode"]
     try:
         if mode == "symmetric":
-            places = tol_decimals(tolerance["upper"])
-            return f"{base} ±{tol_plain(tolerance['upper'], places)}"
+            digits = tol_decimals(tolerance["upper"] * factor)
+            return f"{base} ±{tol_plain(tolerance['upper'] * factor, digits)}"
         if mode == "deviations":
-            places = tol_decimals(tolerance["upper"], tolerance["lower"])
-            return f"{base} {tol_signed(tolerance['upper'], places)}/{tol_signed(tolerance['lower'], places)}"
+            upper, lower = tolerance["upper"] * factor, tolerance["lower"] * factor
+            digits = tol_decimals(upper, lower)
+            return f"{base} {tol_signed(upper, digits)}/{tol_signed(lower, digits)}"
         if mode == "limits":
-            places = max(2, tol_decimals(value + tolerance["upper"], value + tolerance["lower"]))
-            return (f"{prefix}{value + tolerance['upper']:.{places}f}{unit}/"
-                    f"{prefix}{value + tolerance['lower']:.{places}f}{unit}")
-        # fit
+            high = (value + tolerance["upper"]) * factor
+            low = (value + tolerance["lower"]) * factor
+            digits = max(places, tol_decimals(high, low))
+            return f"{prefix}{high:.{digits}f}{unit}/{prefix}{low:.{digits}f}{unit}"
+        # fit: the deviations follow from the nominal size in mm
         text = f"{base} {tolerance['fit'].replace(' ', '')}"
         if tolerance.get("show_deviations", True):
             upper, lower = tol_deviations(tolerance["fit"], value)
-            places = max(2, tol_decimals(upper, lower))
-            text += f" ({tol_signed(upper, places)}/{tol_signed(lower, places)})"
+            upper, lower = upper * factor, lower * factor
+            digits = max(places, tol_decimals(upper, lower))
+            text += f" ({tol_signed(upper, digits)}/{tol_signed(lower, digits)})"
         return text
     except ToleranceError:
         return f"{base} {tolerance.get('fit', '')}".rstrip()
@@ -17340,9 +17751,10 @@ def tol_tolerance_summary(value, tolerance):
 
 
 # ── annotations: geometric tolerances, datums, surface finish, weld symbols ────
-TOL_ANNOTATION_KINDS = ("gdt", "datum", "surface", "weld")
+TOL_ANNOTATION_KINDS = ("gdt", "datum", "surface", "weld", "note", "hole", "thread", "balloon")
 TOL_ANNOTATION_TITLES = {"gdt": "Geometric tolerance", "datum": "Datum", "surface": "Surface finish",
-                     "weld": "Weld symbol"}
+                         "weld": "Weld symbol", "note": "Note", "hole": "Hole callout",
+                         "thread": "Thread callout", "balloon": "Balloon"}
 # ISO 1101 characteristics: key → (title, needs datum, may take a diameter zone)
 TOL_GDT_SYMBOLS = {
     "straightness": ("Straightness", False, True), "flatness": ("Flatness", False, False),
@@ -17364,6 +17776,14 @@ TOL_WELD_TYPES = {"fillet": "Fillet", "square": "Square butt (I)", "v": "V butt"
 
 def tol_clean_text(value, limit=40):
     return str(value if value is not None else "").strip()[:limit]
+
+
+def tol_number(value):
+    """A finite number from a project file, else None."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) \
+            and abs(value) < 1e9:
+        return float(value)
+    return None
 
 
 def tol_normalize_annotation(raw):
@@ -17396,6 +17816,43 @@ def tol_normalize_annotation(raw):
         lay = raw.get("lay") if raw.get("lay") in TOL_LAY_SYMBOLS else ""
         result.update(removal=removal, value=tol_clean_text(raw.get("value"), 16), lay=lay,
                       allowance=tol_clean_text(raw.get("allowance"), 12))
+    elif kind == "note":
+        text = str(raw.get("text") or "").replace("\r", "").strip()[:400]
+        if not text:
+            return None
+        result.update(text=text, leader=bool(raw.get("leader", True)), frame=bool(raw.get("frame")))
+    elif kind == "hole":
+        def pair(value):
+            if isinstance(value, (list, tuple)) and len(value) == 2 and \
+                    all(tol_number(v) is not None and tol_number(v) > 0 for v in value):
+                return [float(value[0]), float(value[1])]
+            return None
+        d = tol_number(raw.get("d"))
+        if d is None or d <= 0:
+            return None
+        result.update(linked=bool(raw.get("linked", True)), d=d,
+                      through=bool(raw.get("through", True)),
+                      depth=max(0.0, tol_number(raw.get("depth")) or 0.0),
+                      cbore=pair(raw.get("cbore")), csk=pair(raw.get("csk")),
+                      count=max(1, min(999, int(tol_number(raw.get("count")) or 1))))
+    elif kind == "thread":
+        label = tol_clean_text(raw.get("label"), 24)
+        if not label:
+            return None
+        result.update(linked=bool(raw.get("linked", True)), label=label,
+                      label_pitch=tol_clean_text(raw.get("label_pitch"), 24) or label,
+                      show_pitch=bool(raw.get("show_pitch")),
+                      cls=tol_clean_text(raw.get("cls"), 8),
+                      internal=bool(raw.get("internal", True)),
+                      hand="left" if raw.get("hand") == "left" else "right",
+                      length=max(0.0, tol_number(raw.get("length")) or 0.0),
+                      through=bool(raw.get("through")),
+                      count=max(1, min(999, int(tol_number(raw.get("count")) or 1))))
+    elif kind == "balloon":
+        item = tol_number(raw.get("item"))
+        if item is None or not 1 <= item <= 999:
+            return None
+        result["item"] = int(item)
     else:
         weld = raw.get("type") if raw.get("type") in TOL_WELD_TYPES else "fillet"
         other = raw.get("other") if raw.get("other") in TOL_WELD_TYPES else ""
@@ -17418,7 +17875,216 @@ def tol_annotation_summary(ann):
         return f"Datum {ann['letter']}"
     if kind == "surface":
         return f"Surface finish {ann['value']}".strip()
+    if kind == "note":
+        first = ann["text"].splitlines()[0]
+        return f"Note: {first[:30]}" + ("…" if len(first) > 30 or "\n" in ann["text"] else "")
+    if kind == "hole":
+        return "Hole " + " · ".join(_drawing_callout_lines(ann))
+    if kind == "thread":
+        return "Thread " + " · ".join(_drawing_callout_lines(ann))
+    if kind == "balloon":
+        return f"Balloon {ann['item']}"
     return f"Weld {TOL_WELD_TYPES[ann['type']].split(' ')[0].lower()} {ann['size']}".strip()
+
+
+# ── bearings (Technical Drawing, Phase 5) ─────────────────────────────────────
+# Standard sizes (d × D × B, chamfer r) of common series. Deep groove ball bearings 60 / 62 / 63
+# (ISO 15), angular contact 72 B / 73 B (same envelope as 62 / 63), drawn cup needle roller
+# bearings HK (ISO 3245; d = shaft / inner circle Fw) and plain wrapped bushes (ISO 3547, d × D × b).
+# Check the manufacturer's catalogue before ordering - the sizes are the common catalogue values.
+_BEARING_60 = ((10, 26, 8, 0.3), (12, 28, 8, 0.3), (15, 32, 9, 0.3), (17, 35, 10, 0.3),
+               (20, 42, 12, 0.6), (25, 47, 12, 0.6), (30, 55, 13, 1.0), (35, 62, 14, 1.0),
+               (40, 68, 15, 1.0), (45, 75, 16, 1.0), (50, 80, 16, 1.0), (55, 90, 18, 1.1),
+               (60, 95, 18, 1.1))
+_BEARING_62 = ((10, 30, 9, 0.6), (12, 32, 10, 0.6), (15, 35, 11, 0.6), (17, 40, 12, 0.6),
+               (20, 47, 14, 1.0), (25, 52, 15, 1.0), (30, 62, 16, 1.0), (35, 72, 17, 1.1),
+               (40, 80, 18, 1.1), (45, 85, 19, 1.1), (50, 90, 20, 1.1), (55, 100, 21, 1.5),
+               (60, 110, 22, 1.5))
+_BEARING_63 = ((10, 35, 11, 0.6), (12, 37, 12, 1.0), (15, 42, 13, 1.0), (17, 47, 14, 1.0),
+               (20, 52, 15, 1.1), (25, 62, 17, 1.1), (30, 72, 19, 1.1), (35, 80, 21, 1.5),
+               (40, 90, 23, 1.5), (45, 100, 25, 1.5), (50, 110, 27, 2.0), (55, 120, 29, 2.0),
+               (60, 130, 31, 2.1))
+_BEARING_CODES = ("00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12")
+_BEARING_HK = (("HK0808", 8, 12, 8), ("HK1010", 10, 14, 10), ("HK1210", 12, 18, 10),
+               ("HK1412", 14, 20, 12), ("HK1512", 15, 21, 12), ("HK1612", 16, 22, 12),
+               ("HK2010", 20, 26, 10), ("HK2012", 20, 26, 12), ("HK2512", 25, 32, 12),
+               ("HK3012", 30, 37, 12), ("HK3512", 35, 42, 12), ("HK4012", 40, 47, 12))
+_BEARING_BUSH = ((8, 10, 8), (10, 12, 10), (12, 14, 12), (15, 17, 15), (16, 18, 15), (20, 23, 20),
+                 (25, 28, 20), (30, 34, 30), (35, 39, 30), (40, 44, 40))
+BEARING_TYPES = {"deep_groove": "Deep groove ball bearing", "angular": "Angular contact ball bearing",
+                 "needle": "Needle roller bearing (drawn cup HK)", "plain": "Plain bush (wrapped)"}
+
+
+def bearing_catalogue():
+    """[{"type", "name", "d", "D", "B", "r"}] of all standard sizes."""
+    items = []
+    for series, table in (("60", _BEARING_60), ("62", _BEARING_62), ("63", _BEARING_63)):
+        for code, (d, D, B, r) in zip(_BEARING_CODES, table):
+            items.append({"type": "deep_groove", "name": f"{series}{code}", "d": d, "D": D, "B": B, "r": r})
+    for series, table in (("72", _BEARING_62), ("73", _BEARING_63)):
+        for code, (d, D, B, r) in zip(_BEARING_CODES, table):
+            items.append({"type": "angular", "name": f"{series}{code} B", "d": d, "D": D, "B": B, "r": r})
+    for name, d, D, B in _BEARING_HK:
+        items.append({"type": "needle", "name": name, "d": d, "D": D, "B": B, "r": 0.3})
+    for d, D, b in _BEARING_BUSH:
+        items.append({"type": "plain", "name": f"Bush {d}×{D}×{b}", "d": d, "D": D, "B": b, "r": 0.3})
+    return items
+
+
+def bearing_find(name):
+    return next((item for item in bearing_catalogue() if item["name"] == name), None)
+
+
+def bearing_ring_deviations(bearing):
+    """(bore (upper, lower), outside (upper, lower)) in mm: the bearing's own tolerances (ISO 492
+    normal class for rolling bearings: Δdmp / ΔDmp, always below the nominal size). A plain bush
+    is pressed into an H7 housing with its outside s7 and gives an H9 bore when fitted."""
+    if bearing.get("type") == "plain":
+        return tol_deviations("H9", bearing["d"]), tol_deviations("s7", bearing["D"])
+    d, D = float(bearing["d"]), float(bearing["D"])
+    bore = next(value for limit, value in ((10, 8), (18, 8), (30, 10), (50, 12), (80, 15), (120, 20),
+                                           (1e9, 25)) if d <= limit)
+    outside = next(value for limit, value in ((18, 8), (30, 9), (50, 11), (80, 13), (120, 15),
+                                              (150, 18), (180, 25), (1e9, 30)) if D <= limit)
+    if bearing.get("type") == "needle":           # drawn cup: the inner circle Fw (F8 when fitted)
+        return tol_deviations("F8", d), (0.0, -outside / 1000.0)
+    return (0.0, -bore / 1000.0), (0.0, -outside / 1000.0)
+
+
+BEARING_LOAD_CASES = {
+    "inner_normal": "Rotating inner ring (shaft turns), normal load",
+    "inner_light": "Rotating inner ring, light load",
+    "inner_heavy": "Rotating inner ring, heavy / shock load",
+    "outer_normal": "Rotating outer ring (housing turns, e.g. a wheel), normal load",
+    "outer_light": "Rotating outer ring, light load",
+}
+
+
+def bearing_seat(bearing, load_case="inner_normal"):
+    """Recommended seats (ISO 286 classes, after the usual catalogue tables for steel shafts and
+    housings): {"shaft", "housing", "shoulder_shaft" (min diameter), "shoulder_housing" (max
+    diameter), "fillet" (max radius), "note"}. The ring that turns relative to the load gets
+    the tight fit; the other one a sliding fit so it can move axially."""
+    d, D, r = float(bearing["d"]), float(bearing["D"]), float(bearing.get("r", 0.3))
+    kind = bearing.get("type", "deep_groove")
+    note = ""
+    if kind == "plain":
+        shaft, housing, note = "f7", "H7", "bush pressed in (outside s7), bore H9 after fitting"
+    elif kind == "needle":
+        shaft, housing, note = "h6", "N7", "drawn cup pressed into the housing; shaft hardened " \
+                                           "(58 HRC min) as raceway"
+    elif load_case.startswith("outer"):
+        shaft = "g6"
+        housing = "M7" if load_case == "outer_light" else "N7"
+        note = "outer ring tight, inner ring sliding on the shaft"
+    else:
+        housing = "H7"
+        if load_case == "inner_light":
+            shaft = "js5" if d <= 17 else "j6"
+        elif load_case == "inner_heavy":
+            shaft = "m5" if d <= 50 else "n6"
+        else:
+            shaft = "js5" if d <= 10 else "j5" if d <= 17 else "k5" if d <= 40 else "m5"
+        note = "inner ring tight, outer ring sliding in the housing"
+    if shaft in ("j5", "j6"):                       # not in the ISO 286 subset: the next one alike
+        shaft = "js" + shaft[1:]
+    return {"shaft": shaft, "housing": housing, "fillet": r,
+            "shoulder_shaft": round(d + 0.2 * (D - d), 1),
+            "shoulder_housing": round(D - 0.2 * (D - d), 1), "note": note}
+
+
+def bearing_mesh(bearing, segments=64):
+    """(vertices, triangles) of a bearing in its own frame (axis +Z, from z = 0 to B, centred on
+    the axis): inner and outer ring with the balls / needles between them, a plain bush as one
+    sleeve. Built with manifold3d."""
+    import manifold3d as m3
+    d, D, B = float(bearing["d"]), float(bearing["D"]), float(bearing["B"])
+    kind = bearing.get("type", "deep_groove")
+
+    def tube(r_in, r_out, z0=0.0, height=B):
+        return m3.Manifold.cylinder(height, r_out, r_out, segments).translate([0, 0, z0]) - \
+            m3.Manifold.cylinder(height + 2, r_in, r_in, segments).translate([0, 0, z0 - 1])
+    if kind == "plain":
+        solid = tube(d / 2, D / 2)
+    elif kind == "needle":
+        wall = (D - d) / 2
+        shell = tube(D / 2 - 0.25 * wall, D / 2)
+        lips = tube(d / 2 + 0.6 * wall, D / 2, 0.0, 0.08 * B) + tube(d / 2 + 0.6 * wall, D / 2, 0.92 * B, 0.08 * B)
+        roller = 0.35 * wall
+        pitch_r = d / 2 + roller
+        count = max(6, int(2 * math.pi * pitch_r / (2.4 * roller)))
+        rollers = [m3.Manifold.cylinder(0.76 * B, roller, roller, 16).translate(
+            [pitch_r * math.cos(2 * math.pi * k / count), pitch_r * math.sin(2 * math.pi * k / count), 0.12 * B])
+            for k in range(count)]
+        solid = shell + lips + m3.Manifold.batch_boolean(rollers, m3.OpType.Add)
+    else:
+        section = (D - d) / 2
+        inner = tube(d / 2, d / 2 + 0.3 * section)
+        outer = tube(D / 2 - 0.3 * section, D / 2)
+        ball = min(0.46 * section, 0.62 * B)
+        pitch_r = (d + D) / 4
+        count = max(6, int(2 * math.pi * pitch_r / (2.3 * ball)))
+        balls = [m3.Manifold.sphere(ball, 24).translate(
+            [pitch_r * math.cos(2 * math.pi * k / count), pitch_r * math.sin(2 * math.pi * k / count), B / 2])
+            for k in range(count)]
+        # grooves in both rings for the balls, so the parts touch only along the raceways
+        groove = m3.Manifold.cylinder(2 * ball * 0.9, pitch_r + 0.75 * ball, pitch_r + 0.75 * ball, segments) - \
+            m3.Manifold.cylinder(2 * ball * 0.9, pitch_r - 0.75 * ball, pitch_r - 0.75 * ball, segments)
+        groove = groove.translate([0, 0, B / 2 - ball * 0.9])
+        solid = (inner - groove) + (outer - groove) + m3.Manifold.batch_boolean(balls, m3.OpType.Add)
+    mesh = solid.to_mesh()
+    return np.asarray(mesh.vert_properties)[:, :3].astype(float).tolist(), \
+        [tuple(int(i) for i in tri) for tri in np.asarray(mesh.tri_verts)]
+
+
+# ── tolerance stack-up (Technical Drawing, Phase 5) ────────────────────────────
+def tol_dimension_deviations(nominal, tolerance, general="ISO 2768-m"):
+    """(upper, lower) deviation in mm of a dimension: its own tolerance, else the general
+    tolerance of the drawing (ISO 2768-1), else ±0."""
+    tolerance = tol_normalize_tolerance(tolerance)
+    nominal = abs(float(nominal))
+    if tolerance is not None:
+        mode = tolerance["mode"]
+        if mode == "symmetric":
+            return tolerance["upper"], -tolerance["upper"]
+        if mode in ("deviations", "limits"):
+            return tolerance["upper"], tolerance["lower"]
+        try:
+            return tol_deviations(tolerance["fit"], nominal)
+        except ToleranceError:
+            pass
+    value = tol_general_tolerance(general, nominal) if general else None
+    return (value, -value) if value else (0.0, 0.0)
+
+
+def tol_stackup(rows, low_limit=None, high_limit=None):
+    """Tolerance chain: rows [{"nominal", "upper", "lower", "sign" (+1 / -1)}] add up to a gap.
+    Worst case: all deviations at their limits; statistical (RSS): the deviation ranges add as
+    the root of their squares around the mean. The gap must lie within low_limit … high_limit."""
+    nominal = worst_high = worst_low = mean = 0.0
+    squares = 0.0
+    for row in rows:
+        n, up, low, sign = float(row["nominal"]), float(row["upper"]), float(row["lower"]), \
+            (1.0 if float(row.get("sign", 1)) >= 0 else -1.0)
+        nominal += sign * n
+        if sign > 0:
+            worst_high += n + up
+            worst_low += n + low
+        else:
+            worst_high -= n + low
+            worst_low -= n + up
+        mean += sign * (n + (up + low) / 2.0)
+        squares += ((up - low) / 2.0) ** 2
+    half = math.sqrt(squares)
+    result = {"nominal": nominal, "worst": (worst_low, worst_high), "rss": (mean - half, mean + half),
+              "mean": mean}
+
+    def check(low, high):
+        return (low_limit is None or low >= low_limit - 1e-12) and \
+            (high_limit is None or high <= high_limit + 1e-12)
+    result["worst_ok"] = check(*result["worst"])
+    result["rss_ok"] = check(*result["rss"])
+    return result
 
 
 DRAWING_UNITS_PER_MM = 4.0
@@ -17542,7 +18208,7 @@ def _drawing_prepare_mesh(vertices, triangles):
     return V, _drawing_orient_triangles(V, T)
 
 
-def _drawing_topology(V, T, threads=None):
+def _drawing_topology(V, T, threads=None, gears=None):
     """Unique edges with their adjacent faces, sharp-edge flags, detected circles and screw
     threads (found on the mesh, or given: a section keeps the threads of the whole part). The
     edges of threaded surfaces are no sharp edges: views draw the thread symbol instead."""
@@ -17570,12 +18236,17 @@ def _drawing_topology(V, T, threads=None):
     dots[two] = np.einsum("ij,ij->i", normals[fa[two]], normals[fb[two]])
     sharp = ((counts == 1) & valid[fa]) | (counts > 2) | (two & (dots < 0.8))
     topology = {"edges": edges, "counts": counts, "fa": fa, "fb": fb, "two": two,
-                "sharp": sharp, "fold": two & (dots < 0.8), "normals": normals, "span": span}
+                "sharp": sharp, "fold": two & (dots < 0.8), "normals": normals, "span": span,
+                "V": V, "T": T}
     if threads is None:
         threads = _drawing_find_threads(V, T, topology)
     topology["threads"] = threads
     topology["thread_zone"] = _drawing_thread_zone(V, edges, threads, span) if threads else \
         np.zeros(len(edges), dtype=bool)
+    # simplified gears (Phase 4): the teeth are left out like a thread, symbols drawn instead
+    topology["gears"] = list(gears or ())
+    if topology["gears"]:
+        topology["thread_zone"] = topology["thread_zone"] | _drawing_gear_zone(V, edges, topology["gears"], span)
     topology["sharp"] = topology["sharp"] & ~topology["thread_zone"]
     topology["fold"] = topology["fold"] & ~topology["thread_zone"]
     topology["circles"] = _drawing_find_circles(V, topology)
@@ -17591,6 +18262,13 @@ def _drawing_topology(V, T, threads=None):
             topology["circles"].append({"center": thread["point"] + thread["axis"] * end,
                                         "radius": thread["major"], "axis": thread["axis"],
                                         "edges": [], "thread": index})
+    # tip, pitch and root circle of simplified gears: centre marks and diameter dimensions
+    for gear in topology["gears"]:
+        for radius in (gear["r_tip"], gear["r_pitch"], gear["r_root"]):
+            topology["circles"].append({"center": np.asarray(gear["origin"], dtype=float) +
+                                        np.asarray(gear["axis"], dtype=float) * gear["z1"],
+                                        "radius": radius, "axis": np.asarray(gear["axis"], dtype=float),
+                                        "edges": [], "gear": True})
     return topology
 
 
@@ -17833,7 +18511,9 @@ def _drawing_find_threads(V, T, topology):
         faces.discard(-1)
         helices.append({"axis": axis, "point": centre - axis * float(centre @ axis),
                         "radius": radius, "pitch": pitch, "faces": faces,
-                        "chain": np.asarray(chain)})
+                        "chain": np.asarray(chain),
+                        # (e1, e2, axis) is right-handed: a right-hand helix rises turning positive
+                        "hand": "right" if turn * rise > 0 else "left"})
     groups = []
     for helix in helices:
         for group in groups:
@@ -17889,9 +18569,11 @@ def _drawing_find_threads(V, T, topology):
                 direction = helper * math.cos(angle) + np.cross(axis, helper) * math.sin(angle)
                 inside += _drawing_point_inside(V, T, probe + direction * middle)
             limits.append(inside >= 3)
+        hands = [helix["hand"] for helix in group]
         threads.append({"axis": axis, "point": point, "minor": minor, "major": major,
                         "pitch": pitch, "low": low, "high": high, "internal": internal,
-                        "limits": limits})
+                        "limits": limits,
+                        "hand": "left" if hands.count("left") > hands.count("right") else "right"})
     return threads
 
 
@@ -17965,6 +18647,51 @@ def _drawing_thread_section_loops(loops, threads, normal, offset, right, up):
     return result
 
 
+def _drawing_thread_ends(thread, topology):
+    """Chamfered free ends of a thread (Phase 4): {"low" / "high": (end radius, chamfer length,
+    position of the end face along the axis)}. A bolt's end is chamfered when its end face stays
+    inside the crest; a tapped hole's entry when the hole widens beyond the major diameter there
+    (45° assumed). Cached on the thread."""
+    if "_ends" in thread:
+        return thread["_ends"]
+    ends = {}
+    V = topology.get("V")
+    if V is not None and len(V):
+        axis, point = np.asarray(thread["axis"], dtype=float), np.asarray(thread["point"], dtype=float)
+        relative = V - point
+        along = relative @ axis
+        distance = np.linalg.norm(relative - np.outer(along, axis), axis=1)
+        crest, _root = _drawing_thread_radii(thread)
+        profile = thread["major"] - thread["minor"]
+        tolerance = 0.05 * profile + topology.get("span", 1.0) * 1e-6
+        for name, end, inside, outward in (("low", thread["low"], thread["limits"][0], -1.0),
+                                           ("high", thread["high"], thread["limits"][1], 1.0)):
+            if inside:                                # the part goes on: a thread limit line
+                continue
+            # the end face may lie a little beyond the thread's range (the chamfer drops
+            # below the root): look up to one profile depth further out
+            beyond = (along - end) * outward
+            window = (beyond >= -tolerance) & (beyond <= 1.5 * profile + tolerance)
+            if thread["internal"]:
+                window &= (distance >= thread["minor"] - tolerance) & (distance <= 1.6 * thread["major"])
+            else:
+                window &= distance <= thread["major"] + tolerance
+            if not window.any():
+                continue
+            face = float(along[window][np.argmax(beyond[window])])
+            on_face = window & (np.abs(along - face) <= tolerance)
+            if thread["internal"]:
+                radius = float(distance[on_face].min())
+                if radius > crest + 0.3 * profile:
+                    ends[name] = (radius, radius - crest, face)
+            else:
+                radius = float(distance[on_face].max())
+                if radius < crest - 0.3 * profile:
+                    ends[name] = (radius, crest - radius, face)
+    thread["_ends"] = ends
+    return ends
+
+
 def _drawing_thread_symbols(result, topology, right, up, normal, near, center, extent,
                             resolution, tolerance, cut=None):
     """Threads in a projected view (DIN ISO 6410-1): seen from the side, the crest as thick and
@@ -18021,7 +18748,13 @@ def _drawing_thread_symbols(result, topology, right, up, normal, near, center, e
             half_crest = math.sqrt(crest * crest - depth * depth)
             half_root = math.sqrt(max(root * root - depth * depth, 0.0))
             count = max(2, int(math.ceil((thread["high"] - thread["low"]) / pixel / 1.5)) + 1)
-            ts = np.linspace(thread["low"], thread["high"], count)
+            # chamfered free ends (Phase 4): the crest line stops where the chamfer begins
+            ends = _drawing_thread_ends(thread, topology)
+            # a chamfered end: the crest line ends where the chamfer begins
+            low_end = ends["low"][2] + ends["low"][1] if "low" in ends else thread["low"]
+            high_end = ends["high"][2] - ends["high"][1] if "high" in ends else thread["high"]
+            ts = np.linspace(low_end, max(high_end, low_end), count)
+            root_ts = np.linspace(thread["low"], thread["high"], count)
             any_visible = False
             for sign in (1.0, -1.0):
                 crest_points = base + np.outer(ts, axis) + side * (sign * half_crest)
@@ -18030,7 +18763,18 @@ def _drawing_thread_symbols(result, topology, right, up, normal, near, center, e
                 runs(crest_points, shown, thick, True)
                 if half_root > 0:
                     # the root line lies inside the material; it shows where the crest does
-                    runs(base + np.outer(ts, axis) + side * (sign * half_root), shown, thin, True)
+                    runs(base + np.outer(root_ts, axis) + side * (sign * half_root), shown, thin, True)
+                for name, inward, sample in (("low", 1.0, 0), ("high", -1.0, -1)):
+                    if name not in ends:
+                        continue
+                    end_radius, length, end = ends[name]
+                    half_end = math.sqrt(max(end_radius * end_radius - depth * depth, 0.0))
+                    a = flat((base + axis * end + side * (sign * half_end))[None])[0]
+                    b = flat((base + axis * (end + inward * length) + side * (sign * half_crest))[None])[0]
+                    (thick if shown[sample] else hidden).append((a, b))
+                    if sign > 0 and not thread["internal"]:      # the chamfered end face
+                        c = flat((base + axis * end - side * half_end)[None])[0]
+                        (thick if shown[sample] else hidden).append((a, c))
                 for end, flag, sample in ((thread["low"], thread["limits"][0], 0),
                                           (thread["high"], thread["limits"][1], -1)):
                     if flag and sign > 0:
@@ -18113,8 +18857,9 @@ def _drawing_clip(V, T, normal, offset=0.0):
     return points[used][first], out_triangles
 
 
-def _drawing_section_loops(V, topology, normal, right, up, offset=0.0):
-    """Closed outlines of the cut face (open mesh edges lying in the section plane)."""
+def _drawing_section_loops(V, topology, normal, right, up, offset=0.0, with_start=False):
+    """Closed outlines of the cut face (open mesh edges lying in the section plane); with_start:
+    also the first vertex index of every loop."""
     plane_tol = topology["span"] * 1e-6
     boundary = topology["edges"][topology["counts"] == 1]
     boundary = boundary[np.all(np.abs(V[boundary] @ normal - float(offset)) <= plane_tol, axis=1)]
@@ -18123,7 +18868,7 @@ def _drawing_section_loops(V, topology, normal, right, up, offset=0.0):
         graph[a].append(b)
         graph[b].append(a)
     unused = {(min(a, b), max(a, b)) for a, b in boundary.tolist()}
-    loops = []
+    loops, starts = [], []
     while unused:
         first = next(iter(unused))
         start, current = first
@@ -18143,7 +18888,8 @@ def _drawing_section_loops(V, topology, normal, right, up, offset=0.0):
         if current == start and len(loop) >= 3:
             points = V[loop]
             loops.append(np.column_stack((points @ right, points @ up)))
-    return loops
+            starts.append(loop[0])
+    return (loops, starts) if with_start else loops
 
 
 def _drawing_rasterize(screen, depth_values, T, valid, resolution, want_ids):
@@ -18264,6 +19010,7 @@ def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids
     if not len(edge_ids):
         _drawing_thread_symbols(result, topology, right, up, normal, near, center, extent,
                                 resolution, tolerance, cut)
+        _drawing_gear_symbols(result, topology, right, up, normal)
         thick, thin, thread_hidden = result["thread_lines"]
         result["pick_segments"] = np.concatenate((thick, thin, thread_hidden))
         result["visible_picks"] = {"pick_segments": np.concatenate((thick, thin)),
@@ -18304,6 +19051,7 @@ def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids
     result["edge_visible"][visible_ids] = True
     _drawing_thread_symbols(result, topology, right, up, normal, near, center, extent,
                             resolution, tolerance, cut)
+    _drawing_gear_symbols(result, topology, right, up, normal)
     thick, thin, thread_hidden = result["thread_lines"]
 
     def seen(points):
@@ -18321,6 +19069,8 @@ def _drawing_project(V, T, topology, right, up, normal, resolution=900, want_ids
             return bool(seen(item.get("points", item["center"])).any())
         if item.get("thread") is not None:
             return bool(result["thread_visible"].get(item["thread"], False))
+        if item.get("gear"):
+            return True
         return bool(result["edge_visible"][item["edges"]].any())
 
     def pick_geometry(chosen_edges, pick_segments, only_visible):
@@ -18502,6 +19252,600 @@ def _drawing_group_segments(segments, tolerance, split_points=()):
     return curves
 
 
+# ── hole and thread callouts, parts list (Technical Drawing, Phase 2) ──────────
+# A hole is a group of coaxial rims (sharp circular edges) whose wall faces point at the axis.
+# Seen from the entry: its diameter (smallest rim), through or blind with the depth, and a
+# counterbore (a shoulder: two radii at one depth) or a countersink (a cone at the entry).
+# Threads come from the threads found on the mesh (_drawing_find_threads).
+
+def _drawing_rim_info(topology, circle):
+    """Of the faces along a rim: the normal component along the axis of the face around it (the
+    flat face or cone: sign of its normal along the axis) and whether its wall faces point at
+    the axis (a bore, not a boss). None for rims without edges (thread ends)."""
+    edge_ids = circle.get("edges") or []
+    if not edge_ids:
+        return None
+    V, normals = topology["V"], topology["normals"]
+    edges = topology["edges"][edge_ids]
+    axis, center = circle["axis"], circle["center"]
+    middles = (V[edges[:, 0]] + V[edges[:, 1]]) / 2.0 - center
+    radial = middles - np.outer(middles @ axis, axis)
+    radial /= np.maximum(np.linalg.norm(radial, axis=1), 1e-12)[:, None]
+    cap, wall = [], []
+    for column in ("fa", "fb"):
+        faces = topology[column][edge_ids]
+        valid = faces >= 0
+        if not valid.any():
+            continue
+        n = normals[faces[valid]]
+        along = n @ axis
+        across = np.einsum("ij,ij->i", n, radial[valid])
+        cap += along[np.abs(along) >= 0.5].tolist()
+        wall += across[np.abs(along) < 0.9].tolist()
+    return {"cap": float(np.mean(cap)) if cap else 0.0,
+            "inner": bool(wall) and float(np.mean(wall)) < 0.0}
+
+
+def _drawing_hole_groups(topology):
+    """Holes of a part (cached on the topology): [{"axis", "entry" (3-D centre of the opening),
+    "d", "through", "depth", "cbore" (D, depth) or None, "csk" (D, angle) or None,
+    "both_open"}]. Bosses (wall faces pointing away from the axis) are no holes."""
+    if "_holes" in topology:
+        return topology["_holes"]
+    span = topology["span"]
+    tolerance = max(span * 1e-4, 1e-6)
+    groups = []
+    for circle in topology.get("circles", ()):
+        if circle.get("thread") is not None or not circle.get("edges"):
+            continue
+        axis = np.asarray(circle["axis"], dtype=float)
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+        centre = np.asarray(circle["center"], dtype=float)
+        for group in groups:
+            if abs(float(group["axis"] @ axis)) > 0.9999 and float(np.linalg.norm(
+                    np.cross(centre - group["point"], group["axis"]))) <= max(tolerance, 1e-3 * circle["radius"]):
+                group["rims"].append(circle)
+                break
+        else:
+            groups.append({"axis": axis, "point": centre, "rims": [circle]})
+    holes = []
+    for group in groups:
+        axis, point = group["axis"], group["point"]
+        rims = []
+        for circle in group["rims"]:
+            info = _drawing_rim_info(topology, dict(circle, axis=axis))
+            if info is None:
+                continue
+            rims.append({"t": float((np.asarray(circle["center"]) - point) @ axis),
+                         "r": float(circle["radius"]), **info})
+        if not rims or not any(rim["inner"] for rim in rims):
+            continue                                   # a boss or a plain outline circle
+        radius = min(rim["r"] for rim in rims if rim["inner"]) if any(rim["inner"] for rim in rims) \
+            else min(rim["r"] for rim in rims)
+        low, high = min(rim["t"] for rim in rims), max(rim["t"] for rim in rims)
+
+        def end_open(t, outward):
+            """The face around the rims at this end points away from the hole: an opening."""
+            caps = [rim["cap"] * outward for rim in rims if abs(rim["t"] - t) <= tolerance]
+            return bool(caps) and max(caps) > 0.3
+
+        def end_radius(t):
+            return max(rim["r"] for rim in rims if abs(rim["t"] - t) <= tolerance)
+
+        open_low, open_high = end_open(low, -1.0), end_open(high, 1.0)
+        if high - low <= tolerance:                    # one rim only: no length to analyse
+            open_low = open_high = True
+        if open_low and open_high:
+            entry_t, sign = (low, 1.0) if end_radius(low) > end_radius(high) * 1.01 else (high, -1.0)
+            if abs(end_radius(low) - end_radius(high)) <= 0.01 * radius:
+                entry_t, sign = None, 1.0              # symmetric through hole: entry by the view
+        elif open_low:
+            entry_t, sign = low, 1.0
+        elif open_high:
+            entry_t, sign = high, -1.0
+        else:
+            continue                                   # a closed cavity: not drawn as a hole
+        holes.append({"axis": axis, "point": point, "rims": rims, "radius": radius,
+                      "low": low, "high": high, "entry_t": entry_t, "sign": sign,
+                      "through": open_low and open_high and high - low > tolerance})
+    topology["_holes"] = holes
+    return holes
+
+
+def _drawing_hole_data(hole, view_normal=None):
+    """Callout values of a hole seen along `view_normal` (the entry faces the viewer when both
+    ends are open and alike): {"d", "through", "depth", "cbore", "csk", "entry"}."""
+    axis, rims, radius = hole["axis"], hole["rims"], hole["radius"]
+    entry_t, sign = hole["entry_t"], hole["sign"]
+    if entry_t is None:                                # plain through hole: the end facing the viewer
+        facing = view_normal is None or float(np.asarray(view_normal) @ axis) >= 0
+        entry_t, sign = (hole["high"], -1.0) if facing else (hole["low"], 1.0)
+    span = max(hole["high"] - hole["low"], 1e-9)
+    tolerance = max(span * 1e-3, 1e-6)
+    steps = sorted(((rim["t"] - entry_t) * sign, rim["r"]) for rim in rims)
+    near = lambda a, b: abs(a - b) <= max(0.01 * radius, 1e-6)
+    depth = max((s for s, r in steps if near(r, radius)), default=0.0)
+    data = {"d": float(2.0 * radius), "through": bool(hole["through"]), "depth": float(depth),
+            "cbore": None, "csk": None,
+            "entry": (hole["point"] + axis * entry_t).tolist()}
+    entry_radius = max((r for s, r in steps if s <= tolerance), default=radius)
+    if entry_radius > radius * 1.02:
+        shoulder = [s for s, r in steps if s > tolerance and near(r, entry_radius)]
+        if shoulder and any(near(r, radius) and abs(s - shoulder[0]) <= tolerance for s, r in steps):
+            data["cbore"] = (float(2.0 * entry_radius), float(shoulder[0]))
+        else:
+            first = min((s for s, r in steps if s > tolerance and near(r, radius)), default=None)
+            if first:
+                angle = 2.0 * math.degrees(math.atan2(entry_radius - radius, first))
+                data["csk"] = (float(2.0 * entry_radius), float(round(angle * 2.0) / 2.0))
+    return data
+
+
+def _drawing_hole_signature(data):
+    return (round(data["d"], 3), data["through"], round(data["depth"], 2),
+            tuple(round(v, 2) for v in data["cbore"]) if data["cbore"] else None,
+            tuple(round(v, 2) for v in data["csk"]) if data["csk"] else None)
+
+
+def _drawing_view_holes(topology, view):
+    """Holes whose axis points at the viewer: [(hole, data, (u, v) of the opening)]."""
+    found = []
+    for hole in _drawing_hole_groups(topology):
+        if abs(float(hole["axis"] @ view["normal"])) < 0.999:
+            continue
+        data = _drawing_hole_data(hole, view["normal"])
+        entry = np.asarray(data["entry"])
+        found.append((hole, data, (float(entry @ view["right"]), float(entry @ view["up"]))))
+    return found
+
+
+def _drawing_hole_at(topology, view, uv, reach):
+    """The hole callout values at a view point (on the rim or inside it), with the number of
+    alike holes in the view; None if no hole is there."""
+    best = None
+    holes = _drawing_view_holes(topology, view)
+    for hole, data, centre in holes:
+        distance = math.hypot(uv[0] - centre[0], uv[1] - centre[1])
+        outer = max(rim["r"] for rim in hole["rims"])
+        if distance <= outer + reach and (best is None or distance < best[0]):
+            best = (distance, data)
+    if best is None:
+        return None
+    signature = _drawing_hole_signature(best[1])
+    count = sum(1 for _h, data, _c in holes if _drawing_hole_signature(data) == signature)
+    return dict(best[1], count=count)
+
+
+def _drawing_thread_size(thread):
+    """(nominal, pitch, family) of a thread: from its Thread tool feature when the drawing has
+    it, else the nearest standard size to what the mesh shows (else the measured values)."""
+    feature = thread.get("feature")
+    if feature:
+        return float(feature["nominal"]), float(feature["pitch"]), feature.get("standard", "ISO")
+    nominal, pitch = 2.0 * float(thread["major"]), float(thread["pitch"])
+    best = None
+    for _label, size, size_pitch, family in THREAD_SIZES:
+        if abs(size_pitch - pitch) <= 0.02 * size_pitch and abs(size - nominal) <= max(0.08 * size, 0.3):
+            if best is None or abs(size - nominal) < abs(best[0] - nominal):
+                best = (size, size_pitch, family)
+    if best is not None:
+        return best
+    size = round(nominal * 2.0) / 2.0
+    coarse = THREAD_METRIC_COARSE.get(size)
+    if coarse is not None and abs(coarse - pitch) <= 0.06 * coarse:
+        return size, coarse, "ISO"
+    return size, round(pitch, 3), "Custom"
+
+
+def _drawing_thread_label(thread):
+    """Designation of a thread: 'M8' (metric coarse), 'M8×1' (fine), 'Tr20×4', 'G1/2',
+    '1/2-14 NPT', a Unified size; and the same with the pitch (for show_pitch)."""
+    nominal, pitch, family = _drawing_thread_size(thread)
+    return (thread_designation(nominal, pitch, family),
+            thread_designation(nominal, pitch, family, show_pitch=True))
+
+
+def _drawing_thread_data(thread):
+    """Callout values of a thread; class, hand and length from its feature where there is one."""
+    short, full = _drawing_thread_label(thread)
+    feature = thread.get("feature") or {}
+    data = {"label": short, "label_pitch": full, "internal": bool(thread["internal"]),
+            "length": float(thread["high"] - thread["low"]),
+            "through": not any(thread.get("limits") or (False, False)),
+            "hand": feature.get("hand") or thread.get("hand") or "right"}
+    if feature:
+        fit = str(feature.get("fit", ""))
+        data["cls"] = "" if fit in ("6", "7") else fit
+        if not feature.get("whole") and feature.get("length"):
+            data["length"] = float(feature["length"])
+    return data
+
+
+def _drawing_thread_at(topology, view, uv, reach):
+    """Thread callout values at a view point: a thread seen end-on (its circle) or from the side
+    (within its major diameter of the axis); with the number of alike threads end-on."""
+    threads = topology.get("threads") or []
+    right, up, normal = (np.asarray(view[key], dtype=float) for key in ("right", "up", "normal"))
+    best = None
+    for thread in threads:
+        axis, point = np.asarray(thread["axis"], dtype=float), np.asarray(thread["point"], dtype=float)
+        ends = [point + axis * thread["low"], point + axis * thread["high"]]
+        a, b = (np.array((float(end @ right), float(end @ up))) for end in ends)
+        target = np.asarray(uv, dtype=float)
+        if abs(float(axis @ normal)) > 0.999:
+            distance = float(np.linalg.norm(target - a))
+        else:
+            along = b - a
+            span = float(along @ along)
+            t = 0.0 if span <= 1e-18 else min(max(float((target - a) @ along) / span, 0.0), 1.0)
+            distance = float(np.linalg.norm(target - (a + along * t)))
+        if distance <= thread["major"] + reach and (best is None or distance < best[0]):
+            best = (distance, thread)
+    if best is None:
+        return None
+    data = _drawing_thread_data(best[1])
+
+    def key(item):
+        return (item["label_pitch"], item["internal"], round(item["length"], 1), item["through"])
+
+    count = 1
+    if abs(float(np.asarray(best[1]["axis"]) @ normal)) > 0.999:
+        count = sum(1 for thread in threads if abs(float(np.asarray(thread["axis"]) @ normal)) > 0.999
+                    and key(_drawing_thread_data(thread)) == key(data))
+    return dict(data, count=count)
+
+
+# ── gear and thread data of the model (Technical Drawing, Phase 4) ─────────────
+GEAR_KIND_TEXT = {"spur": "Spur gear", "helical": "Helical gear", "herringbone": "Herringbone gear",
+                  "internal": "Internal gear", "rack": "Rack", "bevel": "Bevel gear",
+                  "planetary": "Planetary set", "worm": "Worm", "worm_wheel": "Worm wheel"}
+DRAWING_GEAR_QUALITIES = ("5", "6", "7", "8", "9", "10", "11", "12")     # ISO 1328-1 / DIN 3961
+
+
+def _drawing_gear_info(entry, objects):
+    """Data of a gear made with the Gear tool, for the gear data table and the simplified view
+    (ISO 2203): rows [(name, symbol, value text)] and, for cylindrical gears, the axis, origin,
+    tip / pitch / root radii and axial extent (model coordinates). None for other bodies."""
+    parameters = entry.get("gear_parameters") or {}
+    kind = parameters.get("kind")
+    if not kind:
+        return None
+    module = float(parameters.get("module") or 0.0)
+    teeth = int(parameters.get("teeth") or 0)
+    alpha = float(parameters.get("pressure_angle", 20.0))
+    shift = float(parameters.get("profile_shift", 0.0) or 0.0)
+    shorten = float(parameters.get("tip_reduction", 0.0) or 0.0)
+    width = float(parameters.get("thickness", 0.0) or 0.0)
+    trace = kind if kind in ("helical", "herringbone") else \
+        parameters.get("tooth_trace", "straight") if kind in ("rack", "internal") else "straight"
+    beta = float(parameters.get("helix_angle", 0.0) or 0.0) if trace != "straight" else 0.0
+    mm = lambda value: f"{value:.3f}".rstrip("0").rstrip(".") + " mm"
+    rows = [("Gear", "", GEAR_KIND_TEXT.get(kind, str(kind).replace("_", " ").title()))]
+    info = {"kind": kind, "rows": rows, "name": entry.get("name", "Gear")}
+    if module <= 0 or teeth <= 0:
+        return info
+    if beta:
+        rows += [("Normal module", "mn", mm(module * math.cos(math.radians(beta)))),
+                 ("Transverse module", "mt", mm(module))]
+    else:
+        rows.append(("Module", "m", mm(module)))
+    rows += [("Number of teeth", "z", f"{teeth}"), ("Pressure angle", "α", f"{alpha:g}°")]
+    if beta:
+        hand = "right" if beta > 0 else "left"
+        rows.append(("Helix angle", "β", f"{abs(beta):g}° {hand}" +
+                     (" / opposite (herringbone)" if trace == "herringbone" else "")))
+    pitch = module * teeth
+    if kind == "rack":
+        rows += [("Pitch", "p", mm(math.pi * module)),
+                 ("Length", "l", mm(float(parameters.get("rack_length", 0.0) or 0.0)))]
+    elif kind == "bevel":
+        rows += [("Pitch cone angle", "δ", f"{float(parameters.get('bevel_angle', 45.0)):.2f}°"),
+                 ("Shaft angle", "Σ", f"{float(parameters.get('shaft_angle', 90.0)):g}°"),
+                 ("Pitch diameter (heel)", "d", mm(pitch)),
+                 ("Tip diameter (heel)", "da", mm(float(parameters.get("outside_diameter") or
+                                                      gear_outside_from_module("bevel", module, teeth, shift,
+                                                                               parameters.get("bevel_angle", 45.0)))))]
+    elif kind in ("spur", "helical", "herringbone", "internal"):
+        internal = kind == "internal"
+        tip = module * (teeth - 2.0) if internal else module * (teeth + 2.0 + 2.0 * shift - 2.0 * shorten)
+        root = module * (teeth + 2.5) if internal else module * (teeth - 2.5 + 2.0 * shift)
+        if shift and not internal:
+            rows.append(("Profile shift coefficient", "x", f"{shift:+.3f}"))
+        rows += [("Pitch diameter", "d", mm(pitch)), ("Tip diameter", "da", mm(tip)),
+                 ("Root diameter", "df", mm(root)),
+                 ("Base diameter", "db", mm(pitch * math.cos(math.radians(alpha))))]
+        rotation = _import_rotation_matrix(entry.get("gear_rotation", (0.0, 0.0, 0.0)))
+        origin = np.asarray(entry.get("gear_position", (0.0, 0.0, 0.0)), dtype=float)
+        axis = rotation[:, 2]
+        vertices = np.asarray((entry.get("solid") or ((), ()))[0], dtype=float).reshape(-1, 3)
+        along = (vertices - origin) @ axis if len(vertices) else np.array((0.0, width))
+        info.update(axis=axis.tolist(), origin=origin.tolist(), r_tip=tip / 2.0,
+                    r_pitch=pitch / 2.0, r_root=root / 2.0, z0=float(along.min()),
+                    z1=float(along.max()), internal=internal, module=module,
+                    helix=beta, trace=trace)
+    if width and kind != "rack":
+        rows.append(("Face width", "b", mm(width)))
+    # the mating gear of a pair made together, with the centre distance
+    pair = parameters.get("gear_pair_id")
+    if pair:
+        mate = next((other for other in objects if other is not entry and
+                     (other.get("gear_parameters") or {}).get("gear_pair_id") == pair), None)
+        if mate is not None:
+            mate_parameters = mate["gear_parameters"]
+            rows.append(("Mating gear", "", f"{mate.get('name', 'Gear')}  (z = {int(mate_parameters.get('teeth', 0))})"))
+            try:
+                primary, other = (parameters, mate_parameters) if \
+                    parameters.get("gear_pair_role") == "primary" else (mate_parameters, parameters)
+                if primary.get("kind") != "bevel":
+                    rows.append(("Centre distance", "a", mm(gear_pair_center_distance(primary, other))))
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                pass
+    return info
+
+
+def _drawing_assembly_items(assembly):
+    """Parts of an assembly grouped for the parts list (same source and shape, Phase 5):
+    [{"name", "qty", "material", "components": [component names]}] in item order."""
+    items, keys = [], {}
+    for component in assembly["components"]:
+        if not component.get("visible", True):
+            continue
+        bodies = [body for body in component["bodies"] if not body.get("fused")]
+        name = component.get("source_name") or component["name"]
+        signature = tuple(round(float(np.ptp(np.asarray(body["vertices"], dtype=float), axis=0).sum()), 3)
+                          if len(body["vertices"]) else 0.0 for body in bodies)
+        key = (name, signature)
+        if key in keys:
+            items[keys[key]]["qty"] += 1
+            items[keys[key]]["components"].append(component["name"])
+            continue
+        keys[key] = len(items)
+        material = next((body.get("material") for body in bodies if body.get("material")), "")
+        items.append({"name": name, "qty": 1, "material": material or "",
+                      "components": [component["name"]]})
+    return items
+
+
+def _drawing_assembly_mesh(entry, explode=0.0):
+    """(vertices, triangles) of a project assembly as drawn: every visible component in place,
+    with an explode distance the aligned parts moved apart along their explosion direction."""
+    assembly = assembly_from_data(entry.get("assembly_data"))
+    vertices, triangles = [], []
+    for component in assembly["components"]:
+        if not component.get("visible", True):
+            continue
+        offset = None
+        if explode:
+            direction = assembly_explosion_direction(assembly, component)
+            if direction is not None:
+                offset = np.asarray(direction, dtype=float) * float(explode)
+        V, T = assembly_world_mesh(component, offset)
+        triangles += (T + len(vertices)).tolist()
+        vertices += V.tolist()
+    return vertices, triangles
+
+
+def _drawing_assembly_info(entry, explode=0.0):
+    """Model info of an assembly sheet: the components with their parts-list item and box (for
+    balloons that find their part) and the trace lines of an exploded view."""
+    assembly = assembly_from_data(entry.get("assembly_data"))
+    items = _drawing_assembly_items(assembly)
+    item_of = {name: index + 1 for index, item in enumerate(items) for name in item["components"]}
+    components, traces = [], []
+    for component in assembly["components"]:
+        if not component.get("visible", True) or component["name"] not in item_of:
+            continue
+        box = assembly_bounds(component)
+        if box is None:
+            continue
+        low, high = np.asarray(box[0], dtype=float), np.asarray(box[1], dtype=float)
+        shift = np.zeros(3)
+        if explode:
+            direction = assembly_explosion_direction(assembly, component)
+            if direction is not None:
+                shift = np.asarray(direction, dtype=float) * float(explode)
+                centre = (low + high) / 2.0
+                traces.append([centre.tolist(), (centre + shift).tolist()])
+        components.append({"name": component["name"], "item": item_of[component["name"]],
+                           "low": (low + shift).tolist(), "high": (high + shift).tolist()})
+    return {"gears": [], "threads": [], "components": components, "traces": traces}
+
+
+def _drawing_component_at(topology, view, uv):
+    """Parts-list item of the assembly part under a view point: of the parts whose box covers the
+    point, the one with the smallest outline there (the most specific); None if there is none."""
+    best = None
+    right, up = np.asarray(view["right"], dtype=float), np.asarray(view["up"], dtype=float)
+    for component in topology.get("components") or ():
+        corners = np.asarray(component["corners"], dtype=float)
+        us, vs = corners @ right, corners @ up
+        if us.min() <= uv[0] <= us.max() and vs.min() <= uv[1] <= vs.max():
+            area = float((us.max() - us.min()) * (vs.max() - vs.min()))
+            if best is None or area < best[0]:
+                best = (area, component["item"])
+    return None if best is None else best[1]
+
+
+def _drawing_model_info(entry, objects, explode=0.0):
+    """Gears and thread features of a sheet's model (the solid and its additive bodies), in
+    model coordinates: {"gears": [...], "threads": [...]}; an assembly gives its components and
+    the trace lines of its exploded view instead."""
+    if entry is None:
+        return {"gears": [], "threads": []}
+    if entry.get("type") == "assembly":
+        return _drawing_assembly_info(entry, explode)
+    bodies = [entry] + [o for o in entry_descendants(entry, objects)
+                        if o.get("type") == "extrusion" and not o.get("cut")
+                        and not o.get("preview") and o.get("solid") and entry_visible(o)]
+    gears = [info for info in (_drawing_gear_info(body, objects) for body in bodies) if info]
+    ids = {id(body) for body in bodies}
+    threads = [copy.deepcopy(o["feat"]) for o in objects
+               if o.get("type") == "feature" and isinstance(o.get("feat"), dict) and
+               o["feat"].get("type") == "thread" and id(o.get("parent")) in ids and
+               o["feat"].get("visible", True)]
+    return {"gears": gears, "threads": threads}
+
+
+def _drawing_model_geometry(info, center, rotation):
+    """Gears and thread features moved into the drawing's frame (centred, quarter-turned)."""
+    if not info:
+        return [], []
+    move_point = lambda p: rotation @ (np.asarray(p, dtype=float) - center)
+    move_vector = lambda d: rotation @ np.asarray(d, dtype=float)
+    gears = []
+    for gear in info.get("gears") or []:
+        if "axis" in gear:
+            gears.append(dict(gear, axis=move_vector(gear["axis"]), origin=move_point(gear["origin"])))
+    threads = []
+    for feature in info.get("threads") or []:
+        try:
+            threads.append(dict(feature, axis=move_vector(feature["axis"]),
+                                point=move_point(feature["point"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return gears, threads
+
+
+def _drawing_assembly_geometry(info, center, rotation):
+    """Assembly components (box corners) and exploded-view traces in the drawing's frame."""
+    if not info:
+        return [], []
+    move = lambda p: rotation @ (np.asarray(p, dtype=float) - center)
+    components = []
+    for component in info.get("components") or []:
+        low, high = np.asarray(component["low"], dtype=float), np.asarray(component["high"], dtype=float)
+        corners = [move((x, y, z)) for x in (low[0], high[0]) for y in (low[1], high[1])
+                   for z in (low[2], high[2])]
+        components.append({"name": component["name"], "item": component["item"], "corners": corners})
+    traces = [(move(a), move(b)) for a, b in info.get("traces") or []]
+    return components, traces
+
+
+def _drawing_match_thread_features(threads, features):
+    """Each thread found on the mesh gets the Thread tool feature it was made with (same axis
+    line, nominal diameter within 15 %)."""
+    for thread in threads:
+        axis, point = np.asarray(thread["axis"], dtype=float), np.asarray(thread["point"], dtype=float)
+        for feature in features:
+            other = np.asarray(feature["axis"], dtype=float)
+            other = other / max(float(np.linalg.norm(other)), 1e-12)
+            offset = np.asarray(feature["point"], dtype=float) - point
+            off_axis = float(np.linalg.norm(offset - (offset @ axis) * axis))
+            nominal = float(feature.get("nominal", 0.0))
+            if abs(float(axis @ other)) > 0.999 and off_axis <= 0.1 * thread["major"] + 1e-6 and \
+                    abs(nominal / 2.0 - thread["major"]) <= 0.15 * thread["major"]:
+                thread["feature"] = feature
+                break
+
+
+def _drawing_gear_zone(V, edges, gears, span):
+    """Edges of gear teeth (between root and tip radius over the face width): the simplified
+    representation (ISO 2203) draws circles and lines instead."""
+    zone = np.zeros(len(edges), dtype=bool)
+    for gear in gears:
+        axis, origin = np.asarray(gear["axis"], dtype=float), np.asarray(gear["origin"], dtype=float)
+        relative = V - origin
+        along = relative @ axis
+        distance = np.linalg.norm(relative - np.outer(along, axis), axis=1)
+        margin = 0.3 * gear.get("module", 1.0) + span * 1e-6
+        low = min(gear["r_tip"], gear["r_root"]) - margin
+        high = max(gear["r_tip"], gear["r_root"]) + margin
+        inside = (distance >= low) & (distance <= high) & \
+            (along >= gear["z0"] - margin) & (along <= gear["z1"] + margin)
+        zone |= inside[edges[:, 0]] & inside[edges[:, 1]]
+    return zone
+
+
+def _drawing_gear_symbols(result, topology, right, up, normal):
+    """Simplified gears (ISO 2203): along the axis the tip circle thick, the pitch circle as a
+    chain line and the root circle thin; from the side the tip lines thick, the pitch line as a
+    chain line (2 mm beyond the faces) and the root lines thin, the faces as thick lines."""
+    thick, thin, chain = [], [], []
+
+    def flat(points):
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        return np.column_stack((points @ right, points @ up))
+
+    for gear in topology.get("gears") or ():
+        axis, origin = np.asarray(gear["axis"], dtype=float), np.asarray(gear["origin"], dtype=float)
+        along_normal = float(axis @ normal)
+        if abs(along_normal) > 0.999:
+            angles = np.linspace(0.0, 2.0 * math.pi, 145)
+            ring = np.outer(np.cos(angles), right) + np.outer(np.sin(angles), up)
+            for radius, target in ((gear["r_tip"], thick), (gear["r_pitch"], chain),
+                                   (gear["r_root"], thin)):
+                points = flat(origin + radius * ring)
+                target.extend(zip(points[:-1], points[1:]))
+        elif abs(along_normal) < 1e-3:
+            side = np.cross(axis, normal)
+            side /= np.linalg.norm(side)
+            z0, z1 = gear["z0"], gear["z1"]
+            beyond = 2.0 * max(gear.get("module", 1.0), 1.0)
+            for sign in (1.0, -1.0):
+                for radius, target, a, b in ((gear["r_tip"], thick, z0, z1),
+                                             (gear["r_pitch"], chain, z0 - beyond, z1 + beyond),
+                                             (gear["r_root"], thin, z0, z1)):
+                    ends = flat([origin + axis * a + side * sign * radius,
+                                 origin + axis * b + side * sign * radius])
+                    target.append((ends[0], ends[1]))
+            outer = max(gear["r_tip"], gear["r_root"])
+            for end in (z0, z1):
+                ends = flat([origin + axis * end + side * outer, origin + axis * end - side * outer])
+                thick.append((ends[0], ends[1]))
+            # helical / herringbone teeth: three thin lines at the helix angle (ISO 2203)
+            beta = math.radians(float(gear.get("helix", 0.0) or 0.0))
+            if abs(beta) > 1e-6 and z1 - z0 > 1e-6:
+                middle, reach = (z0 + z1) / 2.0, 0.6 * min(gear["r_tip"], gear["r_root"])
+                slope = math.tan(beta)
+                spacing = 0.18 * reach
+                for k in (-1, 0, 1):
+                    centre = origin + side * (k * spacing * 2.0)
+                    if gear.get("trace") == "herringbone":
+                        half = (z1 - z0) / 2.0 * 0.8
+                        points = [centre + axis * (middle - half) + side * (half * slope),
+                                  centre + axis * middle,
+                                  centre + axis * (middle + half) + side * (half * slope)]
+                        pts = flat(points)
+                        thin.extend([(pts[0], pts[1]), (pts[1], pts[2])])
+                    else:
+                        half = min((z1 - z0) / 2.0 * 0.8, reach / max(abs(slope), 1e-6))
+                        pts = flat([centre + axis * (middle - half) - side * (half * slope),
+                                    centre + axis * (middle + half) + side * (half * slope)])
+                        thin.append((pts[0], pts[1]))
+    as_array = lambda items: np.asarray(items, dtype=float).reshape(-1, 2, 2)
+    thick, thin, chain = as_array(thick), as_array(thin), as_array(chain)
+    result["visible"] = np.concatenate((result["visible"], thick))
+    result["visible_edges"] = np.concatenate((result["visible_edges"], np.full(len(thick), -1, dtype=int)))
+    result["thin"] = np.concatenate((result.get("thin", np.zeros((0, 2, 2))), thin))
+    result["chain"] = chain
+
+
+def _drawing_parts(entry, objects):
+    """Parts list of a sheet's model: the solid and its additive bodies (as drawn), alike bodies
+    (same shape and material) counted together; of an assembly its parts. [{"name", "qty",
+    "material"}]"""
+    if entry is None:
+        return []
+    if entry.get("type") == "assembly":
+        return [{"name": item["name"], "qty": item["qty"], "material": item["material"]}
+                for item in _drawing_assembly_items(assembly_from_data(entry.get("assembly_data")))]
+    bodies = [entry] + [o for o in entry_descendants(entry, objects)
+                        if o.get("type") == "extrusion" and not o.get("cut")
+                        and not o.get("preview") and o.get("solid") and entry_visible(o)]
+    parts, keys = [], {}
+    for body in bodies:
+        vertices = np.asarray(body["solid"][0], dtype=float).reshape(-1, 3)
+        extent = tuple(sorted(np.round(np.ptp(vertices, axis=0), 3).tolist())) if len(vertices) else ()
+        material = str(body.get("material", DEFAULT_MATERIAL))
+        key = (len(vertices), len(body["solid"][1]), extent, material)
+        if key in keys:
+            parts[keys[key]]["qty"] += 1
+            continue
+        keys[key] = len(parts)
+        parts.append({"name": str(body.get("name", "Part")), "qty": 1, "material": material})
+    return parts
+
+
 def _drawing_view_circles(topology, view):
     """Circles and arcs whose axis points at the viewer, de-duplicated (visible wins)."""
     found = {}
@@ -18515,6 +19859,8 @@ def _drawing_view_circles(topology, view):
                    round(item["radius"] / tolerance))
             if item.get("thread") is not None:          # a thread: drawn as its symbol
                 visible = bool(view.get("thread_visible", {}).get(item["thread"], False))
+            elif item.get("gear"):                      # a simplified gear's circles
+                visible = True
             else:
                 visible = bool(view["edge_visible"][item["edges"]].any()) \
                     if kind == "circle" else True
@@ -18577,17 +19923,68 @@ def _drawing_scale_text(page_units_per_mm):
     return f"{ratio:g}:1" if ratio >= 1 else f"1:{1 / ratio:g}"
 
 
-def _drawing_fmt(value):
-    text = f"{abs(value):.2f}".rstrip("0").rstrip(".")
-    return text or "0"
+# units of the printed lengths (per sheet): the model is in mm; an inch sheet prints the lengths
+# converted, a dual-unit sheet adds the other unit in brackets ("25 [0.984]")
+DRAWING_UNITS = {"mm": ("mm", 1.0, 2), "inch": ("in", 1.0 / 25.4, 3)}   # label, factor, decimals
+_DRAWING_UNITS = {"unit": "mm", "dual": False}
+
+
+def _drawing_units_of(options):
+    unit = options.get("unit") if options.get("unit") in DRAWING_UNITS else "mm"
+    return {"unit": unit, "dual": bool(options.get("dual_units"))}
+
+
+def _drawing_use_units(units):
+    """Make `units` the printed units; returns the previous ones (to restore them)."""
+    global _DRAWING_UNITS
+    previous = _DRAWING_UNITS
+    _DRAWING_UNITS = dict(units) if units else {"unit": "mm", "dual": False}
+    return previous
+
+
+def _drawing_other_unit():
+    return "inch" if _DRAWING_UNITS["unit"] == "mm" else "mm"
+
+
+def _drawing_unit_label():
+    """Unit field of the title block: mm, in, mm [in] or in [mm]."""
+    label = DRAWING_UNITS[_DRAWING_UNITS["unit"]][0]
+    if _DRAWING_UNITS["dual"]:
+        label += f" [{DRAWING_UNITS[_drawing_other_unit()][0]}]"
+    return label
+
+
+def _drawing_number(value, unit="mm"):
+    """A length in mm printed in `unit` (no trailing zeros)."""
+    _label, factor, places = DRAWING_UNITS[unit]
+    return tol_plain(abs(float(value)) * factor, places)
+
+
+def _drawing_fmt(value, convert=True):
+    """A printed length (sheet unit, the second unit in brackets on a dual-unit sheet);
+    convert=False: a plain number (angles, counts)."""
+    if not convert:
+        text = f"{abs(value):.2f}".rstrip("0").rstrip(".")
+        return text or "0"
+    text = _drawing_number(value, _DRAWING_UNITS["unit"])
+    if _DRAWING_UNITS["dual"]:
+        text += f" [{_drawing_number(value, _drawing_other_unit())}]"
+    return text
 
 
 def _drawing_dimension_value_text(dimension, prefix="", unit=""):
-    """Printed value of an added dimension, with its tolerance (ISO 286 fit, deviations, limits)."""
+    """Printed value of an added dimension, with its tolerance (ISO 286 fit, deviations, limits),
+    in the sheet's units; a reference (auxiliary) dimension is put in brackets."""
     value = float(dimension["value"])
-    if dimension.get("tol"):
-        return tol_format_dimension(abs(value), dimension["tol"], prefix, unit)
-    return f"{prefix}{_drawing_fmt(value)}{unit}"
+    if unit == "°":                                        # angles are not converted
+        text = tol_format_dimension(abs(value), dimension["tol"], prefix, unit) \
+            if dimension.get("tol") else f"{prefix}{_drawing_fmt(value, False)}{unit}"
+    else:
+        _label, factor, places = DRAWING_UNITS[_DRAWING_UNITS["unit"]]
+        text = tol_format_dimension(abs(value), dimension.get("tol"), prefix, "", factor, places)
+        if _DRAWING_UNITS["dual"]:
+            text += f" [{prefix}{_drawing_number(value, _drawing_other_unit())}]"
+    return f"({text})" if dimension.get("reference") else text
 
 
 def _drawing_prune(values, scale, metrics):
@@ -18614,13 +20011,97 @@ def _drawing_extras(values, reference, tolerance):
     return [values[0]] + extras if extras else []
 
 
+DRAWING_BREAK_GAP = 24.0             # gap of a broken view on the sheet (6 mm)
+
+
+def _drawing_clean_breaks(breaks, low, high):
+    """Breaks of a view [{"axis": "u" / "v", "a", "b"}] inside its bounds, sorted, without overlaps:
+    [{"k": 0 / 1, "a", "b"}]."""
+    cleaned = []
+    for item in breaks or ():
+        try:
+            k = 1 if item.get("axis") == "v" else 0
+            a, b = sorted((float(item["a"]), float(item["b"])))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        a, b = max(a, float(low[k])), min(b, float(high[k]))
+        if b - a <= 1e-6 * max(float(high[k] - low[k]), 1e-9):
+            continue
+        if any(other["k"] == k and a < other["b"] and b > other["a"] for other in cleaned):
+            continue
+        cleaned.append({"k": k, "a": a, "b": b})
+    return sorted(cleaned, key=lambda item: (item["k"], item["a"]))
+
+
+def _drawing_break_map(point, breaks, scale):
+    """View coordinates with the broken-out bands removed (the far side moved closer, the gap
+    left between them); a point inside a band moves onto its edge."""
+    mapped = [float(point[0]), float(point[1])]
+    for item in breaks:
+        k, value = item["k"], float(point[item["k"]])
+        if value >= item["b"]:
+            mapped[k] -= (item["b"] - item["a"]) - DRAWING_BREAK_GAP / scale
+        elif value > item["a"]:
+            mapped[k] -= value - item["a"]
+    return mapped[0], mapped[1]
+
+
+def _drawing_break_unmap(point, breaks, scale):
+    """Inverse of _drawing_break_map (a point in a gap goes to the near band edge)."""
+    real = [float(point[0]), float(point[1])]
+    for item in sorted(breaks, key=lambda b: b["a"], reverse=True):
+        k = item["k"]
+        if real[k] >= item["a"] + DRAWING_BREAK_GAP / scale:
+            real[k] += (item["b"] - item["a"]) - DRAWING_BREAK_GAP / scale
+        elif real[k] > item["a"]:
+            real[k] = item["a"] if real[k] - item["a"] < DRAWING_BREAK_GAP / scale / 2 else item["b"]
+    return real[0], real[1]
+
+
+def _drawing_break_segments(segments, breaks):
+    """Segments (n, 2, 2) without their pieces inside the broken-out bands."""
+    segments = np.asarray(segments, dtype=float).reshape(-1, 2, 2)
+    for item in breaks:
+        k, a, b = item["k"], item["a"], item["b"]
+        if not len(segments):
+            break
+        x0, x1 = segments[:, 0, k], segments[:, 1, k]
+        low, high = np.minimum(x0, x1), np.maximum(x0, x1)
+        keep = [segments[(high <= a) | (low >= b)]]
+        crossing = segments[~((high <= a) | (low >= b))]
+        if len(crossing):
+            c0, c1 = crossing[:, 0], crossing[:, 1]
+            span = c1[:, k] - c0[:, k]
+            safe = np.where(np.abs(span) < 1e-12, 1.0, span)
+
+            def at(value):
+                t = np.clip((value - c0[:, k]) / safe, 0.0, 1.0)[:, None]
+                return c0 + (c1 - c0) * t
+            first_low = np.where((c0[:, k] <= c1[:, k])[:, None], c0, c1)
+            first_high = np.where((c0[:, k] <= c1[:, k])[:, None], c1, c0)
+            below = np.minimum(c0[:, k], c1[:, k]) < a
+            above = np.maximum(c0[:, k], c1[:, k]) > b
+            moving = np.abs(span) >= 1e-12
+            keep.append(np.stack((first_low, at(a)), axis=1)[below & moving])
+            keep.append(np.stack((at(b), first_high), axis=1)[above & moving])
+        segments = np.concatenate(keep) if keep else np.zeros((0, 2, 2))
+    return segments
+
+
 class _DrawingPlacement:
     """One projected view placed on the sheet (page units, v pointing up)."""
 
-    def __init__(self, view, left, top, scale):
+    def __init__(self, view, left, top, scale, bounds=None, breaks=None):
         self.view, self.scale = view, scale
-        self.low, self.high = view["bounds"]
+        if bounds is not None:            # a detail view shows a part of its parent view
+            self.low, self.high = (np.asarray(bounds[0], dtype=float), np.asarray(bounds[1], dtype=float))
+        else:
+            self.low, self.high = view["bounds"]
+        # broken view (Phase 3): bands of the view left out, the rest moved together
+        self.breaks = _drawing_clean_breaks(breaks, self.low, self.high)
         size = (self.high - self.low) * scale
+        for item in self.breaks:
+            size[item["k"]] -= (item["b"] - item["a"]) * scale - DRAWING_BREAK_GAP
         self.rect = QRectF(left, top, float(size[0]), float(size[1]))
         self.reserved = {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
         self.hz, self.vt, self.circles = [], [], []
@@ -18632,6 +20113,8 @@ class _DrawingPlacement:
         self.centre_lines += [((u - reach, v), (u + reach, v)), ((u, v - reach), (u, v + reach))]
 
     def point(self, u, v):
+        if self.breaks:
+            u, v = _drawing_break_map((u, v), self.breaks, self.scale)
         return QPointF(self.rect.left() + (u - self.low[0]) * self.scale,
                        self.rect.bottom() - (v - self.low[1]) * self.scale)
 
@@ -18683,7 +20166,14 @@ def _drawing_font(height, bold=False):
 
 
 def _drawing_segments_path(place, segments):
-    """Path of projected segments; built once per view and only transformed for each redraw."""
+    """Path of projected segments; built once per view and only transformed for each redraw.
+    In a broken view the pieces inside the left-out bands are dropped and the rest moved."""
+    if getattr(place, "breaks", None):
+        path = QPainterPath()
+        for (ax, ay), (bx, by) in _drawing_break_segments(segments, place.breaks).tolist():
+            path.moveTo(place.point(ax, ay))
+            path.lineTo(place.point(bx, by))
+        return path
     cache = place.view.setdefault("_path_cache", {})
     entry = cache.get(id(segments))
     if entry is None or entry[0] is not segments:
@@ -18756,6 +20246,168 @@ def _paint_arrow(painter, tip, direction, length=14.0, ink=None):
     painter.drawPolygon(QPolygonF([tip, QPointF(base.x() - d[1] * half, base.y() + d[0] * half),
                                    QPointF(base.x() + d[1] * half, base.y() - d[0] * half)]))
     painter.restore()
+
+
+def _drawing_length_frame(first, second, dimension):
+    """Dimension line of a length dimension between two page points: (start, end, direction,
+    normal, distance). Aligned (default) or horizontal / vertical ("orient" "h" / "v": the
+    projected distance, extension lines of different length); None for a zero length."""
+    f, s = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
+    legacy = np.asarray(dimension.get("offset", (0.0, 0.0)), dtype=float)
+    orient = dimension.get("orient")
+    if orient in ("h", "v"):
+        axis = 0 if orient == "h" else 1
+        delta = float(s[axis] - f[axis])
+        if abs(delta) <= 1e-9:
+            return None
+        vector = np.zeros(2)
+        vector[axis] = 1.0 if delta > 0 else -1.0
+        normal = np.array((-vector[1], vector[0]))
+        distance = float(dimension.get("offset_distance", DRAWING_DIM_OFFSET + legacy @ normal))
+        level = (max if distance >= 0 else min)(float(f @ normal), float(s @ normal)) + distance
+        return (f + normal * (level - float(f @ normal)), s + normal * (level - float(s @ normal)),
+                vector, normal, distance)
+    vector = s - f
+    length = float(np.linalg.norm(vector))
+    if length <= 1e-9:
+        return None
+    vector = vector / length
+    normal = np.array((-vector[1], vector[0]))
+    distance = float(dimension.get("offset_distance", DRAWING_DIM_OFFSET + legacy @ normal))
+    return f + normal * distance, s + normal * distance, vector, normal, distance
+
+
+def _drawing_chamfer_values(a, b):
+    """Leg length and angle (≤ 45°, to the nearer axis of the view) of a chamfer edge a-b."""
+    du, dv = abs(float(b[0] - a[0])), abs(float(b[1] - a[1]))
+    if du < 1e-9 and dv < 1e-9:
+        return 0.0, 0.0
+    if du >= dv:          # the edge leans toward the horizontal: its horizontal leg and angle
+        return du, math.degrees(math.atan2(dv, du))
+    return dv, math.degrees(math.atan2(du, dv))
+
+
+def _drawing_chamfer_text(dimension):
+    """'2 × 45°' (DIN ISO 129: length × angle); a reference chamfer in brackets."""
+    angle = float(dimension.get("chamfer_angle", 45.0))
+    leg = _drawing_dimension_value_text(dict(dimension, reference=False))
+    text = f"{leg} × {round(angle * 2) / 2:g}°"
+    return f"({text})" if dimension.get("reference") else text
+
+
+def _paint_extra_dimension(painter, dimension, to_page, unit, pen, ink, font, background):
+    """Chamfer (leader to 'length × angle'), arc length (concentric arc with '⌒ value') and
+    ordinate (a line from the point to its coordinate) dimensions. `to_page` maps view
+    coordinates to painter coordinates, sizes are page units * `unit`. Returns the text box."""
+    kind = dimension.get("type")
+    points = dimension.get("points") or []
+    metrics = QFontMetricsF(font)
+    painter.save()
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    painter.setFont(font)
+    arrow_length = max(5.0, 14.0 * unit)
+
+    def label(text, centre):
+        width = metrics.horizontalAdvance(text) + 8.0 * unit
+        height = metrics.height() + 4.0 * unit
+        rect = QRectF(centre.x() - width / 2, centre.y() - height / 2, width, height)
+        if background is not None:
+            painter.fillRect(rect, background)
+        painter.setPen(ink)
+        painter.drawText(rect, Qt.AlignCenter, text)
+        painter.setPen(pen)
+        return rect
+
+    try:
+        if kind == "chamfer" and len(points) >= 2:
+            a, b = to_page(*points[0]), to_page(*points[1])
+            middle = QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
+            offset = dimension.get("text_offset") or (60.0, -50.0)
+            target = QPointF(middle.x() + offset[0] * unit, middle.y() + offset[1] * unit)
+            text = _drawing_chamfer_text(dimension)
+            width = metrics.horizontalAdvance(text) + 8.0 * unit
+            # leader to a shelf under the text (DIN ISO 129-1 chamfer callout)
+            shelf = QPointF(target.x() + (width if target.x() >= middle.x() else -width), target.y())
+            painter.drawLine(middle, target)
+            painter.drawLine(target, shelf)
+            direction = np.array((middle.x() - target.x(), middle.y() - target.y()))
+            if float(np.linalg.norm(direction)) > 1.2 * arrow_length:
+                _paint_arrow(painter, middle, direction / float(np.linalg.norm(direction)),
+                             arrow_length, ink)
+            painter.setPen(ink)
+            left = min(target.x(), shelf.x()) + 4.0 * unit
+            painter.drawText(QPointF(left, target.y() - 3.0 * unit - metrics.descent()), text)
+            return QRectF(min(target.x(), shelf.x()), target.y() - metrics.height() - 4 * unit,
+                          width, metrics.height() + 6 * unit)
+        if kind == "arc" and len(points) >= 3:
+            centre, start, end = (to_page(*point) for point in points[:3])
+            angle_a = math.degrees(math.atan2(centre.y() - start.y(), start.x() - centre.x()))
+            angle_b = math.degrees(math.atan2(centre.y() - end.y(), end.x() - centre.x()))
+            sweep = (angle_b - angle_a) % 360.0
+            if dimension.get("sweep_negative"):
+                sweep -= 360.0
+            radius = math.hypot(start.x() - centre.x(), start.y() - centre.y())
+            dimension_radius = float(dimension["offset_distance"]) * unit \
+                if "offset_distance" in dimension else radius + 24.0 * unit
+            # extension lines along the radius from the arc ends, the dimension arc with arrows
+            for angle in (angle_a, angle_a + sweep):
+                t = math.radians(angle)
+                inner = radius + (8.0 * unit if dimension_radius > radius else -8.0 * unit)
+                outer = dimension_radius + (8.0 * unit if dimension_radius > radius else -8.0 * unit)
+                painter.drawLine(QPointF(centre.x() + math.cos(t) * inner, centre.y() - math.sin(t) * inner),
+                                 QPointF(centre.x() + math.cos(t) * outer, centre.y() - math.sin(t) * outer))
+            painter.drawArc(QRectF(centre.x() - dimension_radius, centre.y() - dimension_radius,
+                                   2 * dimension_radius, 2 * dimension_radius),
+                            int(angle_a * 16), int(sweep * 16))
+            direction_sign = 1.0 if sweep >= 0 else -1.0
+            for end_angle, outward in ((angle_a, 1.0), (angle_a + sweep, -1.0)):
+                t = math.radians(end_angle)
+                _paint_arrow(painter, QPointF(centre.x() + math.cos(t) * dimension_radius,
+                                              centre.y() - math.sin(t) * dimension_radius),
+                             (outward * direction_sign * math.sin(t), outward * direction_sign * math.cos(t)),
+                             arrow_length, ink)
+            middle = math.radians(angle_a + sweep / 2)
+            text = _drawing_dimension_value_text(dimension, "⌒")
+            reach = dimension_radius + metrics.height() * 0.9
+            offset = dimension.get("text_offset") or (0.0, 0.0)
+            anchor = QPointF(centre.x() + math.cos(middle) * reach + offset[0] * unit,
+                             centre.y() - math.sin(middle) * reach + offset[1] * unit)
+            return label(text, anchor)
+        if kind == "ordinate" and len(points) >= 2:
+            origin, point = to_page(*points[0]), to_page(*points[1])
+            horizontal = dimension.get("axis", "x") == "x"     # an x coordinate: a vertical line
+            level = float(dimension.get("level", 40.0)) * unit
+            if horizontal:
+                end = QPointF(point.x(), origin.y() + level)
+                gap = 8.0 * unit if end.y() > point.y() else -8.0 * unit
+                start = QPointF(point.x(), point.y() + gap)
+            else:
+                end = QPointF(origin.x() + level, point.y())
+                gap = 8.0 * unit if end.x() > point.x() else -8.0 * unit
+                start = QPointF(point.x() + gap, point.y())
+            if math.hypot(end.x() - start.x(), end.y() - start.y()) > 2 * unit:
+                painter.drawLine(start, end)
+            text = _drawing_dimension_value_text(dimension)
+            width = metrics.horizontalAdvance(text)
+            painter.setPen(ink)
+            if horizontal:         # the number continues the line, readable from the right
+                painter.save()
+                painter.translate(end)
+                painter.rotate(-90)
+                down = level >= 0
+                x0 = -width - 4.0 * unit if down else 4.0 * unit
+                painter.drawText(QPointF(x0, metrics.ascent() / 2 - metrics.descent() / 2), text)
+                painter.restore()
+                return QRectF(end.x() - metrics.height() / 2, end.y() + (0 if down else -width - 4 * unit),
+                              metrics.height(), width + 4 * unit)
+            left = level < 0
+            x0 = end.x() - width - 4.0 * unit if left else end.x() + 4.0 * unit
+            painter.drawText(QPointF(x0, end.y() + metrics.ascent() / 2 - metrics.descent() / 2), text)
+            return QRectF(x0, end.y() - metrics.height() / 2, width, metrics.height())
+        return None
+    finally:
+        painter.restore()
 
 
 def _paint_radial_dimension(painter, center, edge, text, diameter, scale, ink, background,
@@ -18895,6 +20547,82 @@ def _paint_weld_symbol(painter, kind, x, y, size, side):
                                         point(0.5, 0)]))
 
 
+DRAWING_DEPTH, DRAWING_CBORE, DRAWING_CSK = "↧", "⌴", "⌵"      # ISO 129-1 / ASME Y14.5 symbols
+
+
+def _drawing_callout_lines(ann):
+    """Text lines of a hole or thread callout in the sheet's units ('4× Ø6.6 THRU',
+    '⌴ Ø11 ↧6.8', 'M8-6H ↧16')."""
+    count = f"{ann['count']}× " if ann.get("count", 1) > 1 else ""
+    if ann["kind"] == "hole":
+        head = f"{count}Ø{_drawing_fmt(ann['d'])}"
+        head += " THRU" if ann["through"] else f" {DRAWING_DEPTH}{_drawing_fmt(ann['depth'])}"
+        lines = [head]
+        if ann.get("cbore"):
+            lines.append(f"{DRAWING_CBORE} Ø{_drawing_fmt(ann['cbore'][0])} "
+                         f"{DRAWING_DEPTH}{_drawing_fmt(ann['cbore'][1])}")
+        if ann.get("csk"):
+            lines.append(f"{DRAWING_CSK} Ø{_drawing_fmt(ann['csk'][0])} × {ann['csk'][1]:g}°")
+        return lines
+    text = count + (ann["label_pitch"] if ann.get("show_pitch") else ann["label"])
+    if ann.get("cls"):
+        text += f"-{ann['cls']}"
+    if ann.get("hand") == "left":                       # ISO 965 / ASME: left-hand marking
+        text += "-LH"
+    if ann.get("internal"):
+        if ann.get("through"):
+            text += " THRU"
+        elif ann.get("length", 0.0) > 0:
+            text += f" {DRAWING_DEPTH}{_drawing_fmt(ann['length'])}"
+    return [text]
+
+
+def _paint_leader_text(painter, lines, tip, anchor, u, pen, ink, font, leader=True, frame=False):
+    """Text lines on a shelf at `anchor`, tied to `tip` by a leader with an arrow (hole / thread
+    callouts, notes); without a leader the text block's top left corner is `anchor`. Returns
+    its bounding rectangle."""
+    metrics = QFontMetricsF(font)
+    lines = [line for line in lines] or [""]
+    width = max(metrics.horizontalAdvance(line) for line in lines)
+    step = metrics.height()
+    painter.setFont(font)
+    if not leader:
+        box = QRectF(anchor.x(), anchor.y(), width + 0.8 * u, step * len(lines) + 0.5 * u)
+        painter.setPen(ink)
+        for index, line in enumerate(lines):
+            painter.drawText(QPointF(box.left() + 0.4 * u, box.top() + 0.25 * u + metrics.ascent()
+                                     + index * step), line)
+        if frame:
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(box)
+        return box
+    right_side = anchor.x() >= tip.x()
+    shelf_end = QPointF(anchor.x() + (1 if right_side else -1) * (width + 0.8 * u), anchor.y())
+    left = min(anchor.x(), shelf_end.x()) + 0.4 * u
+    direction = np.array((tip.x() - anchor.x(), tip.y() - anchor.y()), dtype=float)
+    length = float(np.linalg.norm(direction))
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    if length > 1e-6:
+        painter.drawLine(anchor, tip)
+        arrow = max(5.0, u)
+        if length > 1.2 * arrow:
+            _paint_arrow(painter, tip, direction / length, arrow, ink)
+    painter.drawLine(anchor, shelf_end)
+    painter.setPen(ink)
+    # the first line sits on the shelf, the others below it
+    painter.drawText(QPointF(left, anchor.y() - 0.3 * u - metrics.descent()), lines[0])
+    for index, line in enumerate(lines[1:]):
+        painter.drawText(QPointF(left, anchor.y() + 0.3 * u + metrics.ascent() + index * step), line)
+    box = QRectF(min(anchor.x(), shelf_end.x()), anchor.y() - step - 0.3 * u,
+                 abs(shelf_end.x() - anchor.x()), step * len(lines) + 0.6 * u)
+    if frame:
+        painter.setPen(pen)
+        painter.drawRect(box)
+    return box
+
+
 def _paint_annotation(painter, ann, tip, offset, unit, pen, ink, text_height=None):
     """One geometric tolerance frame, datum, surface finish or weld symbol: its leader ends at
     `tip` (an arrow on the feature), the frame / symbol sits at tip + offset. Sizes are page units
@@ -18912,7 +20640,7 @@ def _paint_annotation(painter, ann, tip, offset, unit, pen, ink, text_height=Non
     painter.setBrush(Qt.NoBrush)
     painter.setFont(font)
     kind = ann["kind"]
-    bounds = QRectF(tip, tip).normalized()
+    bounds = QRectF(anchor, anchor)          # the symbol / text only, without its leader
 
     def leader(target, with_arrow=True):
         direction = np.array((tip.x() - target.x(), tip.y() - target.y()), dtype=float)
@@ -19005,6 +20733,32 @@ def _paint_annotation(painter, ann, tip, offset, unit, pen, ink, text_height=Non
             painter.drawText(QPointF(long_leg.x() + 0.3 * u, long_leg.y() + 1.2 * u), extras)
         bounds = bounds.united(QRectF(short_leg.x(), long_leg.y() - 1.6 * s,
                                       bar_end.x() - short_leg.x(), 3.2 * s))
+    elif kind in ("note", "hole", "thread"):
+        lines = ann["text"].splitlines() if kind == "note" else _drawing_callout_lines(ann)
+        leader_on = kind != "note" or ann["leader"]
+        box = _paint_leader_text(painter, lines, tip, anchor, u, pen, ink, font, leader=leader_on,
+                                 frame=kind == "note" and ann["frame"])
+        bounds = bounds.united(box)
+    elif kind == "balloon":
+        number = str(ann["item"])
+        big = _drawing_font(max(6.0, 1.4 * u))
+        radius = max(1.25 * u, QFontMetricsF(big).horizontalAdvance(number) / 2 + 0.4 * u)
+        direction = np.array((tip.x() - anchor.x(), tip.y() - anchor.y()), dtype=float)
+        length = float(np.linalg.norm(direction))
+        painter.setPen(pen)
+        if length > radius + 1e-6:
+            direction /= length
+            start = QPointF(anchor.x() + direction[0] * radius, anchor.y() + direction[1] * radius)
+            painter.drawLine(start, tip)
+            painter.setBrush(ink)                    # ISO 6433: a dot where the leader ends on the part
+            painter.drawEllipse(tip, 0.22 * u, 0.22 * u)
+            painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(anchor, radius, radius)
+        painter.setFont(big)
+        painter.setPen(ink)
+        circle = QRectF(anchor.x() - radius, anchor.y() - radius, 2 * radius, 2 * radius)
+        painter.drawText(circle, Qt.AlignCenter, number)
+        bounds = bounds.united(circle)
     else:
         s = 0.95 * u
         direction = 1.0 if offset[0] >= 0 else -1.0
@@ -19040,7 +20794,7 @@ def _paint_annotation(painter, ann, tip, offset, unit, pen, ink, text_height=Non
         bounds = bounds.united(QRectF(min(anchor.x(), end.x()), anchor.y() - 1.8 * s,
                                       abs(end.x() - anchor.x()), 3.6 * s))
     painter.restore()
-    return bounds.adjusted(-4, -4, 4, 4)
+    return bounds.adjusted(-4 * unit, -4 * unit, 4 * unit, 4 * unit)
 
 
 def _paint_hz_dimension(painter, metrics, x0, x1, y, edge_y, sign, text):
@@ -19119,8 +20873,10 @@ def _paint_centre_mark(painter, centre, radius):
     painter.drawLine(QPointF(centre.x(), centre.y() - reach), QPointF(centre.x(), centre.y() + reach))
 
 
-def _paint_circles(painter, metrics, place):
-    """Centre lines of circles; Ø leaders for circles and R leaders for arcs, grouped by size."""
+def _paint_circles(painter, metrics, place, topology=None):
+    """Centre lines of circles; Ø leaders for circles and R leaders for arcs, grouped by size.
+    With the part's `topology` a hole's leader also says THRU or its depth, and a counterbore or
+    countersink at its entry on the lines below (hole callout, ISO 129-1)."""
     tolerance = max(place.view["extent"] * 1e-4, 1e-6)
     counts = collections.Counter((c["kind"], round(c["radius"] / tolerance)) for c in place.circles)
     done = set()
@@ -19144,7 +20900,24 @@ def _paint_circles(painter, metrics, place):
         start = QPointF(centre.x() + direction[0] * radius, centre.y() + direction[1] * radius)
         knee = QPointF(start.x() + direction[0] * 30, start.y() + direction[1] * 30)
         text = ("" if counts[key] == 1 else f"{counts[key]}× ") + prefix + _drawing_fmt(value)
-        width = metrics.horizontalAdvance(text)
+        below = []
+        if circle["kind"] == "circle" and topology is not None and "normal" in place.view:
+            # the leader stands for every circle of this size: only what they all share is added
+            found = []
+            for other in place.circles:
+                if (other["kind"], round(other["radius"] / tolerance)) != key:
+                    continue
+                hole = _drawing_hole_at(topology, place.view, (other["u"], other["v"]), tolerance)
+                found.append(hole if hole is not None and
+                             abs(hole["d"] - value) <= max(1e-3 * value, 1e-6) else None)
+            if found and all(hole is not None for hole in found):
+                lines = _drawing_callout_lines(dict(found[0], kind="hole", count=1))
+                if len({_drawing_hole_signature(hole) for hole in found}) == 1:
+                    text += lines[0][len("Ø" + _drawing_fmt(found[0]["d"])):]
+                    below = lines[1:]
+                elif len({(hole["through"], round(hole["depth"], 2)) for hole in found}) == 1:
+                    text += lines[0][len("Ø" + _drawing_fmt(found[0]["d"])):]
+        width = max([metrics.horizontalAdvance(text)] + [metrics.horizontalAdvance(line) for line in below])
         side = 1 if direction[0] >= 0 else -1
         shelf = QPointF(knee.x() + side * (width + 8), knee.y())
         painter.setPen(_drawing_pen(DRAWING_THIN))
@@ -19152,7 +20925,10 @@ def _paint_circles(painter, metrics, place):
         painter.drawLine(knee, shelf)
         _paint_arrow(painter, start, -direction)
         painter.setPen(_drawing_pen(1))
-        painter.drawText(QPointF(knee.x() + (4 if side > 0 else -width - 4), knee.y() - 4), text)
+        left = knee.x() + (4 if side > 0 else -width - 4)
+        painter.drawText(QPointF(left, knee.y() - 4), text)
+        for index, line in enumerate(below):
+            painter.drawText(QPointF(left, knee.y() + 4 + metrics.ascent() + index * metrics.height()), line)
 
 
 def _drawing_cut_sides(place, cut_normal):
@@ -19209,38 +20985,117 @@ def _paint_cut_line(painter, metrics, place, cut_normal, letter, offset=0.0):
                                  tip.y() + sight[1] * 18 + 6), letter)
 
 
-def _paint_section_fill(painter, place, loops):
-    """White cut face with 45° hatching (even-odd, so holes stay open)."""
-    contours = [[place.point(p[0], p[1]) for p in loop] for loop in loops]
-    path = QPainterPath()
-    path.setFillRule(Qt.OddEvenFill)
-    for contour in contours:
-        path.moveTo(contour[0])
-        for point in contour[1:]:
-            path.lineTo(point)
-        path.closeSubpath()
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(_drawing_color("section_fill"))
-    painter.drawPath(path)
-    painter.setBrush(Qt.NoBrush)
-    painter.setPen(_drawing_pen(DRAWING_THIN, role="hatch"))
-    bounds = path.boundingRect()
-    level, end = bounds.left() + bounds.top(), bounds.right() + bounds.bottom()
-    while level <= end:
-        hits = []
-        for contour in contours:
-            for i, a in enumerate(contour):
-                b = contour[i - 1]
-                sa, sb = a.x() + a.y(), b.x() + b.y()
-                if (sa <= level < sb) or (sb <= level < sa):
-                    f = (level - sa) / (sb - sa)
-                    hits.append(QPointF(a.x() + (b.x() - a.x()) * f, a.y() + (b.y() - a.y()) * f))
-        hits.sort(key=lambda p: p.x())
-        for i in range(0, len(hits) - 1, 2):
-            painter.drawLine(hits[i], hits[i + 1])
-        level += 14
-    painter.setPen(_drawing_pen(DRAWING_THICK, role="visible"))
-    painter.drawPath(path)
+# section hatching by material (DIN ISO 128-50 general hatching; DIN 201 style variants):
+# (title, [(direction 1 = 45° / -1 = 135°, offsets within one period)], period in page units)
+DRAWING_HATCHES = {
+    "general": ("General (45°)", [(1, (0.0,))], 14.0),
+    "metal": ("Steel / metal (45°)", [(1, (0.0,))], 14.0),
+    "nonferrous": ("Non-ferrous metal (double lines)", [(1, (0.0, 4.0))], 20.0),
+    "plastic": ("Plastic (cross-hatched)", [(1, (0.0,)), (-1, (0.0,))], 16.0),
+    "rubber": ("Rubber / seals (dense)", [(1, (0.0,))], 7.0),
+}
+DRAWING_HATCH_WORDS = (
+    ("plastic", ("plastic", "kunststoff", "pa6", "pa 6", "pa12", "pom", "pe-", "pp", "abs", "pla",
+                 "petg", "peek", "pvc", "nylon", "ptfe", "acryl", "pmma", "pc ")),
+    ("rubber", ("rubber", "gummi", "nbr", "epdm", "silicone", "silikon", "fkm", "viton")),
+    ("nonferrous", ("alumin", "alu", "aw-", "en aw", "copper", "kupfer", "brass", "messing",
+                    "bronze", "cuzn", "cusn", "titan", "magnes", "zinc", "zink")),
+    ("metal", ("steel", "stahl", "s235", "s355", "c45", "42crmo", "1.4", "iron", "eisen", "gj",
+               "inox", "x5cr")),
+)
+
+
+def _drawing_hatch_pattern(options):
+    """Hatch pattern key of a sheet: chosen, or from its material ('auto')."""
+    choice = options.get("hatch") or "auto"
+    if choice in DRAWING_HATCHES:
+        return choice
+    material = f" {str(options.get('material') or options.get('_model_material') or '').lower()} "
+    for key, words in DRAWING_HATCH_WORDS:
+        if any(word in material for word in words):
+            return key
+    return "general"
+
+
+def _paint_section_fill(painter, place, loops, regions=None, pattern="general", to_page=None,
+                        outline=DRAWING_THICK, clip_path=None):
+    """White cut faces with hatching (even-odd, so holes stay open). `regions` [(loops, bodies,
+    (u0, v0, u1, v1) or None)] keep each set of loops in its range of the view; the faces of
+    different bodies are hatched in opposite directions. `to_page` maps view coordinates."""
+    to_page = to_page or place.point
+    if regions is None:
+        regions = [(loops, [0] * len(loops), None)]
+    groups = {}
+    for region_loops, bodies, rect in regions:
+        per_body = collections.defaultdict(list)
+        for loop, body in zip(region_loops, list(bodies) + [0] * (len(region_loops) - len(bodies))):
+            per_body[body].append(loop)
+        clip = None
+        if rect is not None:
+            corners = [to_page(rect[0], rect[1]), to_page(rect[2], rect[1]),
+                       to_page(rect[2], rect[3]), to_page(rect[0], rect[3])]
+            clip = QPainterPath()
+            clip.addPolygon(QPolygonF(corners))
+            clip.closeSubpath()
+        for body, body_loops in per_body.items():
+            path = QPainterPath()
+            path.setFillRule(Qt.OddEvenFill)
+            for loop in body_loops:
+                contour = [to_page(p[0], p[1]) for p in loop]
+                path.moveTo(contour[0])
+                for point in contour[1:]:
+                    path.lineTo(point)
+                path.closeSubpath()
+            if clip is not None:
+                path = path.intersected(clip)
+            groups[body] = groups[body].united(path) if body in groups else path
+    style = DRAWING_HATCHES.get(pattern, DRAWING_HATCHES["general"])
+    for index, body in enumerate(sorted(groups)):
+        path = groups[body]
+        if clip_path is not None:                  # e.g. the circle of a detail view
+            path = path.intersected(clip_path)
+        if path.isEmpty():
+            continue
+        # plain coordinates (QPointF items of a temporary QPolygonF must not outlive it)
+        polygons = path.toSubpathPolygons()
+        contours = [[(polygon.at(i).x(), polygon.at(i).y()) for i in range(polygon.count())]
+                    for polygon in polygons if polygon.count() >= 3]
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(_drawing_color("section_fill"))
+        painter.drawPath(path)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(_drawing_pen(DRAWING_THIN, role="hatch"))
+        bounds = path.boundingRect()
+        flip = -1 if index % 2 else 1                 # touching parts: opposite directions
+        for direction, offsets in style[1]:
+            sign = direction * flip                   # 1: lines x + y = level (45°), -1: x - y
+            if sign > 0:
+                start, end = bounds.left() + bounds.top(), bounds.right() + bounds.bottom()
+            else:
+                start, end = bounds.left() - bounds.bottom(), bounds.right() - bounds.top()
+            base = start
+            while base <= end:
+                for shift in offsets:
+                    level = base + shift
+                    hits = []
+                    for contour in contours:
+                        for i, (ax, ay) in enumerate(contour):
+                            bx, by = contour[i - 1]
+                            sa, sb = ax + sign * ay, bx + sign * by
+                            if (sa <= level < sb) or (sb <= level < sa):
+                                f = (level - sa) / (sb - sa)
+                                hits.append(QPointF(ax + (bx - ax) * f, ay + (by - ay) * f))
+                    hits.sort(key=lambda p: p.x())
+                    # every piece between neighbouring crossings whose middle lies in the face
+                    # (robust against the slivers boolean path operations can leave)
+                    for a, b in zip(hits, hits[1:]):
+                        if abs(b.x() - a.x()) + abs(b.y() - a.y()) < 0.5:
+                            continue
+                        if path.contains(QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)):
+                            painter.drawLine(a, b)
+                base += style[2]
+        painter.setPen(_drawing_pen(outline, role="visible"))
+        painter.drawPath(path)
 
 
 def _drawing_shaded_image(view, face_normals, tint=None):
@@ -19358,16 +21213,18 @@ def _paint_title_block(painter, options, scale_text):
     rows = (
         (("Title", options.get("title", ""), 0.62, DRAWING_TEXT_LARGE),
          ("Drawing no.", options.get("number", ""), 0.38, DRAWING_TEXT)),
-        (("Project", options.get("project", ""), 0.42, DRAWING_TEXT),
-         ("Created by", options.get("author", ""), 0.33, DRAWING_TEXT),
-         ("Date", options.get("date", ""), 0.25, DRAWING_TEXT)),
-        (("Version", options.get("version", ""), 0.35, DRAWING_TEXT),
-         ("Sheet", options.get("page", ""), 0.30, DRAWING_TEXT),
-         ("Scale", scale_text, 0.35, DRAWING_TEXT)),
-        (("General tolerances", options.get("tolerance", ""), 0.30, DRAWING_TEXT),
-         ("Surface", options.get("surface", ""), 0.22, DRAWING_TEXT),
-         ("Unit", "mm", 0.10, DRAWING_TEXT),
-         ("Projection", None, 0.38, DRAWING_TEXT)),
+        (("Project", options.get("project", ""), 0.32, DRAWING_TEXT),
+         ("Created by", options.get("author", ""), 0.26, DRAWING_TEXT),
+         ("Date", options.get("date", ""), 0.22, DRAWING_TEXT),
+         ("Version", options.get("version", ""), 0.20, DRAWING_TEXT)),
+        (("Material", options.get("material", ""), 0.40, DRAWING_TEXT),
+         ("Surface treatment", options.get("treatment", ""), 0.38, DRAWING_TEXT),
+         ("Sheet", options.get("page", ""), 0.22, DRAWING_TEXT)),
+        (("General tolerances", options.get("tolerance", ""), 0.27, DRAWING_TEXT),
+         ("Surface", options.get("surface", ""), 0.19, DRAWING_TEXT),
+         ("Unit", _drawing_unit_label(), 0.15, DRAWING_TEXT),
+         ("Scale", scale_text, 0.15, DRAWING_TEXT),
+         ("Projection", None, 0.24, DRAWING_TEXT)),
     )
     row_height = height / len(rows)
     label_font = _drawing_font(DRAWING_TEXT_SMALL)
@@ -19400,6 +21257,221 @@ def _paint_title_block(painter, options, scale_text):
     painter.restore()
 
 
+def _drawing_title_box():
+    """(x, y, width) of the title block on the current sheet."""
+    width = min(DRAWING_TITLE_W, _DRAWING_PAGE["w"] - DRAWING_BORDER[0] - DRAWING_BORDER[2])
+    return (_DRAWING_PAGE["w"] - DRAWING_BORDER[2] - width,
+            _DRAWING_PAGE["h"] - DRAWING_BORDER[3] - DRAWING_TITLE_H, width)
+
+
+def _paint_table(painter, x, bottom, columns, rows, width=None):
+    """A table drawn upwards from `bottom` (ISO 7573 parts lists grow from the title block up):
+    `columns` [(heading, share of the width, alignment)], `rows` lists of cell texts (first row
+    lowest, the heading row on top). x is the left edge, the width that of the title block
+    unless given. Returns the top edge."""
+    width = width or _drawing_title_box()[2]
+    row_height = 36.0
+    font = _drawing_font(DRAWING_TEXT)
+    label_font = _drawing_font(DRAWING_TEXT_SMALL)
+    painter.save()
+    painter.setBrush(Qt.NoBrush)
+    y = bottom
+    lines = list(rows) + [None]                         # None: the heading row (on top)
+    for row in lines:
+        top = y - row_height
+        cursor = x
+        painter.setPen(_drawing_pen(DRAWING_FIELD_LINE, role="frame"))
+        painter.drawRect(QRectF(x, top, width, row_height))
+        for index, (heading, share, align) in enumerate(columns):
+            cell = QRectF(cursor, top, width * share, row_height)
+            if index:
+                painter.setPen(_drawing_pen(DRAWING_FIELD_LINE, role="frame"))
+                painter.drawLine(QPointF(cursor, top), QPointF(cursor, top + row_height))
+            text = heading if row is None else str(row[index])
+            painter.setFont(label_font if row is None else font)
+            painter.setPen(_drawing_color("label" if row is None else "text"))
+            inner = cell.adjusted(6, 0, -6, 0)
+            painter.drawText(inner, (Qt.AlignLeft if row is None else align) | Qt.AlignVCenter,
+                             QFontMetricsF(painter.font()).elidedText(text, Qt.ElideRight,
+                                                                      int(inner.width())))
+            cursor += width * share
+        y = top
+    painter.setPen(_drawing_pen(DRAWING_FRAME_LINE * 0.5, role="frame"))
+    painter.drawRect(QRectF(x, y, width, bottom - y))
+    painter.restore()
+    return y
+
+
+def _paint_sheet_tables(painter, options):
+    """Above the title block: the parts list (item, name, quantity, material; numbered from the
+    bottom up, ISO 7573), above it the general notes of the sheet."""
+    x, top, width = _drawing_title_box()
+    parts = options.get("parts") if options.get("parts_list") else None
+    if parts:
+        rows = [(str(index + 1), part.get("name", ""), str(part.get("qty", 1)), part.get("material", ""))
+                for index, part in enumerate(parts)]
+        top = _paint_table(painter, x, top, (("Item", 0.10, Qt.AlignCenter),
+                                             ("Name", 0.48, Qt.AlignLeft),
+                                             ("Qty", 0.10, Qt.AlignCenter),
+                                             ("Material", 0.32, Qt.AlignLeft)), rows)
+    notes = str(options.get("notes") or "").strip()
+    if notes:
+        font = _drawing_font(DRAWING_TEXT)
+        metrics = QFontMetricsF(font)
+        lines = []
+        for line in notes.splitlines():           # wrapped to the width of the title block
+            words, current = line.split(" "), ""
+            for word in words:
+                trial = f"{current} {word}".strip()
+                if current and metrics.horizontalAdvance(trial) > width - 12:
+                    lines.append(current)
+                    current = word
+                else:
+                    current = trial
+            lines.append(current)
+        step = metrics.height() * 1.15
+        y = top - 12 - step * (len(lines) - 1)
+        painter.save()
+        painter.setFont(_drawing_font(DRAWING_TEXT, True))
+        painter.setPen(_drawing_color("text"))
+        painter.drawText(QPointF(x, y - step), "Notes")
+        painter.setFont(font)
+        for index, line in enumerate(lines):
+            painter.drawText(QPointF(x, y + index * step), line)
+        painter.restore()
+
+
+def _paint_stackup_tables(painter, options):
+    """Tolerance stack-ups shown on the sheet (Phase 5): the chain with its deviations and the
+    worst-case / statistical totals against the limits. Rows taken from a dimension follow it."""
+    general = options.get("tolerance") or "ISO 2768-m"
+    dimensions = options.get("dimensions") or []
+    for stackup in options.get("stackups") or []:
+        if not stackup.get("show") or "x" not in stackup:
+            continue
+        rows = []
+        for row in stackup.get("rows", ()):
+            row = dict(row)
+            index = row.get("dim")
+            if isinstance(index, int) and 0 <= index < len(dimensions) and "value" in dimensions[index]:
+                dimension = dimensions[index]
+                row["nominal"] = abs(float(dimension["value"]))
+                row["upper"], row["lower"] = tol_dimension_deviations(
+                    row["nominal"], dimension.get("tol"), general)
+            rows.append(row)
+        if not rows:
+            continue
+        result = tol_stackup(rows, stackup.get("min"), stackup.get("max"))
+        number = lambda value: f"{value:+.3f}"
+        lines = [(row.get("name", ""), "+" if row.get("sign", 1) >= 0 else "−",
+                  _drawing_fmt(row["nominal"]), number(row["upper"]), number(row["lower"])) for row in rows]
+        limits = f"{'' if stackup.get('min') is None else _drawing_fmt(stackup['min'])} … " \
+                 f"{'' if stackup.get('max') is None else _drawing_fmt(stackup['max'])}"
+        lines += [(f"{stackup.get('name', 'Gap')} nominal", "=", f"{result['nominal']:.3f}", "", ""),
+                  ("Worst case", "", f"{result['worst'][0]:.3f} … {result['worst'][1]:.3f}",
+                   "OK" if result["worst_ok"] else "NOT OK", ""),
+                  ("Statistical (RSS)", "", f"{result['rss'][0]:.3f} … {result['rss'][1]:.3f}",
+                   "OK" if result["rss_ok"] else "NOT OK", ""),
+                  ("Required", "", limits, "", "")]
+        font = _drawing_font(DRAWING_TEXT)
+        metrics = QFontMetricsF(font)
+        headings = ("Tolerance stack-up", "±", "Nominal", "Upper", "Lower")
+        widths = [max([metrics.horizontalAdvance(heading)] +
+                      [metrics.horizontalAdvance(str(line[index])) for line in lines]) + 20.0
+                  for index, heading in enumerate(headings)]
+        total = sum(widths)
+        columns = tuple((heading, width / total, align) for heading, width, align in zip(
+            headings, widths, (Qt.AlignLeft, Qt.AlignCenter, Qt.AlignRight, Qt.AlignRight, Qt.AlignRight)))
+        x, y = float(stackup["x"]), float(stackup.get("y", 80.0))
+        _paint_table(painter, x, y + 36.0 * (len(lines) + 1), columns, list(reversed(lines)), width=total)
+
+
+def _paint_gear_table(painter, options):
+    """Gear data table (DIN 3966-1 / ISO 1340): the values of the sheet's gear made with the Gear
+    tool, with the quality class, top left corner at options["gear_table"] {"x", "y"}."""
+    table = options.get("gear_table")
+    gears = (options.get("_model") or {}).get("gears") or []
+    if not isinstance(table, dict) or not gears:
+        return
+    gear = gears[min(max(int(table.get("index", 0)), 0), len(gears) - 1)]
+    rows = [(name, symbol, value) for name, symbol, value in gear.get("rows", ())]
+    quality = str(options.get("gear_quality") or "8")
+    rows.insert(len(rows) - sum(1 for name, _s, _v in rows if name in ("Mating gear", "Centre distance")),
+                ("Quality (ISO 1328)", "", quality))
+    font = _drawing_font(DRAWING_TEXT)
+    metrics = QFontMetricsF(font)
+    headings = ("Gear data", "", "")
+    widths = [max([metrics.horizontalAdvance(heading)] +
+                  [metrics.horizontalAdvance(str(row[index])) for row in rows]) + 20.0
+              for index, heading in enumerate(headings)]
+    widths[1] = max(widths[1], 40.0)
+    total = sum(widths)
+    columns = tuple((heading, width / total, align) for heading, width, align in
+                    zip(headings, widths, (Qt.AlignLeft, Qt.AlignCenter, Qt.AlignLeft)))
+    x, y = float(table.get("x", 80.0)), float(table.get("y", 80.0))
+    height = 36.0 * (len(rows) + 1)
+    _paint_table(painter, x, y + height, columns, list(reversed(rows)), width=total)
+
+
+def _paint_hole_table(painter, options, places, topology):
+    """Hole table of one view (options["hole_table"] = {"view", "x", "y"}): every hole facing
+    the viewer gets an ID (a letter per size, numbered: A1, A2, B1 …) on the view, and the table
+    lists its X / Y position from the view's lower left corner (marked 0,0) and its size."""
+    table = options.get("hole_table")
+    if not isinstance(table, dict) or topology is None:
+        return
+    place = places.get(table.get("view"))
+    if place is None or "normal" not in place.view:
+        return
+    holes = _drawing_view_holes(topology, place.view)
+    if not holes:
+        return
+    sizes = []
+    for _hole, data, _uv in holes:
+        signature = _drawing_hole_signature(data)
+        if signature not in sizes:
+            sizes.append(signature)
+    sizes.sort(key=lambda signature: (signature[0], str(signature[1:])))
+    origin = (float(place.low[0]), float(place.low[1]))
+    rows, counters = [], collections.Counter()
+    ordered = sorted(holes, key=lambda item: (sizes.index(_drawing_hole_signature(item[1])),
+                                              round(item[2][1], 3), round(item[2][0], 3)))
+    font = _drawing_font(DRAWING_TEXT)
+    painter.save()
+    painter.setFont(font)
+    for _hole, data, (u, v) in ordered:
+        group = sizes.index(_drawing_hole_signature(data))
+        letter = chr(ord("A") + group % 26)
+        counters[letter] += 1
+        hole_id = f"{letter}{counters[letter]}"
+        centre = place.point(u, v)
+        radius = data["d"] / 2.0 * place.scale
+        painter.setPen(_drawing_color("dimension"))
+        painter.drawText(QPointF(centre.x() + radius * 0.75 + 4, centre.y() - radius * 0.75 - 4), hole_id)
+        size = " ".join(_drawing_callout_lines(dict(data, kind="hole", count=1)))
+        rows.append((hole_id, _drawing_fmt(u - origin[0]), _drawing_fmt(v - origin[1]), size))
+    # the origin of the table's coordinates
+    corner = place.point(*origin)
+    painter.setPen(_drawing_pen(DRAWING_THIN))
+    painter.drawLine(QPointF(corner.x() - 12, corner.y()), QPointF(corner.x() + 12, corner.y()))
+    painter.drawLine(QPointF(corner.x(), corner.y() - 12), QPointF(corner.x(), corner.y() + 12))
+    painter.setPen(_drawing_color("dimension"))
+    painter.drawText(QPointF(corner.x() - 40, corner.y() + 30), "0,0")
+    painter.restore()
+    x, y = float(table.get("x", 80.0)), float(table.get("y", 80.0))
+    metrics = QFontMetricsF(font)
+    headings = ("Hole", "X", "Y", "Size")
+    widths = [max([metrics.horizontalAdvance(heading)] +
+                  [metrics.horizontalAdvance(str(row[index])) for row in rows]) + 20.0
+              for index, heading in enumerate(headings)]
+    total = sum(widths)
+    columns = tuple((heading, width / total, align) for heading, width, align in
+                    zip(headings, widths, (Qt.AlignCenter, Qt.AlignRight, Qt.AlignRight, Qt.AlignLeft)))
+    height = 36.0 * (len(rows) + 1)
+    # rows listed from the top: the table grows downwards from its placed corner
+    _paint_table(painter, x, y + height, columns, list(reversed(rows)), width=total)
+
+
 def _drawing_wants_left(options):
     """The view from the left is projected only when placed or needed by the automatic layout."""
     if "view_placements" in options:
@@ -19413,7 +21485,16 @@ def _prepare_technical_drawing(vertices, triangles, options):
     center = (used.min(axis=0) + used.max(axis=0)) / 2.0
     rotation = _import_rotation_matrix(options.get("rotation", (0, 0, 0)))
     V = (V - center) @ rotation.T
-    topology = _drawing_topology(V, T)
+    # Phase 4: gears of the Gear tool (simplified, ISO 2203) and Thread tool features
+    gears, thread_features = _drawing_model_geometry(options.get("_model"), center, rotation)
+    if not options.get("gear_simplified", True):
+        gears = []
+    topology = _drawing_topology(V, T, gears=gears)
+    topology["thread_features"] = thread_features
+    # Phase 5: assembly parts (balloons find their item) and exploded-view trace lines
+    topology["components"], topology["traces"] = _drawing_assembly_geometry(
+        options.get("_model"), center, rotation)
+    _drawing_match_thread_features(topology["threads"], thread_features)
 
     front = np.asarray(options["front"], dtype=float)
     right, up, normal = _drawing_view_frame(
@@ -19433,6 +21514,13 @@ def _prepare_technical_drawing(vertices, triangles, options):
 
 
 DRAWING_SECTION_PLANES = ("front", "top", "right")      # a cut is parallel to one of these views
+# kinds of sections (Phase 3): full, half (one half cut, split by a centre line), offset (stepped:
+# two parallel planes), aligned (a second leg turned into the plane), removed (the cut face only,
+# beside the view) and revolved (the cut face turned 90° on the view itself)
+DRAWING_SECTION_KINDS = ("full", "half", "offset", "aligned", "removed", "revolved")
+DRAWING_SECTION_KIND_TEXT = {"full": "Full section", "half": "Half section",
+                             "offset": "Offset (stepped) section", "aligned": "Aligned section",
+                             "removed": "Removed section", "revolved": "Revolved section"}
 DRAWING_SECTION_PLANE_TEXT = ("parallel to the front view", "parallel to the top view",
                               "parallel to the right side view")
 
@@ -19451,8 +21539,18 @@ def _drawing_sections(options):
             if not letter.isalpha() or not math.isfinite(offset) or \
                     any(section["letter"] == letter for section in sections):
                 continue
-            sections.append({"letter": letter, "offset": offset,
-                             "plane": min(2, max(0, int(item.get("plane", 0))))})
+            section = {"letter": letter, "offset": offset,
+                       "plane": min(2, max(0, int(item.get("plane", 0))))}
+            # Phase 3: kind of section and its parameters
+            kind = item.get("kind", "full")
+            if kind in DRAWING_SECTION_KINDS and kind != "full":
+                section["kind"] = kind
+                section["axis"] = "v" if item.get("axis") == "v" else "u"
+                for key, default in (("split", 0.0), ("offset2", offset), ("angle", 45.0)):
+                    value = tol_number(item.get(key))
+                    section[key] = value if value is not None else default
+                section["side"] = -1 if item.get("side") == -1 else 1
+            sections.append(section)
     elif options.get("section"):
         offset = float(options.get("cut_offset", 0.0))
         sections.append({"letter": "A", "offset": offset if math.isfinite(offset) else 0.0,
@@ -19508,22 +21606,555 @@ def _drawing_section_axes(topology, normal, offset, right, up, tolerance):
     return lines
 
 
-def _prepare_drawing_section(V, T, frames, plane, offset, threads=None):
-    """Section through the part parallel to one of the main views at `offset`; computed on its
-    own so that moving a cut does not project all the other views again. `threads` are those of
-    the whole part (the cut-off part has only pieces of their helices)."""
+# ── views and sections (Technical Drawing, Phase 3) ────────────────────────────
+# Sections other than a full cut are built from pieces: the part is split by helper planes (the
+# centre line of a half section, the step of an offset section, the bisector of an aligned one),
+# each piece is cut by its own plane and the pieces are joined again. The cut faces are the loops
+# of a full cut, kept only in their region of the section view ("regions": loops, the range in
+# the view (u0, v0, u1, v1) or None, and the body of every loop for the hatching).
+
+def _drawing_join_meshes(pieces, span):
+    """One mesh of several (vertices, triangles) pieces, coincident vertices welded."""
+    pieces = [(np.asarray(v, dtype=float).reshape(-1, 3), np.asarray(t, dtype=np.int64).reshape(-1, 3))
+              for v, t in pieces if v is not None and len(t)]
+    if not pieces:
+        raise ValueError("The section removes the entire solid.")
+    points = np.vstack([v for v, _t in pieces])
+    triangles, base = [], 0
+    for v, t in pieces:
+        triangles.append(t + base)
+        base += len(v)
+    triangles = np.concatenate(triangles)
+    weld = max(span, 1e-9) * 1e-6
+    _key, first, inverse = np.unique(np.rint(points / weld).astype(np.int64), axis=0,
+                                     return_index=True, return_inverse=True)
+    triangles = inverse.reshape(-1)[triangles]
+    triangles = triangles[(triangles[:, 0] != triangles[:, 1]) & (triangles[:, 1] != triangles[:, 2])
+                          & (triangles[:, 0] != triangles[:, 2])]
+    return points[first], triangles
+
+
+def _drawing_keep(V, T, normal, offset, below=True):
+    """The part of a mesh with normal · p <= offset (below) or >= offset; (None, empty) if none."""
+    if V is None or not len(T):
+        return None, np.zeros((0, 3), dtype=np.int64)
+    normal = np.asarray(normal, dtype=float)
+    try:
+        return _drawing_clip(V, T, normal if below else -normal, offset if below else -offset)
+    except ValueError:
+        return None, np.zeros((0, 3), dtype=np.int64)
+
+
+def _drawing_rotate(V, point, axis, angle):
+    """Vertices turned by `angle` (radians) about the line through `point` along `axis`."""
+    axis = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+    relative = np.asarray(V, dtype=float) - point
+    cos, sin = math.cos(angle), math.sin(angle)
+    return point + relative * cos + np.cross(axis, relative) * sin + \
+        np.outer(relative @ axis, axis) * (1.0 - cos)
+
+
+def _drawing_cut_loops(V, T, normal, right, up, offset):
+    """Outlines (view u, v) of the cut face of a mesh in the plane normal · p = offset, and for
+    each a 3-D vertex of its piece away from the cut (it tells the body of the loop)."""
+    cut_v, cut_t = _drawing_keep(V, T, normal, offset)
+    if cut_v is None:
+        return [], []
+    pairs = np.concatenate((cut_t[:, [0, 1]], cut_t[:, [1, 2]], cut_t[:, [2, 0]]))
+    pairs.sort(axis=1)
+    edges, counts = np.unique(pairs, axis=0, return_counts=True)
+    span = max(float(np.ptp(cut_v, axis=0).max()), 1e-9)
+    loops, starts = _drawing_section_loops(cut_v, {"edges": edges, "counts": counts, "span": span},
+                                           normal, right, up, offset, with_start=True)
+    labels = _drawing_component_labels(len(cut_v), cut_t)
+    off_plane = np.abs(cut_v @ np.asarray(normal, dtype=float) - offset) > span * 1e-4
+    anchors = []
+    for start in starts:
+        candidates = np.flatnonzero((labels == labels[start]) & off_plane)
+        anchors.append(cut_v[candidates[0]] if len(candidates) else cut_v[start])
+    return loops, anchors
+
+
+def _drawing_component_labels(count, T):
+    """Connected component of each of `count` vertices of the triangles T (min-label propagation
+    with pointer jumping)."""
+    T = np.asarray(T, dtype=np.int64).reshape(-1, 3)
+    labels = np.arange(count)
+    edges = np.concatenate((T[:, [0, 1]], T[:, [1, 2]]))
+    while len(edges):
+        low = np.minimum(labels[edges[:, 0]], labels[edges[:, 1]])
+        updated = labels.copy()
+        np.minimum.at(updated, edges[:, 0], low)
+        np.minimum.at(updated, edges[:, 1], low)
+        updated = updated[updated]
+        if np.array_equal(updated, labels):
+            break
+        labels = updated
+    return labels
+
+
+def _drawing_bodies(topology):
+    """Body (connected component) of every vertex of a part, cached: the hatching of touching
+    parts runs in opposite directions."""
+    if "_bodies" not in topology:
+        topology["_bodies"] = _drawing_component_labels(len(topology["V"]), topology["T"])
+    return topology["_bodies"]
+
+
+def _drawing_loop_bodies(topology, anchors, transform=None):
+    """Body label of every cut loop from a vertex of its piece away from the cut (`anchors`, 3-D;
+    `transform` turns it back into the part, e.g. for the turned leg of an aligned section)."""
+    if topology is None or "V" not in topology or not anchors:
+        return [0] * len(anchors)
+    labels = _drawing_bodies(topology)
+    if len(np.unique(labels[np.unique(topology["T"])])) <= 1:
+        return [0] * len(anchors)
+    V = np.asarray(topology["V"], dtype=float)
+    bodies = []
+    for point in anchors:
+        point = np.asarray(point, dtype=float)
+        if transform is not None:
+            point = transform(point)
+        bodies.append(int(labels[int(np.argmin(np.einsum("ij,ij->i", V - point, V - point)))]))
+    return bodies
+
+
+def _drawing_section_frame(frames, item):
+    """Frame of a section: (view name, right, up, normal, split axis s, axis a) - s lies in the
+    cut plane along the section view's u (or v) axis, a is the other in-plane axis."""
+    name = DRAWING_SECTION_PLANES[int(item["plane"])]
+    right, up, normal = frames[name]
+    if item.get("axis", "u") == "v":
+        return name, right, up, normal, up, right
+    return name, right, up, normal, right, up
+
+
+def _drawing_filter_split_edges(topology, V, planes):
+    """Edges lying in the helper planes that split the part are no outline: left out."""
+    tolerance = topology["span"] * 1e-6
+    edges = topology["edges"]
+    mask = np.zeros(len(edges), dtype=bool)
+    for normal, offset in planes:
+        distance = np.abs(V @ np.asarray(normal, dtype=float) - offset)
+        mask |= (distance[edges[:, 0]] <= tolerance) & (distance[edges[:, 1]] <= tolerance)
+    for key in ("sharp", "fold"):
+        topology[key] = topology[key] & ~mask
+
+
+def _prepare_drawing_section(V, T, frames, item, threads=None, part_topology=None):
+    """Section through the part parallel to one of the main views (item: "plane", "offset" and
+    for Phase 3 kinds "kind", "axis", "split", "offset2", "angle", "side"); computed on its own so
+    that moving a cut does not project all the other views again. `threads` are those of the
+    whole part (the cut-off part has only pieces of their helices)."""
+    offset = float(item["offset"])
     if not math.isfinite(offset):
         raise ValueError("The section offset must be a finite measurement.")
-    name = DRAWING_SECTION_PLANES[plane]
-    s_right, s_up, s_normal = frames[name]
-    sv, st = _drawing_clip(V, T, s_normal, offset)
-    s_topology = _drawing_topology(sv, st, threads or [])
-    loops = _drawing_section_loops(sv, s_topology, s_normal, s_right, s_up, offset)
+    plane = int(item["plane"])
+    kind = item.get("kind", "full")
+    name, s_right, s_up, s_normal, s_axis, a_axis = _drawing_section_frame(frames, item)
+    span = max(float(np.ptp(V[np.unique(T)], axis=0).max()), 1e-9)
+    big = 4.0 * span + abs(offset)
+    coordinate = 0 if item.get("axis", "u") != "v" else 1   # the split axis in view coordinates
+
+    def band(low, high):
+        """Range of the section view (u0, v0, u1, v1) between low and high along the split axis."""
+        if coordinate == 0:
+            return (low, -big, high, big)
+        return (-big, low, big, high)
+
+    split_planes, centre_lines = [], []
+    # regions: (cut loops, range of the view they are kept in, plane offset, turn back to the part)
+    if kind in ("full", "removed", "revolved"):
+        kept_v, kept_t = _drawing_clip(V, T, s_normal, offset)
+        loops = _drawing_cut_loops(V, T, s_normal, s_right, s_up, offset)
+        regions = [(loops, None, offset, None)]
+    elif kind == "half":
+        side, split = int(item.get("side", 1)), float(item.get("split", 0.0))
+        outside = _drawing_keep(V, T, s_axis, split, below=side > 0)     # the half seen whole
+        cut_half = _drawing_keep(V, T, s_axis, split, below=side < 0)
+        cut_half = _drawing_keep(*cut_half, s_normal, offset)
+        kept_v, kept_t = _drawing_join_meshes([outside, cut_half], span)
+        loops = _drawing_cut_loops(V, T, s_normal, s_right, s_up, offset)
+        regions = [(loops, band(split, big) if side > 0 else band(-big, split), offset, None)]
+        split_planes = [(s_axis, split)]
+        centre_lines = [(coordinate, split)]
+    elif kind == "offset":
+        step, second = float(item.get("split", 0.0)), float(item.get("offset2", offset))
+        first_piece = _drawing_keep(*_drawing_keep(V, T, s_axis, step, below=True), s_normal, offset)
+        second_piece = _drawing_keep(*_drawing_keep(V, T, s_axis, step, below=False),
+                                     s_normal, second)
+        kept_v, kept_t = _drawing_join_meshes([first_piece, second_piece], span)
+        loops_first = _drawing_cut_loops(V, T, s_normal, s_right, s_up, offset)
+        loops_second = _drawing_cut_loops(V, T, s_normal, s_right, s_up, second)
+        regions = [(loops_first, band(-big, step), offset, None),
+                   (loops_second, band(step, big), second, None)]
+        split_planes = [(s_axis, step)]
+    elif kind == "aligned":
+        split, angle = float(item.get("split", 0.0)), math.radians(float(item.get("angle", 45.0)))
+        centre = split * s_axis + offset * s_normal              # on the axis of the aligned cut
+        leg = _drawing_rotate((-s_axis)[None, :], np.zeros(3), a_axis, angle)[0]
+        first_piece = _drawing_keep(*_drawing_keep(V, T, s_axis, split, below=False),
+                                    s_normal, offset)
+        turned_v, turned_t = _drawing_keep(V, T, leg, float(centre @ leg), below=False)
+        if turned_v is not None:                     # the second leg turned into the cut plane
+            turned_v = _drawing_rotate(turned_v, centre, a_axis, -angle)
+        second_piece = _drawing_keep(turned_v, turned_t, s_normal, offset)
+        kept_v, kept_t = _drawing_join_meshes([first_piece, second_piece], span)
+        loops_first = _drawing_cut_loops(V, T, s_normal, s_right, s_up, offset)
+        turned_all = _drawing_rotate(V, centre, a_axis, -angle)
+        loops_second = _drawing_cut_loops(turned_all, T, s_normal, s_right, s_up, offset)
+        regions = [(loops_first, band(split, big), offset, None),
+                   (loops_second, band(-big, split), offset,
+                    lambda point: _drawing_rotate(point[None, :], centre, a_axis, angle)[0])]
+        split_planes = [(s_axis, split)]
+        centre_lines = [(coordinate, split)]
+    else:
+        raise ValueError(f"Unknown section kind {kind}")
+    if kind in ("removed", "revolved"):
+        # the cut face only: a view of its outlines (no edges behind it)
+        s_topology = {"circles": [], "arcs": [], "threads": [], "span": span}
+        view = _drawing_loops_view(regions[0][0][0], s_right, s_up, s_normal)
+    else:
+        s_topology = _drawing_topology(kept_v, kept_t, threads or [])
+        if split_planes:
+            _drawing_filter_split_edges(s_topology, kept_v, split_planes)
+        view = _drawing_project(kept_v, kept_t, s_topology, s_right, s_up, s_normal, cut=offset)
+    threads = threads or []
+    finished = []
+    for (loops, anchors), rect, at, transform in regions:
+        bodies = _drawing_loop_bodies(part_topology, anchors, transform)
+        if transform is None and threads:   # threaded holes / bolts: hatching up to the crest
+            adjusted, adjusted_bodies = [], []
+            for loop, body in zip(loops, bodies):
+                for piece in _drawing_thread_section_loops([loop], threads, s_normal, at,
+                                                           s_right, s_up):
+                    adjusted.append(piece)
+                    adjusted_bodies.append(body)
+            loops, bodies = adjusted, adjusted_bodies
+        finished.append((loops, bodies, rect))
+    regions = finished
     return {"name": name, "plane": plane, "normal": s_normal, "topology": s_topology,
-            "offset": offset,
-            "view": _drawing_project(sv, st, s_topology, s_right, s_up, s_normal, cut=offset),
-            "loops": _drawing_thread_section_loops(loops, threads or [], s_normal, offset,
-                                                   s_right, s_up)}
+            "offset": offset, "kind": kind, "view": view, "regions": regions,
+            "centre_lines": centre_lines, "axis_vector": s_axis, "a_vector": a_axis,
+            "loops": [loop for loops, _bodies, _rect in regions for loop in loops]}
+
+
+def _prepare_aux_view(V, T, topology, parent_frame, a, b, flip=False, resolution=900):
+    """Auxiliary view of an inclined face: the parent view shows the face edge-on as the line
+    a-b (view u, v); the view looks at it square on, so its true shape and size show."""
+    right, up, normal = (np.asarray(vector, dtype=float) for vector in parent_frame)
+    du, dv = float(b[0] - a[0]), float(b[1] - a[1])
+    if math.hypot(du, dv) <= 1e-9:
+        raise ValueError("The auxiliary view needs an edge of some length.")
+    face_normal = -dv * right + du * up
+    face_normal /= np.linalg.norm(face_normal)
+    if flip:
+        face_normal = -face_normal
+    frame = _drawing_view_frame(face_normal, normal)
+    view = _drawing_project(V, T, topology, *frame, resolution=resolution)
+    view["aux_direction"] = face_normal
+    return view
+
+
+def _prepare_broken_out(V, T, frame, rect, depth, threads=None, part_topology=None):
+    """Broken-out section of a view: inside the rectangle (u0, v0, u1, v1) the material in front
+    of the plane normal · p = depth is taken away, so what is behind it shows in section."""
+    right, up, normal = (np.asarray(vector, dtype=float) for vector in frame)
+    u0, u1 = sorted((float(rect[0]), float(rect[2])))
+    v0, v1 = sorted((float(rect[1]), float(rect[3])))
+    span = max(float(np.ptp(V[np.unique(T)], axis=0).max()), 1e-9)
+    middle = _drawing_keep(*_drawing_keep(V, T, right, u0, below=False), right, u1, below=True)
+    inside = _drawing_keep(*_drawing_keep(*_drawing_keep(*middle, up, v0, below=False),
+                                          up, v1, below=True), normal, depth, below=True)
+    pieces = [inside, _drawing_keep(V, T, right, u0, below=True),
+              _drawing_keep(V, T, right, u1, below=False),
+              _drawing_keep(*middle, up, v0, below=True), _drawing_keep(*middle, up, v1, below=False)]
+    kept_v, kept_t = _drawing_join_meshes(pieces, span)
+    topo = _drawing_topology(kept_v, kept_t, threads or [])
+    _drawing_filter_split_edges(topo, kept_v, [(right, u0), (right, u1), (up, v0), (up, v1)])
+    view = _drawing_project(kept_v, kept_t, topo, right, up, normal, cut=depth)
+    loops, anchors = _drawing_cut_loops(V, T, normal, right, up, depth)
+    bodies = _drawing_loop_bodies(part_topology, anchors)
+    view["broken_out"] = {"regions": [(loops, bodies, (u0, v0, u1, v1))], "rect": (u0, v0, u1, v1)}
+    return view
+
+
+def _paint_cut_polyline(painter, metrics, place, points, sights, letter):
+    """Cutting-plane line along a path of view points (DIN ISO 128-40): thin chain line, thick at
+    its ends and where it changes direction, sight arrows and letters at the ends."""
+    page = [place.point(u, v) for u, v in points]
+    if len(page) < 2:
+        return
+    painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
+    path = QPainterPath(page[0])
+    for point in page[1:]:
+        path.lineTo(point)
+    painter.drawPath(path)
+
+    def toward(a, b, length):
+        vector = np.array((b.x() - a.x(), b.y() - a.y()))
+        norm = float(np.linalg.norm(vector))
+        if norm <= 1e-9:
+            return a
+        vector *= min(length, norm) / norm
+        return QPointF(a.x() + vector[0], a.y() + vector[1])
+
+    painter.setPen(_drawing_pen(DRAWING_THICK, role="centre"))
+    painter.drawLine(page[0], toward(page[0], page[1], 30))
+    painter.drawLine(page[-1], toward(page[-1], page[-2], 30))
+    for index in range(1, len(page) - 1):          # thick corners where the path turns
+        painter.drawLine(toward(page[index], page[index - 1], 15), page[index])
+        painter.drawLine(page[index], toward(page[index], page[index + 1], 15))
+    for end, sight in ((page[0], sights[0]), (page[-1], sights[1])):
+        sight = np.asarray(sight, dtype=float)
+        if float(np.linalg.norm(sight)) <= 1e-9:
+            continue
+        sight = sight / float(np.linalg.norm(sight))
+        tip = QPointF(end.x() + sight[0] * 34, end.y() + sight[1] * 34)
+        painter.setPen(_drawing_pen(DRAWING_THIN, role="centre"))
+        painter.drawLine(end, tip)
+        _paint_arrow(painter, tip, sight, ink=_drawing_color("centre"))
+        painter.setPen(_drawing_pen(1, role="centre"))
+        painter.drawText(QPointF(tip.x() + sight[0] * 18 - metrics.horizontalAdvance(letter) / 2,
+                                 tip.y() + sight[1] * 18 + 6), letter)
+
+
+def _paint_section_cut(painter, metrics, place, section):
+    """Cutting-plane line of a section in a view that sees its plane edge-on: straight, or
+    stepped (offset section) / bent (aligned section) where this view shows the steps."""
+    kind = section.get("kind", "full")
+    item = section.get("item") or {}
+    view = place.view
+    right, up, view_normal = view["right"], view["up"], view["normal"]
+    a_vector, s_vector = section.get("a_vector"), section.get("axis_vector")
+    if kind not in ("offset", "aligned") or a_vector is None or \
+            abs(float(np.asarray(a_vector) @ view_normal)) < 0.9:
+        _paint_cut_line(painter, metrics, place, section["normal"], section["letter"],
+                        section["offset"])
+        return
+    normal = np.asarray(section["normal"], dtype=float)
+    s_vector = np.asarray(s_vector, dtype=float)
+    margin = 24.0 / place.scale
+    corners = [(u, v) for u in (place.low[0], place.high[0]) for v in (place.low[1], place.high[1])]
+    s_view = np.array((float(s_vector @ right), float(s_vector @ up)))
+    s_low = min(float(np.dot(corner, s_view)) for corner in corners) - margin
+    s_high = max(float(np.dot(corner, s_view)) for corner in corners) + margin
+
+    def at(along, depth):
+        point = along * s_vector + depth * normal
+        return float(point @ right), float(point @ up)
+
+    def sight_of(vector):
+        return (-float(vector @ right), float(vector @ up))     # page y points down
+
+    offset, split = float(section["offset"]), float(item.get("split", 0.0))
+    if kind == "offset":
+        second = float(item.get("offset2", offset))
+        points = [at(s_low, offset), at(split, offset), at(split, second), at(s_high, second)]
+        _paint_cut_polyline(painter, metrics, place, points, (sight_of(normal), sight_of(normal)),
+                            section["letter"])
+        return
+    angle = math.radians(float(item.get("angle", 45.0)))
+    leg = _drawing_rotate((-s_vector)[None, :], np.zeros(3), a_vector, angle)[0]
+    leg_normal = _drawing_rotate(normal[None, :], np.zeros(3), a_vector, angle)[0]
+    centre = np.array(at(split, offset))
+    leg_view = np.array((float(leg @ right), float(leg @ up)))
+    reach = []                         # the second leg runs to the edge of the view (+ margin)
+    for k, (low, high) in enumerate(((place.low[0] - margin, place.high[0] + margin),
+                                     (place.low[1] - margin, place.high[1] + margin))):
+        if abs(leg_view[k]) > 1e-9:
+            reach.append(((high if leg_view[k] > 0 else low) - centre[k]) / leg_view[k])
+    length = max(min(reach) if reach else 0.0, 0.0)
+    end = centre + leg_view * length
+    points = [tuple(end), tuple(centre), at(s_high, offset)]
+    _paint_cut_polyline(painter, metrics, place, points, (sight_of(leg_normal), sight_of(normal)),
+                        section["letter"])
+
+
+def _paint_revolved_section(painter, place, section, pattern):
+    """Revolved section on a view that sees its plane edge-on: the cut face turned by 90° into
+    the view, centred on the plane's trace, outlined with thin lines (DIN ISO 128-40)."""
+    view = place.view
+    right, up, view_normal = view["right"], view["up"], view["normal"]
+    normal = np.asarray(section["normal"], dtype=float)
+    if abs(float(normal @ view_normal)) > 0.5:
+        return
+    s_right, s_up = section["view"]["right"], section["view"]["up"]
+    trace = s_right if abs(float(s_right @ view_normal)) < 0.1 else s_up
+    depth = s_up if trace is s_right else s_right
+    if abs(float(depth @ view_normal)) < 0.9:
+        return                                     # neither in-plane axis points at the viewer
+    offset = float(section["offset"])
+    loops3 = [loop[:, :1] * s_right + loop[:, 1:2] * s_up + offset * normal for loop in section["loops"]]
+    if not loops3:
+        return
+    middle = float(np.mean(np.concatenate([points @ depth for points in loops3])))
+    loops = []
+    for points in loops3:
+        turned = np.outer(points @ trace, trace) + np.outer(offset + points @ depth - middle, normal)
+        loops.append(np.column_stack((turned @ right, turned @ up)))
+    _paint_section_fill(painter, place, loops, None, pattern, outline=DRAWING_THIN)
+
+
+def _paint_break_lines(painter, place):
+    """Break lines of a broken view: thin lines with a zigzag (DIN ISO 128-20) at both edges."""
+    painter.save()
+    painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+    for item in place.breaks:
+        k = item["k"]
+        for value, side in ((item["a"], 0.0), (item["b"], 1.0)):
+            if k == 0:
+                x = place.point(value - 1e-9 if side == 0.0 else value, place.low[1]).x()
+                y0, y1 = place.rect.bottom() + 8, place.rect.top() - 8
+                mid, z = (y0 + y1) / 2, 7.0
+                points = [QPointF(x, y0), QPointF(x, mid + z), QPointF(x - z, mid + z / 2),
+                          QPointF(x + z, mid - z / 2), QPointF(x, mid - z), QPointF(x, y1)]
+            else:
+                y = place.point(place.low[0], value - 1e-9 if side == 0.0 else value).y()
+                x0, x1 = place.rect.left() - 8, place.rect.right() + 8
+                mid, z = (x0 + x1) / 2, 7.0
+                points = [QPointF(x0, y), QPointF(mid - z, y), QPointF(mid - z / 2, y - z),
+                          QPointF(mid + z / 2, y + z), QPointF(mid + z, y), QPointF(x1, y)]
+            painter.drawPolyline(QPolygonF(points))
+    painter.restore()
+
+
+def _paint_freehand_rect(painter, place, rect):
+    """Boundary of a broken-out section: a thin wavy (freehand) line around the rectangle."""
+    u0, v0, u1, v1 = rect
+    corners = [place.point(u0, v0), place.point(u1, v0), place.point(u1, v1), place.point(u0, v1)]
+    points = []
+    for index in range(4):
+        a, b = corners[index], corners[(index + 1) % 4]
+        length = math.hypot(b.x() - a.x(), b.y() - a.y())
+        steps = max(4, int(length / 6))
+        nx, ny = (-(b.y() - a.y()) / max(length, 1e-9), (b.x() - a.x()) / max(length, 1e-9))
+        for step in range(steps):
+            t = step / steps
+            wave = 2.5 * math.sin(t * length / 9.0)
+            points.append(QPointF(a.x() + (b.x() - a.x()) * t + nx * wave,
+                                  a.y() + (b.y() - a.y()) * t + ny * wave))
+    points.append(points[0])
+    painter.save()
+    painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+    painter.drawPolyline(QPolygonF(points))
+    painter.restore()
+
+
+def _drawing_clip_segments_circle(segments, centre, radius):
+    """The pieces of segments (n, 2, 2) inside a circle."""
+    segments = np.asarray(segments, dtype=float).reshape(-1, 2, 2)
+    if not len(segments):
+        return segments
+    a, d = segments[:, 0] - centre, segments[:, 1] - segments[:, 0]
+    qa = np.einsum("ij,ij->i", d, d)
+    qb = 2.0 * np.einsum("ij,ij->i", a, d)
+    qc = np.einsum("ij,ij->i", a, a) - radius * radius
+    disc = qb * qb - 4 * qa * qc
+    ok = (disc > 0) & (qa > 1e-18)
+    root = np.sqrt(np.where(ok, disc, 0.0))
+    safe = np.where(qa > 1e-18, qa, 1.0)
+    t0 = np.clip((-qb - root) / (2 * safe), 0.0, 1.0)
+    t1 = np.clip((-qb + root) / (2 * safe), 0.0, 1.0)
+    keep = ok & (t1 > t0 + 1e-9)
+    start = segments[:, 0] + d * t0[:, None]
+    stop = segments[:, 0] + d * t1[:, None]
+    return np.stack((start, stop), axis=1)[keep]
+
+
+def _paint_detail_view(painter, place, item, parent_section, pattern, options):
+    """Detail view: the part of the parent view inside the circle (u, v, r), at its own scale,
+    with a thin circle around it and 'B (5:1)' under it; on the parent the circle and letter."""
+    view, parent = place.view, place.parent
+    centre, radius = np.array((float(item["u"]), float(item["v"]))), float(item["r"])
+    letter = str(item.get("letter", "?"))
+    thick = DRAWING_THICK * float(options.get("_thick_scale", 1.0))
+    painter.save()
+
+    def path_of(segments):
+        path = QPainterPath()
+        for (ax, ay), (bx, by) in _drawing_clip_segments_circle(segments, centre, radius).tolist():
+            path.moveTo(place.point(ax, ay))
+            path.lineTo(place.point(bx, by))
+        return path
+    if place.show_hidden and len(view.get("hidden", ())):
+        painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_DASH, "hidden"))
+        painter.drawPath(path_of(view["hidden"]))
+    painter.setPen(_drawing_pen(thick, role="visible"))
+    painter.drawPath(path_of(view["visible"]))
+    centre_page = place.point(*centre)
+    circle = QPainterPath()
+    circle.addEllipse(centre_page, radius * place.scale, radius * place.scale)
+    regions = None
+    if parent_section is not None:
+        regions = parent_section.get("regions")
+    elif "broken_out" in view:
+        regions = view["broken_out"]["regions"]
+    if regions:
+        _paint_section_fill(painter, place, [], regions, pattern, clip_path=circle)
+    if len(view.get("thin", ())):
+        painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+        painter.drawPath(path_of(view["thin"]))
+    if len(view.get("chain", ())):
+        painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
+        painter.drawPath(path_of(view["chain"]))
+    painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+    painter.setBrush(Qt.NoBrush)
+    painter.drawEllipse(centre_page, radius * place.scale, radius * place.scale)
+    painter.setFont(_drawing_font(DRAWING_TEXT_LARGE, True))
+    painter.setPen(_drawing_color("text"))
+    painter.drawText(QPointF(place.rect.left(), place.rect.bottom() + 36),
+                     f"{letter} ({_drawing_scale_text(place.scale)})")
+    # the circle and letter on the parent view
+    parent_centre = parent.point(*centre)
+    parent_radius = radius * parent.scale
+    painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
+    painter.drawEllipse(parent_centre, parent_radius, parent_radius)
+    painter.setPen(_drawing_color("text"))
+    painter.drawText(QPointF(parent_centre.x() + parent_radius * 0.72 + 6,
+                             parent_centre.y() - parent_radius * 0.72 - 6), letter)
+    painter.restore()
+
+
+def _paint_aux_marks(painter, parent, place, item):
+    """Auxiliary view: an arrow on the parent view looking square onto the inclined edge, with
+    the view's letter; the letter again above the auxiliary view (DIN ISO 128-30)."""
+    a, b = np.asarray(item["a"], dtype=float), np.asarray(item["b"], dtype=float)
+    du, dv = b - a
+    direction = np.array((-dv, du)) / max(math.hypot(du, dv), 1e-12)
+    if item.get("flip"):
+        direction = -direction
+    middle = parent.point(*((a + b) / 2.0))
+    screen = np.array((direction[0], -direction[1]))           # page y points down
+    tail = QPointF(middle.x() + screen[0] * 70, middle.y() + screen[1] * 70)
+    tip = QPointF(middle.x() + screen[0] * 14, middle.y() + screen[1] * 14)
+    letter = str(item.get("letter", "?"))
+    painter.save()
+    painter.setPen(_drawing_pen(DRAWING_THIN, role="centre"))
+    painter.drawLine(tail, tip)
+    _paint_arrow(painter, tip, -screen, ink=_drawing_color("centre"))
+    painter.setFont(_drawing_font(DRAWING_TEXT_LARGE, True))
+    metrics = QFontMetricsF(painter.font())
+    painter.setPen(_drawing_color("text"))
+    painter.drawText(QPointF(tail.x() + screen[0] * 18 - metrics.horizontalAdvance(letter) / 2,
+                             tail.y() + screen[1] * 18 + 7), letter)
+    painter.drawText(QPointF(place.rect.left(), place.rect.top() - 24), letter)
+    painter.restore()
+
+
+def _drawing_loops_view(loops, right, up, normal):
+    """A view made of cut outlines only (removed / revolved sections): bounds and pick geometry."""
+    points = np.concatenate(loops) if loops else np.zeros((1, 2))
+    low, high = points.min(axis=0), points.max(axis=0)
+    segments = np.concatenate([np.stack((loop, np.roll(loop, -1, axis=0)), axis=1) for loop in loops]) \
+        if loops else np.zeros((0, 2, 2))
+    empty = np.zeros((0, 2, 2))
+    return {"bounds": (low, high), "center": (low + high) / 2.0,
+            "extent": max(float((high - low).max()), 1e-9) * 1.04, "visible": empty,
+            "hidden": empty, "visible_edges": np.zeros(0, dtype=int),
+            "hidden_edges": np.zeros(0, dtype=int), "edge_visible": np.zeros(0, dtype=bool),
+            "pick_points": np.unique(points, axis=0), "pick_segments": segments,
+            "pick_curves": [], "pick_arcs": [], "normal": normal, "right": right, "up": up}
 
 
 def _draw_technical_drawing(painter, vertices, triangles, options):
@@ -19533,6 +22164,7 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
     previous = _DRAWING_COLORS, _DRAWING_PAGE
     _DRAWING_COLORS = options.get("_colors") or DRAWING_PRINT_COLORS
     _DRAWING_PAGE = _drawing_sheet(options)
+    previous_units = _drawing_use_units(_drawing_units_of(options))
     try:
         if vertices is None or triangles is None or not len(triangles):
             # a sheet without a model: frame, title block, imported graphics and their dimensions
@@ -19540,6 +22172,7 @@ def _draw_technical_drawing(painter, vertices, triangles, options):
         return _render_technical_drawing(painter, vertices, triangles, options)
     finally:
         _DRAWING_COLORS, _DRAWING_PAGE = previous
+        _drawing_use_units(previous_units)
 
 
 def _drawing_begin_page(painter, options):
@@ -19570,6 +22203,8 @@ def _render_drawing_without_model(painter, options):
     dimension_hits = _paint_drawing_dimensions(painter, options, places, [])
     shown_scale = sheet_scale or next((place.scale for place in places.values()),
                                       DRAWING_UNITS_PER_MM)
+    _paint_stackup_tables(painter, options)
+    _paint_sheet_tables(painter, options)
     _paint_title_block(painter, options, _drawing_scale_text(shown_scale))
     painter.restore()
     return {"placements": _drawing_layout_records(places), "dimension_hits": dimension_hits,
@@ -19582,7 +22217,9 @@ def _render_technical_drawing(painter, vertices, triangles, options):
     rotation = tuple(float(value) for value in options.get("rotation", (0, 0, 0)))
     geometry_key = (id(vertices), id(triangles), front, rotation, _drawing_wants_left(options),
                     int(options.get("_projection_resolution", 900)),
-                    int(options.get("_isometric_resolution", 1200)))
+                    int(options.get("_isometric_resolution", 1200)),
+                    bool(options.get("gear_simplified", True)),
+                    json.dumps(options.get("_model"), sort_keys=True, default=_json_default))
     if cache is not None and cache.get("key") == geometry_key:
         V, T, topology, frames, views, iso = cache["geometry"]
     else:
@@ -19595,15 +22232,20 @@ def _render_technical_drawing(painter, vertices, triangles, options):
     section_cache = cache.setdefault("sections", {}) if cache is not None else {}
     sections, used = [], set()
     for item in _drawing_sections(options):
-        section_key = (item["plane"], round(float(item["offset"]), 6))
+        section_key = (item["plane"], round(float(item["offset"]), 6), item.get("kind", "full"),
+                       item.get("axis", "u"), round(float(item.get("split", 0.0)), 6),
+                       round(float(item.get("offset2", 0.0)), 6),
+                       round(float(item.get("angle", 0.0)), 6), item.get("side", 1))
         used.add(section_key)
         if section_key not in section_cache:
             section_cache[section_key] = _prepare_drawing_section(
-                V, T, frames, item["plane"], float(item["offset"]), topology.get("threads"))
-        sections.append(dict(section_cache[section_key], letter=item["letter"]))
+                V, T, frames, item, topology.get("threads"), topology)
+        sections.append(dict(section_cache[section_key], letter=item["letter"], item=item))
     for section_key in [key for key in section_cache if key not in used]:
         del section_cache[section_key]
-    section = sections[0] if sections else None    # the automatic layout shows the first one
+    # the automatic layout shows the first section that has a view of its own
+    section = next((item for item in sections if item.get("kind") != "revolved"), None)
+    pattern = _drawing_hatch_pattern(options)
 
     page_w, page_h = _DRAWING_PAGE["w"], _DRAWING_PAGE["h"]
     _drawing_begin_page(painter, options)
@@ -19619,11 +22261,37 @@ def _render_technical_drawing(painter, vertices, triangles, options):
     first_angle = options.get("projection", "third") != "third"
     side_name = "left" if first_angle else "right"
     (fw, fh), (_, td), (rd, _) = (size_of(views[n]) for n in ("front", "top", "right"))
-    area_x, area_y, area_w, area_h = 90.0, 90.0, 1450.0, 1300.0
-    # "Auto" scale: the three main views fit the drawing area of the sheet (the A2 layout's
-    # proportions applied to the current sheet size)
-    sx, sy = page_w / DRAWING_PAGE_W, page_h / DRAWING_PAGE_H
-    fit = min((area_w - 390) * sx / (fw + rd), (area_h - 410) * sy / (fh + td))
+    # automatic layout regions of the current sheet (inside the frame, clear of the title block):
+    # the main views on the left, a column for the isometric view (and a section) on the right
+    frame_x0, frame_y0 = DRAWING_BORDER[0], DRAWING_BORDER[1]
+    frame_x1, frame_y1 = page_w - DRAWING_BORDER[2], page_h - DRAWING_BORDER[3]
+    title_x0, title_y0, _title_w = _drawing_title_box()
+    margin = 10.0
+    area_x, area_y = frame_x0 + margin, frame_y0 + margin
+    if page_w >= page_h:
+        # landscape: a column on the right (isometric on top, a section below it)
+        column_w = 0.3 * (frame_x1 - frame_x0)
+        column_x = frame_x1 - column_w
+        column_y0, column_y1 = frame_y0 + margin, title_y0 - margin
+        iso_part = 0.45 if section else 1.0
+        iso_rect = (column_x, column_y0, column_w, (column_y1 - column_y0) * iso_part)
+        section_rect = (column_x, column_y0 + iso_rect[3] + 10, column_w,
+                        column_y1 - column_y0 - iso_rect[3] - 10)
+        area_w = column_x - margin - area_x
+        # the title block reaches under the main views on narrow sheets: they stop above it
+        area_bottom = title_y0 - margin if title_x0 < column_x else frame_y1 - margin
+    else:
+        # portrait: a band above the title block (isometric left, a section right)
+        band_h = 0.32 * (title_y0 - frame_y0)
+        band_y = title_y0 - margin - band_h
+        band_w = frame_x1 - frame_x0 - 2 * margin
+        iso_rect = (area_x, band_y, band_w / 2 if section else band_w, band_h)
+        section_rect = (area_x + band_w / 2, band_y, band_w / 2, band_h)
+        area_w = band_w
+        area_bottom = band_y - margin
+    area_h = area_bottom - area_y
+    # "Auto" scale: the three main views with their dimensions fit the drawing area
+    fit = max(min((area_w - 390) / (fw + rd), (area_h - 410) / (fh + td)), 1e-6)
     scale = _drawing_nice_scale(fit)
     manual_layout = "view_placements" in options
     if options.get("scale_ratio"):
@@ -19633,6 +22301,12 @@ def _render_technical_drawing(painter, vertices, triangles, options):
     section_places = []                # (section, placement) of every section view on the sheet
     if manual_layout:
         places = {}
+        projection_resolution = int(options.get("_projection_resolution", 900))
+        aux_items = {str(item.get("letter")): item for item in options.get("aux_views") or []
+                     if isinstance(item, dict)}
+        aux_cache = cache.setdefault("aux", {}) if cache is not None else {}
+        broken_cache = cache.setdefault("broken", {}) if cache is not None else {}
+        used_aux, used_broken, pending_details = set(), set(), []
         for index, record in enumerate(options.get("view_placements", [])):
             name = record.get("name")
             view = views.get(name)
@@ -19644,15 +22318,63 @@ def _render_technical_drawing(painter, vertices, triangles, options):
                 shown = next((item for item in sections if item["letter"] == letter), None)
                 view = shown["view"] if shown is not None else None
                 name = f"section-{letter}"
+            elif isinstance(name, str) and name.startswith("aux-"):
+                item = aux_items.get(name[len("aux-"):])
+                if item is not None and item.get("view") in frames:
+                    key = (item["view"], tuple(round(float(x), 6) for x in (*item["a"], *item["b"])),
+                           bool(item.get("flip")))
+                    used_aux.add(key)
+                    if key not in aux_cache:
+                        aux_cache[key] = _prepare_aux_view(V, T, topology, frames[item["view"]],
+                                                           item["a"], item["b"], item.get("flip"),
+                                                           projection_resolution)
+                    view = aux_cache[key]
+            elif isinstance(name, str) and name.startswith("detail-"):
+                pending_details.append((index, record))     # after the views they enlarge
+                continue
             if view is None:
                 continue
-            place = _DrawingPlacement(view, float(record["x"]), float(record["y"]), scale)
+            broken_out = record.get("broken_out")
+            if name in ("front", "top", "right", "left") and isinstance(broken_out, dict):
+                rect, depth = broken_out.get("rect"), broken_out.get("depth", 0.0)
+                key = (name, tuple(round(float(x), 6) for x in rect), round(float(depth), 6))
+                used_broken.add(key)
+                if key not in broken_cache:
+                    try:
+                        broken_cache[key] = _prepare_broken_out(V, T, frames[name], rect, float(depth),
+                                                                topology.get("threads"), topology)
+                    except ValueError:
+                        broken_cache[key] = None
+                if broken_cache[key] is not None:
+                    view = broken_cache[key]
+            line_view = name in ("front", "top", "right", "left") or str(name).startswith("aux-")
+            place = _DrawingPlacement(view, float(record["x"]), float(record["y"]), scale,
+                                      breaks=record.get("breaks") if line_view else None)
             place.record_index = index
-            place.show_hidden = bool(record.get("hidden_lines", True)) and \
-                name in ("front", "top", "right", "left")
+            place.show_hidden = bool(record.get("hidden_lines", True)) and line_view
             places[name] = place
             if shown is not None:
                 section_places.append((shown, place))
+        for unused in [key for key in aux_cache if key not in used_aux]:
+            del aux_cache[unused]
+        for unused in [key for key in broken_cache if key not in used_broken]:
+            del broken_cache[unused]
+        details = {str(item.get("letter")): item for item in options.get("details") or []
+                   if isinstance(item, dict)}
+        for index, record in pending_details:
+            item = details.get(record["name"][len("detail-"):])
+            parent = places.get(item.get("view")) if item else None
+            if parent is None:
+                continue
+            u, v, r = float(item["u"]), float(item["v"]), max(float(item["r"]), 1e-6)
+            factor = max(float(item.get("factor", 2.0)), 0.01)
+            place = _DrawingPlacement(parent.view, float(record["x"]), float(record["y"]),
+                                      parent.scale * factor, bounds=((u - r, v - r), (u + r, v + r)))
+            place.record_index = index
+            place.show_hidden = getattr(parent, "show_hidden", False)
+            place.detail, place.parent = item, parent
+            place.parent_name = item.get("view")
+            places[record["name"]] = place
         iso_place = places.get("isometric")
         section_place = section_scale = None        # (automatic layout only)
     else:
@@ -19673,22 +22395,23 @@ def _render_technical_drawing(painter, vertices, triangles, options):
             views[side_name], places["front"].rect.right() + 130, places["front"].rect.top(), scale)
 
     if not manual_layout:
-        column_x, column_w = 1600.0, 710.0
-        iso_height = 600.0 if section else 1200.0
+        rx, ry, rw, rh = iso_rect
         iso_w, iso_h = size_of(iso)
-        iso_scale = min((column_w - 60) / iso_w, (iso_height - 80) / iso_h)
+        iso_scale = max(min((rw - 60) / iso_w, (rh - 80) / iso_h), 1e-6)
         iso_place = _DrawingPlacement(
-            iso, column_x + (column_w - iso_w * iso_scale) / 2,
-            area_y + (iso_height - 20 - iso_h * iso_scale) / 2, iso_scale)
+            iso, rx + (rw - iso_w * iso_scale) / 2, ry + (rh - 20 - iso_h * iso_scale) / 2, iso_scale)
 
         section_place = section_scale = None
         if section:
+            # room for the cutting-plane letters, its dimensions and the "A-A" label
+            sx0, sy0, sw, sh = section_rect
             s_w, s_h = size_of(section["view"])
-            avail_w, avail_h = column_w - 190, 690.0 - 210
+            avail_w = max(sw - 190, 40.0)
+            avail_h = max(sh - 210, 40.0)
             section_scale = min(_drawing_nice_scale(min(avail_w / s_w, avail_h / s_h)), scale)
             section_place = _DrawingPlacement(
-                section["view"], column_x + 130 + (avail_w - s_w * section_scale) / 2,
-                700.0 + 60 + (avail_h - s_h * section_scale) / 2, section_scale)
+                section["view"], sx0 + 130 + (avail_w - s_w * section_scale) / 2,
+                sy0 + 60 + (avail_h - s_h * section_scale) / 2, section_scale)
             section_places.append((section, section_place))
 
     def collect(place, topo, segment_sets):
@@ -19751,9 +22474,9 @@ def _render_technical_drawing(painter, vertices, triangles, options):
             (side_name, "bottom"): (_drawing_extras(places[side_name].hz, places["top"].vt, tolerance), False),
         }
 
-    for name in ("front", "top", "right", "left"):
-        if name not in places:
-            continue
+    line_views = [name for name in ("front", "top", "right", "left") if name in places] + \
+        [name for name in places if str(name).startswith("aux-")]
+    for name in line_views:
         place = places[name]
         record_index = getattr(place, "record_index", None)
         record = options["view_placements"][record_index] \
@@ -19768,18 +22491,43 @@ def _render_technical_drawing(painter, vertices, triangles, options):
         if len(place.view.get("thin", ())):           # thread roots: thin continuous lines
             painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
             painter.drawPath(_drawing_segments_path(place, place.view["thin"]))
+        if len(place.view.get("chain", ())):          # pitch circles / lines of gears
+            painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
+            painter.drawPath(_drawing_segments_path(place, place.view["chain"]))
+        if topology.get("traces"):                    # exploded assembly: where the parts came from
+            right, up = place.view["right"], place.view["up"]
+            painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
+            for a, b in topology["traces"]:
+                start, end = (float(a @ right), float(a @ up)), (float(b @ right), float(b @ up))
+                if math.hypot(end[0] - start[0], end[1] - start[1]) * place.scale > 2.0:
+                    painter.drawLine(place.point(*start), place.point(*end))
         painter.restore()
+        if "broken_out" in place.view:                # broken-out section: its cut face, freehand edge
+            painter.save()
+            _paint_section_fill(painter, place, [], place.view["broken_out"]["regions"], pattern)
+            _paint_freehand_rect(painter, place, place.view["broken_out"]["rect"])
+            painter.restore()
+        if place.breaks:
+            _paint_break_lines(painter, place)
         painter.setFont(_drawing_font(DRAWING_TEXT))
         if not manual_layout:
-            _paint_circles(painter, metrics, place)
+            _paint_circles(painter, metrics, place, topology)
         else:
             for circle in _drawing_view_circles(topology, place.view):
                 if circle["kind"] == "circle" and circle["visible"]:
                     _paint_centre_mark(painter, place.point(circle["u"], circle["v"]),
                                        circle["radius"] * place.scale)
                     place.add_centre_cross(circle["u"], circle["v"], circle["radius"])
-        # cutting lines of all sections whose plane this view shows edge-on
+        # cutting lines of all sections whose plane this view shows edge-on; revolved sections
+        # are drawn on the view itself
+        for item in sections:
+            if item.get("kind") == "revolved" and item["name"] != name and \
+                    name in ("front", "top", "right", "left"):
+                painter.save()
+                _paint_revolved_section(painter, place, item, pattern)
+                painter.restore()
         cuts = [item for item in sections if item["name"] != name and
+                item.get("kind") != "revolved" and not str(name).startswith("aux-") and
                 _drawing_cut_sides(place, item["normal"]) is not None]
         for side in set(side for item in cuts for side in _drawing_cut_sides(place, item["normal"])):
             place.reserved[side] += 36
@@ -19790,8 +22538,8 @@ def _render_technical_drawing(painter, vertices, triangles, options):
                 _paint_chain(painter, metrics, place, values, side, overall)
         for item in cuts:
             painter.setFont(_drawing_font(DRAWING_TEXT_LARGE, True))
-            _paint_cut_line(painter, QFontMetricsF(_drawing_font(DRAWING_TEXT_LARGE, True)), place,
-                            item["normal"], item["letter"], item["offset"])
+            _paint_section_cut(painter, QFontMetricsF(_drawing_font(DRAWING_TEXT_LARGE, True)),
+                               place, item)
 
     if iso_place is not None:
         painter.save()
@@ -19813,10 +22561,20 @@ def _render_technical_drawing(painter, vertices, triangles, options):
         painter.setPen(_drawing_pen(DRAWING_THICK * float(options.get("_thick_scale", 1.0)),
                                     role="visible"))
         painter.drawPath(_drawing_segments_path(shown_place, shown["view"]["visible"]))
-        _paint_section_fill(painter, shown_place, shown["loops"])
+        _paint_section_fill(painter, shown_place, shown["loops"], shown.get("regions"), pattern)
         if len(shown["view"].get("thin", ())):        # thread roots over the hatching
             painter.setPen(_drawing_pen(DRAWING_THIN, role="visible"))
             painter.drawPath(_drawing_segments_path(shown_place, shown["view"]["thin"]))
+        # half / aligned section: a centre line between the two halves
+        painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
+        for coordinate, value in shown.get("centre_lines", ()):
+            reach = 12.0 / shown_place.scale
+            if coordinate == 0:
+                ends = ((value, shown_place.low[1] - reach), (value, shown_place.high[1] + reach))
+            else:
+                ends = ((shown_place.low[0] - reach, value), (shown_place.high[0] + reach, value))
+            painter.drawLine(shown_place.point(*ends[0]), shown_place.point(*ends[1]))
+            shown_place.centre_lines.append(ends)
         # centre lines of holes (and bosses) the cut runs through lengthwise (DIN ISO 128)
         painter.setPen(_drawing_pen(DRAWING_THIN, DRAWING_CHAIN, "centre"))
         for start, end in _drawing_section_axes(
@@ -19856,9 +22614,30 @@ def _render_technical_drawing(painter, vertices, triangles, options):
         painter.drawText(QPointF(shown_place.rect.left(),
                                  shown_place.rect.bottom() + shown_place.reserved["bottom"] + 30), label)
 
+    # detail views (Phase 3): part of a view in a circle, enlarged; the circle on the parent view
+    sections_by_name = {f"section-{item['letter']}": item for item in sections}
+    for name, place in places.items():
+        item = getattr(place, "detail", None)
+        if item is not None:
+            _paint_detail_view(painter, place, item, sections_by_name.get(place.parent_name),
+                               pattern, options)
+    # auxiliary views (Phase 3): the viewing direction on the parent view, the letter above
+    for name, place in places.items():
+        if not str(name).startswith("aux-"):
+            continue
+        item = next((entry for entry in options.get("aux_views") or []
+                     if f"aux-{entry.get('letter')}" == name), None)
+        parent = places.get(item.get("view")) if item else None
+        if parent is not None:
+            _paint_aux_marks(painter, parent, place, item)
+    # hole table: hole IDs on the view, positions and sizes in a table (Phase 2)
+    _paint_hole_table(painter, options, places, topology)
+    _paint_gear_table(painter, options)              # gear data (Phase 4)
+    _paint_stackup_tables(painter, options)          # tolerance stack-ups (Phase 5)
     # imported SVG / DXF graphics (placed like views; their geometry can be dimensioned)
     _paint_drawing_graphics(painter, options, scale, places)
-    dimension_hits = _paint_drawing_dimensions(painter, options, places, sections)
+    dimension_hits = _paint_drawing_dimensions(painter, options, places, sections, topology)
+    _paint_sheet_tables(painter, options)
     _paint_title_block(painter, options, _drawing_scale_text(scale))
     painter.restore()
     layout_records = _drawing_layout_records(places)
@@ -19871,8 +22650,34 @@ def _render_technical_drawing(painter, vertices, triangles, options):
             "page": dict(_DRAWING_PAGE)}
 
 
-def _paint_drawing_dimensions(painter, options, places, sections):
-    """Paint the added dimensions on their placed views; returns their hit boxes."""
+def _drawing_resolve_callout(annotation, topology, view, tip):
+    """A hole or thread callout that follows the model gets its values from the geometry at its
+    leader point (so the drawing and the model cannot disagree); others are returned as they are."""
+    if annotation is None or annotation.get("kind") not in ("hole", "thread") or \
+            not annotation.get("linked") or topology is None or "normal" not in view:
+        return annotation
+    reach = max(float(topology["span"]) * 0.01, 0.5)
+    if annotation["kind"] == "hole":
+        data = _drawing_hole_at(topology, view, tip, reach)
+        if data is None:
+            return annotation
+        return dict(annotation, d=data["d"], through=data["through"], depth=data["depth"],
+                    cbore=list(data["cbore"]) if data["cbore"] else None,
+                    csk=list(data["csk"]) if data["csk"] else None, count=data["count"])
+    data = _drawing_thread_at(topology, view, tip, reach)
+    if data is None:
+        return annotation
+    resolved = dict(annotation, label=data["label"], label_pitch=data["label_pitch"],
+                    internal=data["internal"], length=data["length"], through=data["through"],
+                    count=data["count"], hand=data.get("hand", "right"))
+    if data.get("cls") is not None:                  # the tolerance class of the thread feature
+        resolved["cls"] = data["cls"]
+    return resolved
+
+
+def _paint_drawing_dimensions(painter, options, places, sections, topology=None):
+    """Paint the added dimensions on their placed views; returns their hit boxes. Hole and
+    thread callouts that follow the model are read from `topology` (the part's geometry)."""
     dimension_hits = []
     for dimension_index, dimension in enumerate(options.get("dimensions", [])):
         place = places.get(dimension.get("view"))
@@ -19884,6 +22689,8 @@ def _paint_drawing_dimensions(painter, options, places, sections):
         if kind == "annotation":            # GD&T frame, datum, surface finish, weld symbol
             annotation = tol_normalize_annotation(dimension.get("ann"))
             if annotation is not None and dimension.get("points"):
+                annotation = _drawing_resolve_callout(annotation, topology, place.view,
+                                                      dimension["points"][0])
                 _paint_annotation(painter, annotation, place.point(*dimension["points"][0]),
                                   annotation["offset"], 1.0, _drawing_pen(DRAWING_THIN),
                                   _drawing_color("dimension"))
@@ -19967,25 +22774,28 @@ def _paint_drawing_dimensions(painter, options, places, sections):
                                    "y": label_rect.y(), "width": label_rect.width(),
                                    "height": label_rect.height()})
             continue
-        vector = np.array((second.x() - first.x(), second.y() - first.y()), dtype=float)
-        length = float(np.linalg.norm(vector))
-        if length < 1:
+        if kind in ("chamfer", "arc", "ordinate"):
+            rect = _paint_extra_dimension(painter, dimension, place.point, 1.0,
+                                          _drawing_pen(DRAWING_THIN), _drawing_color("dimension"),
+                                          _drawing_font(DRAWING_TEXT), _drawing_color("label_back"))
+            if rect is not None:
+                dimension_hits.append({"index": dimension_index, "x": rect.x(), "y": rect.y(),
+                                       "width": rect.width(), "height": rect.height()})
             continue
-        vector /= length
-        normal = np.array((-vector[1], vector[0]))
-        legacy_offset = float(dimension_offset @ normal)
-        distance = float(dimension.get("offset_distance", DRAWING_DIM_OFFSET + legacy_offset))
-        offset = normal * distance
-        start = QPointF(first.x() + offset[0], first.y() + offset[1])
-        end = QPointF(second.x() + offset[0], second.y() + offset[1])
+        frame = _drawing_length_frame((first.x(), first.y()), (second.x(), second.y()), dimension)
+        if frame is None or float(np.linalg.norm(frame[1] - frame[0])) < 1:
+            continue
+        start_page, end_page, vector, normal, _distance = frame
+        length = float(np.linalg.norm(end_page - start_page))
+        start, end = QPointF(*start_page), QPointF(*end_page)
         painter.setPen(_drawing_pen(DRAWING_THIN))
-        side = 1.0 if distance >= 0 else -1.0
-        if abs(distance) > 12.0:
-            # extension lines: 2 mm gap to the measured point, 2 mm beyond the dimension line (DIN 406-11)
-            for anchor, tip in ((first, start), (second, end)):
-                painter.drawLine(
-                    QPointF(anchor.x() + normal[0] * side * 8.0, anchor.y() + normal[1] * side * 8.0),
-                    QPointF(tip.x() + normal[0] * side * 8.0, tip.y() + normal[1] * side * 8.0))
+        # extension lines: 2 mm gap to the measured point, 2 mm beyond the dimension line (DIN 406-11)
+        for anchor, tip in ((first, start), (second, end)):
+            reach = np.array((tip.x() - anchor.x(), tip.y() - anchor.y()))
+            if float(np.linalg.norm(reach)) > 12.0:
+                step = reach / float(np.linalg.norm(reach)) * 8.0
+                painter.drawLine(QPointF(anchor.x() + step[0], anchor.y() + step[1]),
+                                 QPointF(tip.x() + step[0], tip.y() + step[1]))
         painter.drawLine(start, end)
         _paint_arrow(painter, start, vector)
         _paint_arrow(painter, end, -vector)
@@ -20048,6 +22858,7 @@ def _drawing_layout_records(places):
             "low": place.low.tolist(), "high": place.high.tolist(), "scale": place.scale,
             "right": place.view["right"].tolist(), "up": place.view["up"].tolist(),
             "hidden_shown": bool(show_hidden),
+            "breaks": [dict(item) for item in getattr(place, "breaks", ())],
             # nothing to pick in the shaded isometric view (no edge highlighting there)
             "pick_points": picks.get("pick_points", np.zeros((0, 2)))
                            if name != "isometric" else np.zeros((0, 2)),
@@ -20699,6 +23510,7 @@ class _FeatPreviewWorker(QThread):
         self._entry = entry
         self._others = others
         self._cancelled = False
+        self.notes = []          # sizes made smaller to fit (read by the done handler)
     def cancel(self): self._cancelled = True
     def run(self):
         if self._cancelled:
@@ -20716,7 +23528,8 @@ class _FeatPreviewWorker(QThread):
                 result, _ = apply_edge_feature(
                     self._base, self._feat, chains, self._others,
                     clip_outer=bool(self._entry and self._entry.get("type") in
-                                    ("extrusion", "imported", "bridge")))
+                                    ("extrusion", "imported", "bridge")),
+                    notes=self.notes)
             if self._cancelled:
                 return
             if result is not None:
@@ -21475,6 +24288,8 @@ class TechnicalDrawingCanvas(QWidget):
     viewSelected = pyqtSignal(object)
     dimensionPlaced = pyqtSignal(object)
     annotationPlaced = pyqtSignal(object)      # {"view", "position" (view coordinates), "offset" (page)}
+    tablePlaced = pyqtSignal(object)           # [x, y] page position of the hole table
+    viewPicked = pyqtSignal(str, str, object)  # purpose, view name, [two view points]
     cutPlaced = pyqtSignal(int, float)            # Cut tool: new section (plane, offset)
     cutMoved = pyqtSignal(str, float)             # section letter, offset (live while dragged)
     cutRotated = pyqtSignal(str, int, float)      # section letter, new plane, offset
@@ -21588,10 +24403,21 @@ class TechnicalDrawingCanvas(QWidget):
         self.dimension_kind = (view or "length") if mode == "dimension" else "length"
         self._dimension_points = []
         self._annotation_tip = None
+        self._series = None
+        self._pick_first = None
         self.setFocus()
         self.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
-        if mode == "annotation":
+        if mode == "view_pick":
+            self.statusChanged.emit({
+                "detail": "Detail view: click the centre of the detail on a view",
+                "aux": "Auxiliary view: click the inclined straight edge on a main view",
+                "break": "Break: click where the left-out part begins",
+                "broken_out": "Broken-out section: click the first corner of the rectangle"}.get(
+                    view, "Click on a view"))
+        elif mode == "annotation":
             self.statusChanged.emit("Annotation: click the feature on a view (the arrow tip)")
+        elif mode == "place_table":
+            self.statusChanged.emit("Hole table: click where its top left corner should be")
         elif mode == "place_view":
             self.statusChanged.emit("Placement: imported graphic" if _graphic_id(view) else
                                     f"Placement: {view.title()} view")
@@ -21681,6 +24507,14 @@ class TechnicalDrawingCanvas(QWidget):
         return None
 
     def _paint_dimensions_overlay(self, painter, sheet_rect):
+        """The added dimensions and annotations, printed in the sheet's units."""
+        previous = _drawing_use_units(getattr(self, "units", None))
+        try:
+            self._paint_dimensions_overlay_units(painter, sheet_rect)
+        finally:
+            _drawing_use_units(previous)
+
+    def _paint_dimensions_overlay_units(self, painter, sheet_rect):
         scale_x = sheet_rect.width() / self.page_w
         scale_y = sheet_rect.height() / self.page_h
         scale = min(scale_x, scale_y)
@@ -21753,10 +24587,11 @@ class TechnicalDrawingCanvas(QWidget):
                 annotation = tol_normalize_annotation(dimension.get("ann"))
                 if annotation is not None and points and points[0] is not None:
                     tip = self._screen_point(points[0], info, sheet_rect)
-                    _paint_annotation(painter, annotation, tip,
-                                      (annotation["offset"][0] * scale_x,
-                                       annotation["offset"][1] * scale_y), scale,
-                                      QPen(ink, line_width), ink)
+                    symbol = _paint_annotation(painter, annotation, tip,
+                                               (annotation["offset"][0] * scale_x,
+                                                annotation["offset"][1] * scale_y), scale,
+                                               QPen(ink, line_width), ink)
+                    record_hit(index, symbol, ())   # the symbol is dragged, the leader follows
                 continue
             if kind == "angle":
                 if len(points) != 3:
@@ -21828,26 +24663,31 @@ class TechnicalDrawingCanvas(QWidget):
                 opposite = QPointF(2 * center.x() - edge.x(), 2 * center.y() - edge.y())
                 record_hit(index, label_rect, (opposite, edge) if kind == "diameter" else (edge,))
                 continue
+            if kind in ("chamfer", "arc", "ordinate"):
+                label_rect = _paint_extra_dimension(
+                    painter, dimension,
+                    lambda u, v, info=info: self._screen_point((u, v), info, sheet_rect), scale,
+                    QPen(ink, line_width), ink, font, background)
+                if label_rect is not None:
+                    record_hit(index, label_rect, ())
+                continue
             first_page = np.asarray(self._view_page_point(points[0], info), dtype=float)
             second_page = np.asarray(self._view_page_point(points[1], info), dtype=float)
-            direction_page = second_page - first_page
-            length_page = float(np.linalg.norm(direction_page))
+            frame = _drawing_length_frame(first_page, second_page, dimension)
+            if frame is None:
+                continue
+            start_page, end_page, _direction, _normal, _distance = frame
+            length_page = float(np.linalg.norm(end_page - start_page))
             if length_page <= 1e-12:
                 continue
-            direction_page /= length_page
-            normal_page = np.array((-direction_page[1], direction_page[0]))
-            legacy = np.asarray(dimension.get("offset", (0.0, 0.0)), dtype=float)
-            distance = float(dimension.get("offset_distance", DRAWING_DIM_OFFSET + legacy @ normal_page))
-            offset_page = normal_page * distance
-            start = screen_page(first_page + offset_page)
-            end = screen_page(second_page + offset_page)
-            side = 1.0 if distance >= 0 else -1.0
-            if abs(distance) > 12.0:
-                # extension lines: 2 mm gap to the measured point, 2 mm beyond the dimension line
-                for anchor_page, tip_page in ((first_page, first_page + offset_page),
-                                              (second_page, second_page + offset_page)):
-                    painter.drawLine(screen_page(anchor_page + normal_page * side * 8.0),
-                                     screen_page(tip_page + normal_page * side * 8.0))
+            start = screen_page(start_page)
+            end = screen_page(end_page)
+            # extension lines: 2 mm gap to the measured point, 2 mm beyond the dimension line
+            for anchor_page, tip_page in ((first_page, start_page), (second_page, end_page)):
+                reach = tip_page - anchor_page
+                if float(np.linalg.norm(reach)) > 12.0:
+                    step = reach / float(np.linalg.norm(reach)) * 8.0
+                    painter.drawLine(screen_page(anchor_page + step), screen_page(tip_page + step))
             painter.drawLine(start, end)
             direction_screen = np.array((end.x() - start.x(), end.y() - start.y()))
             direction_screen /= max(float(np.linalg.norm(direction_screen)), 1e-12)
@@ -22000,6 +24840,10 @@ class TechnicalDrawingCanvas(QWidget):
 
     @staticmethod
     def _view_point(page_point, info):
+        if info.get("breaks"):                        # broken view: undo the left-out bands
+            mapped = (float(info["low"][0] + (page_point[0] - info["x"]) / info["scale"]),
+                      float(info["low"][1] + (info["y"] + info["height"] - page_point[1]) / info["scale"]))
+            return list(_drawing_break_unmap(mapped, info["breaks"], info["scale"]))
         return [float(info["low"][0] + (page_point[0] - info["x"]) / info["scale"]),
                 float(info["high"][1] - (page_point[1] - info["y"]) / info["scale"])]
 
@@ -22100,10 +24944,10 @@ class TechnicalDrawingCanvas(QWidget):
         starts a point-to-point dimension instead of instantly dimensioning the whole edge. An
         edge length is only taken when the edge is clicked away from its end points."""
         # centre lines are no use for radius / diameter (those need the circle itself)
+        whole = ("radius", "diameter", "arc", "chamfer")     # tools that need the curve / edge itself
         geometry = self._geometry_hit(page_point, info, tolerance, include_centre_lines=
-                                      self.dimension_kind not in ("radius", "diameter"))
-        if geometry is None or geometry["kind"] == "point" or \
-                self.dimension_kind in ("radius", "diameter"):
+                                      self.dimension_kind not in whole)
+        if geometry is None or geometry["kind"] == "point" or self.dimension_kind in whole:
             return geometry
         view_point = np.asarray(self._view_point(page_point, info), dtype=float)
         best = None
@@ -22175,7 +25019,15 @@ class TechnicalDrawingCanvas(QWidget):
                 self.statusChanged.emit(f"Drag the cutting line {cut['letter']}-{cut['letter']}")
                 self.update()
                 return
-        hit = self._hit_view(page_point, 12.0 if self.mode in ("dimension", "annotation") else 0.0)
+        if self.mode == "place_table":            # hole table: its top left corner
+            self.tablePlaced.emit([self._snap(page_point[0]), self._snap(page_point[1])])
+            self.set_mode()
+            return
+        hit = self._hit_view(page_point, 12.0 if self.mode in ("dimension", "annotation", "view_pick")
+                             else 0.0)
+        if self.mode == "view_pick":
+            self._pick_on_view(hit, page_point)
+            return
         if self.mode == "annotation":
             tip = getattr(self, "_annotation_tip", None)
             if tip is None:                      # first click: the feature the symbol refers to
@@ -22253,6 +25105,40 @@ class TechnicalDrawingCanvas(QWidget):
             if kind == "length":
                 self._pick_length(info["name"], geometry)
                 return
+            if kind == "chamfer":
+                straight = geometry["kind"] == "edge" or (geometry["kind"] == "curve" and
+                                                          geometry.get("linear", False))
+                if not straight or geometry.get("centre_line"):
+                    self.statusChanged.emit("Chamfer: pick the straight edge of the chamfer")
+                    return
+                ends = geometry["segment"] if "segment" in geometry else \
+                    (geometry["curve"][0], geometry["curve"][-1])
+                a, b = (np.asarray(end, dtype=float) for end in ends)
+                leg, angle = _drawing_chamfer_values(a, b)
+                if leg <= 1e-9:
+                    return
+                self._emit_dimension(info["name"], "chamfer", [a.tolist(), b.tolist()], leg,
+                                     {"chamfer_angle": float(angle), "text_offset": [60.0, -50.0]})
+                return
+            if kind == "arc":
+                if geometry["kind"] != "curve" or "radius" not in geometry:
+                    self.statusChanged.emit("Arc length: pick an arc")
+                    return
+                curve = np.asarray(geometry["curve"], dtype=float).reshape(-1, 2)
+                centre = np.asarray(geometry["circle_center"], dtype=float)
+                angles = np.unwrap(np.arctan2(curve[:, 1] - centre[1], curve[:, 0] - centre[0]))
+                sweep = float(angles[-1] - angles[0])
+                if abs(sweep) >= math.radians(359.0) or abs(sweep) <= 1e-6:
+                    self.statusChanged.emit("Arc length: pick an arc (not a full circle)")
+                    return
+                radius = float(geometry["radius"])
+                self._emit_dimension(info["name"], "arc",
+                                     [centre.tolist(), curve[0].tolist(), curve[-1].tolist()],
+                                     radius * abs(sweep), {"sweep_negative": sweep < 0})
+                return
+            if kind in ("baseline", "chain", "ordinate"):
+                self._pick_series(info["name"], kind, position)
+                return
             if kind == "angle" and geometry["kind"] != "point":
                 self.statusChanged.emit("Select three sketch points for an angle")
                 return
@@ -22322,23 +25208,26 @@ class TechnicalDrawingCanvas(QWidget):
                      if item.get("name") == dimension.get("view")), None)
         points = dimension.get("points") or [dimension.get("a"), dimension.get("b")]
         kind = dimension.get("type", "length")
+        if kind == "annotation":
+            annotation = tol_normalize_annotation(dimension.get("ann"))
+            return {"ann_offset": np.asarray(annotation["offset"], dtype=float)} if annotation else {}
+        if kind == "ordinate":
+            return {"level": float(dimension.get("level", 40.0)), "axis": dimension.get("axis", "x")}
+        if kind == "chamfer":
+            return {"text_offset": np.asarray(dimension.get("text_offset") or (60.0, -50.0), dtype=float)}
         if info is None or len(points) < 2 or points[0] is None or points[1] is None:
             return {}
         page = [np.asarray(self._view_page_point(point, info), dtype=float) for point in points]
         if kind == "length":
-            direction = page[1] - page[0]
-            length = float(np.linalg.norm(direction))
-            if length <= 1e-9:
+            frame = _drawing_length_frame(page[0], page[1], dimension)
+            if frame is None:
                 return {}
-            direction /= length
-            normal = np.array((-direction[1], direction[0]))
-            legacy = np.asarray(dimension.get("offset", (0.0, 0.0)), dtype=float)
-            return {"direction": direction, "normal": normal, "length": length,
-                    "distance": float(dimension.get("offset_distance",
-                                                    DRAWING_DIM_OFFSET + legacy @ normal)),
+            _start, _end, direction, normal, distance = frame
+            return {"direction": direction, "normal": normal,
+                    "length": float(np.linalg.norm(_end - _start)), "distance": distance,
                     "shift": float(dimension.get("text_shift", 0.0)),
                     "lift": float(dimension.get("text_lift", 0.0))}
-        if kind == "angle":
+        if kind in ("angle", "arc"):
             return {"vertex": page[0]}
         centre = page[0] if kind == "radius" else (page[0] + page[1]) / 2.0
         edge_vector = page[1] - centre
@@ -22356,6 +25245,17 @@ class TechnicalDrawingCanvas(QWidget):
         kind = drag.get("kind") or "length"
         delta = page_point - drag["start"]
         snap = self._snap
+        if kind == "annotation" and "ann_offset" in drag:
+            offset = drag["ann_offset"] + delta
+            dimension["ann"] = dict(dimension.get("ann") or {},
+                                    offset=[snap(float(offset[0])), snap(float(offset[1]))])
+            return
+        if kind == "ordinate" and "level" in drag:
+            dimension["level"] = snap(drag["level"] + float(delta[1] if drag["axis"] == "x" else delta[0]))
+            return
+        if kind == "arc" and "vertex" in drag:
+            dimension["offset_distance"] = max(10.0, snap(float(np.linalg.norm(page_point - drag["vertex"]))))
+            return
         if kind == "length" and "normal" in drag:
             if drag.get("part") == "text":
                 # as in the sketcher: the number stays on its dimension line and slides along it;
@@ -22448,11 +25348,113 @@ class TechnicalDrawingCanvas(QWidget):
             return
         self._emit_dimension(view, "length", [p.tolist() for p in positions], value)
 
-    def _emit_dimension(self, view, kind, points, value):
+    def _emit_dimension(self, view, kind, points, value, extra=None, keep_mode=False):
         self.dimensionPlaced.emit({"view": view, "points": points,
                                    "a": points[0], "b": points[-1],
-                                   "type": kind, "value": float(value)})
+                                   "type": kind, "value": float(value), "extra": extra or {}})
+        if not keep_mode:
+            self.set_mode()
+
+    def _pick_on_view(self, hit, page_point):
+        """Picks for views made from views: a detail (centre, then a point of its circle), an
+        auxiliary view (an inclined straight edge), a break (two points), a broken-out section
+        (two corners). The result goes out as viewPicked(purpose, view, [p1, p2])."""
+        purpose = self.active_view
+        main = ("front", "top", "right", "left")
+        if hit is None:
+            self.statusChanged.emit("Click on a view")
+            return
+        info, _record = hit
+        name = info["name"]
+        allowed = name not in ("isometric",) and not _graphic_id(name) if purpose == "detail" else \
+            name in main or (purpose == "break" and str(name).startswith("aux-"))
+        if not allowed:
+            self.statusChanged.emit(f"Not possible on this view ({purpose.replace('_', '-')})")
+            return
+        tolerance = max(10.0 * self.page_w / max(self._sheet_rect().width(), 1.0) /
+                        max(info["scale"], 1e-9), 8.0 / max(info["scale"], 1e-9))
+        if purpose == "aux":
+            geometry = self._geometry_hit(page_point, info, tolerance, include_centre_lines=False)
+            straight = geometry is not None and (geometry["kind"] == "edge" or (
+                geometry["kind"] == "curve" and geometry.get("linear", False)))
+            if not straight:
+                self.statusChanged.emit("Auxiliary view: click a straight edge")
+                return
+            ends = geometry["segment"] if "segment" in geometry else \
+                (geometry["curve"][0], geometry["curve"][-1])
+            self.set_mode()
+            self.viewPicked.emit(purpose, name, [np.asarray(end, dtype=float).tolist() for end in ends])
+            return
+        geometry = self._geometry_hit(page_point, info, tolerance)
+        position = np.asarray(geometry["position"], dtype=float) if geometry is not None and \
+            geometry["kind"] == "point" else np.asarray(self._view_point(page_point, info), dtype=float)
+        first = getattr(self, "_pick_first", None)
+        if first is None or first["view"] != name:
+            self._pick_first = {"view": name, "position": position.tolist()}
+            self.statusChanged.emit({"detail": "Detail view: click a point of its circle",
+                                     "break": "Break: click where the left-out part ends",
+                                     "broken_out": "Broken-out section: click the opposite corner"}
+                                    .get(purpose, "Click the second point"))
+            return
         self.set_mode()
+        self.viewPicked.emit(purpose, name, [first["position"], position.tolist()])
+
+    def _pick_series(self, view, kind, position):
+        """Baseline, chain and ordinate dimensioning: a series of clicks in one view (right-click
+        ends it). Baseline: every point from the first one, the dimension lines stacked; chain:
+        from point to point on one line; both horizontal or vertical as the first two points
+        lie. Ordinate: the first point is the origin (0), every further point gets its X and Y
+        coordinate (a coordinate given already is not repeated)."""
+        series = getattr(self, "_series", None)
+        position = np.asarray(position, dtype=float)
+        if series is None or series.get("view") != view:
+            self._series = {"view": view, "base": position, "previous": position, "orient": None,
+                            "count": 0, "used": ({round(float(position[0]), 6)},
+                                                 {round(float(position[1]), 6)})}
+            if kind == "ordinate":
+                for axis, level in (("x", 40.0), ("y", -40.0)):
+                    self._emit_dimension(view, "ordinate", [position.tolist(), position.tolist()],
+                                         0.0, {"axis": axis, "level": level}, keep_mode=True)
+                self.statusChanged.emit("Ordinate: origin set · click the points to dimension "
+                                        "(right-click ends)")
+            else:
+                self.statusChanged.emit(f"{kind.title()}: base point set · click the next point "
+                                        "(right-click ends)")
+            self.update()
+            return
+        if kind == "ordinate":
+            made = 0
+            for index, axis, level in ((0, "x", 40.0), (1, "y", -40.0)):
+                key = round(float(position[index]), 6)
+                if key in series["used"][index]:
+                    continue
+                series["used"][index].add(key)
+                self._emit_dimension(view, "ordinate", [series["base"].tolist(), position.tolist()],
+                                     abs(float(position[index] - series["base"][index])),
+                                     {"axis": axis, "level": level}, keep_mode=True)
+                made += 1
+            self.statusChanged.emit("Ordinate: next point (right-click ends)" if made else
+                                    "Ordinate: both coordinates of this point are given already")
+            return
+        start = series["base"] if kind == "baseline" else series["previous"]
+        delta = position - start
+        if series["orient"] is None:
+            if float(np.linalg.norm(delta)) <= 1e-9:
+                return
+            series["orient"] = "h" if abs(delta[0]) >= abs(delta[1]) else "v"
+        axis = 0 if series["orient"] == "h" else 1
+        if abs(float(delta[axis])) <= 1e-9:
+            self.statusChanged.emit(f"{kind.title()}: this point adds no "
+                                    f"{'horizontal' if axis == 0 else 'vertical'} distance")
+            return
+        distance = DRAWING_DIM_OFFSET + (28.0 * series["count"] if kind == "baseline" else 0.0)
+        self._emit_dimension(view, "length", [start.tolist(), position.tolist()],
+                             abs(float(delta[axis])),
+                             {"orient": series["orient"], "offset_distance": distance},
+                             keep_mode=True)
+        series["count"] += 1
+        series["previous"] = position
+        self.statusChanged.emit(f"{kind.title()}: next point (right-click ends)")
 
     def leaveEvent(self, event):
         self._cursor_pos = None
@@ -22861,6 +25863,10 @@ class TechnicalDrawingCanvas(QWidget):
 
     @staticmethod
     def _view_page_point(position, info):
+        if info.get("breaks"):                        # broken view: the bands are left out
+            u, v = _drawing_break_map(position, info["breaks"], info["scale"])
+            return (info["x"] + (u - info["low"][0]) * info["scale"],
+                    info["y"] + info["height"] - (v - info["low"][1]) * info["scale"])
         return (info["x"] + (position[0] - info["low"][0]) * info["scale"],
                 info["y"] + (info["high"][1] - position[1]) * info["scale"])
 
@@ -23322,7 +26328,10 @@ GRAPHIC_MAX_POINTS = 1_500_000
 # what each sheet of a drawing keeps for itself; everything else (the title block fields shared by
 # all sheets, grid / snap, the logo, imported models and graphics) belongs to the whole drawing
 DRAWING_SHEET_KEYS = ("name", "source", "front", "rotation", "scale_ratio", "view_placements",
-                      "dimensions", "sections", "sheet", "orientation", "title", "number")
+                      "dimensions", "sections", "sheet", "orientation", "title", "number",
+                      "material", "treatment", "notes", "unit", "dual_units", "parts_list",
+                      "parts", "hole_table", "details", "aux_views", "hatch", "gear_table",
+                      "gear_quality", "gear_simplified", "stackups")
 
 
 def _graphic_id(name):
@@ -24375,14 +27384,88 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
     source = options.get("source")
     if isinstance(source, dict) and source.get("kind") == "project" and source.get("name"):
         options["source"] = {"kind": "project", "name": str(source["name"])}
+        try:                                      # exploded assembly view (Phase 5)
+            explode = float(source.get("explode") or 0.0)
+        except (TypeError, ValueError):
+            explode = 0.0
+        if math.isfinite(explode) and explode > 0.0:
+            options["source"]["explode"] = min(explode, 10000.0)
     elif isinstance(source, dict) and source.get("kind") == "model" and \
             source.get("id") in model_ids:
         options["source"] = {"kind": "model", "id": str(source["id"])}
     elif "source" in options:
         options["source"] = None
+    main_views = ("front", "top", "right", "left")
     valid_names = {"front", "top", "right", "left", "isometric", "section"} | \
         {f"section-{item['letter']}" for item in options["sections"]} | \
         {GRAPHIC_PREFIX + graphic_id for graphic_id in graphic_ids}
+    # Phase 3: auxiliary views of a main view, detail views of any placed view
+    def letter_of(item):
+        letter = str(item.get("letter", "")).strip().upper()[:1]
+        return letter if letter.isalpha() else None
+
+    def pair_of(value):
+        if isinstance(value, (list, tuple)) and len(value) == 2 and \
+                all(tol_number(v) is not None for v in value):
+            return [float(value[0]), float(value[1])]
+        return None
+    aux_views = []
+    for item in options.get("aux_views") or []:
+        if isinstance(item, dict) and letter_of(item) and item.get("view") in main_views and \
+                pair_of(item.get("a")) and pair_of(item.get("b")):
+            aux_views.append({"letter": letter_of(item), "view": item["view"], "a": pair_of(item["a"]),
+                              "b": pair_of(item["b"]), "flip": bool(item.get("flip"))})
+    options["aux_views"] = aux_views
+    valid_names |= {f"aux-{item['letter']}" for item in aux_views}
+    details = []
+    for item in options.get("details") or []:
+        if not isinstance(item, dict) or not letter_of(item) or item.get("view") not in valid_names:
+            continue
+        values = [tol_number(item.get(key)) for key in ("u", "v", "r", "factor")]
+        if None in values[:3] or values[2] <= 0:
+            continue
+        factor = values[3] if values[3] is not None and 0.01 <= values[3] <= 100 else 2.0
+        details.append({"letter": letter_of(item), "view": item["view"], "u": values[0],
+                        "v": values[1], "r": values[2], "factor": factor})
+    options["details"] = details
+    valid_names |= {f"detail-{item['letter']}" for item in details}
+    if options.get("hatch") not in DRAWING_HATCHES:
+        options.pop("hatch", None)
+    # Phase 4: gear data table, quality, simplified teeth
+    table = options.get("gear_table")
+    if isinstance(table, dict) and tol_number(table.get("x")) is not None and \
+            tol_number(table.get("y")) is not None:
+        options["gear_table"] = {"x": float(table["x"]), "y": float(table["y"])}
+    else:
+        options.pop("gear_table", None)
+    if str(options.get("gear_quality")) not in DRAWING_GEAR_QUALITIES:
+        options.pop("gear_quality", None)
+    options["gear_simplified"] = bool(options.get("gear_simplified", True))
+    # Phase 5: tolerance stack-ups
+    stackups = []
+    for item in (options.get("stackups") or [])[:20]:
+        if not isinstance(item, dict):
+            continue
+        rows = []
+        for row in (item.get("rows") or [])[:60]:
+            if not isinstance(row, dict) or any(tol_number(row.get(key)) is None
+                                                for key in ("nominal", "upper", "lower")):
+                continue
+            clean = {"name": str(row.get("name", ""))[:60], "nominal": float(row["nominal"]),
+                     "upper": float(row["upper"]), "lower": float(row["lower"]),
+                     "sign": -1 if tol_number(row.get("sign")) is not None and row["sign"] < 0 else 1}
+            if isinstance(row.get("dim"), int) and not isinstance(row.get("dim"), bool):
+                clean["dim"] = int(row["dim"])
+            rows.append(clean)
+        if not rows:
+            continue
+        stackup = {"name": str(item.get("name", "Gap"))[:60], "rows": rows,
+                   "min": tol_number(item.get("min")), "max": tol_number(item.get("max")),
+                   "show": bool(item.get("show"))}
+        if tol_number(item.get("x")) is not None and tol_number(item.get("y")) is not None:
+            stackup.update(x=float(item["x"]), y=float(item["y"]))
+        stackups.append(stackup)
+    options["stackups"] = stackups
     options["view_placements"] = []
     for item in placements:
         if not isinstance(item, dict) or item.get("name") not in valid_names:
@@ -24391,6 +27474,22 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
         if math.isfinite(x) and math.isfinite(y):
             record = {"name": item["name"], "x": x, "y": y,
                       "hidden_lines": bool(item.get("hidden_lines", True))}
+            if item["name"] in main_views or str(item["name"]).startswith("aux-"):
+                breaks = []
+                for entry in (item.get("breaks") or [])[:8]:
+                    if isinstance(entry, dict) and tol_number(entry.get("a")) is not None and \
+                            tol_number(entry.get("b")) is not None:
+                        breaks.append({"axis": "v" if entry.get("axis") == "v" else "u",
+                                       "a": float(entry["a"]), "b": float(entry["b"])})
+                if breaks:
+                    record["breaks"] = breaks
+            broken_out = item.get("broken_out")
+            if item["name"] in main_views and isinstance(broken_out, dict):
+                rect = broken_out.get("rect")
+                depth = tol_number(broken_out.get("depth"))
+                if isinstance(rect, (list, tuple)) and len(rect) == 4 and depth is not None and \
+                        all(tol_number(v) is not None for v in rect):
+                    record["broken_out"] = {"rect": [float(v) for v in rect], "depth": depth}
             scale = item.get("scale")
             if _graphic_id(item["name"]) and isinstance(scale, (int, float)) and \
                     math.isfinite(scale) and scale > 0:
@@ -24405,8 +27504,11 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
             continue
         dimension = {"label": str(item.get("label", "Measurement"))[:80], "value": value}
         kind = item.get("type")
-        if kind in ("length", "radius", "diameter", "angle"):
+        if kind in ("length", "radius", "diameter", "angle", "chamfer", "arc", "ordinate"):
             dimension["type"] = kind
+            needed = 3 if kind == "arc" else 2 if kind in ("chamfer", "ordinate") else None
+            if needed and len(item.get("points") or []) != needed:
+                continue
         elif kind == "annotation":
             annotation = tol_normalize_annotation(item.get("ann"))
             tip = item.get("points")
@@ -24432,9 +27534,17 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
                     if len(points) == 2:
                         dimension.update(a=points[0], b=points[1])
         # where the dimension line and its text were dragged to
-        for key in ("offset_distance", "text_shift", "text_lift", "angle", "leader_length"):
+        for key in ("offset_distance", "text_shift", "text_lift", "angle", "leader_length",
+                    "chamfer_angle", "level"):
             if isinstance(item.get(key), (int, float)) and math.isfinite(item[key]):
                 dimension[key] = float(item[key])
+        if item.get("orient") in ("h", "v"):
+            dimension["orient"] = item["orient"]
+        if item.get("axis") in ("x", "y"):
+            dimension["axis"] = item["axis"]
+        for key in ("reference", "sweep_negative"):
+            if item.get(key):
+                dimension[key] = True
         for key in ("offset", "text_offset"):
             pair = item.get(key)
             if isinstance(pair, (list, tuple)) and len(pair) == 2 and \
@@ -24444,6 +27554,25 @@ def _validated_drawing_sheet(options, graphic_ids, model_ids):
         if tolerance:
             dimension["tol"] = tolerance
         options["dimensions"].append(dimension)
+    # Phase 2: title block fields, notes, units, parts list, hole table of the sheet
+    for key, limit in (("material", 120), ("treatment", 120), ("notes", 2000)):
+        if key in options:
+            options[key] = str(options[key] or "")[:limit]
+    if options.get("unit") not in DRAWING_UNITS:
+        options.pop("unit", None)
+    options["dual_units"] = bool(options.get("dual_units"))
+    options["parts_list"] = bool(options.get("parts_list"))
+    parts = options.get("parts")
+    options["parts"] = [
+        {"name": str(part.get("name", ""))[:80], "qty": max(1, min(9999, int(tol_number(part.get("qty")) or 1))),
+         "material": str(part.get("material", ""))[:60]}
+        for part in (parts if isinstance(parts, list) else [])[:200] if isinstance(part, dict)]
+    table = options.get("hole_table")
+    if isinstance(table, dict) and table.get("view") in valid_names and \
+            tol_number(table.get("x")) is not None and tol_number(table.get("y")) is not None:
+        options["hole_table"] = {"view": table["view"], "x": float(table["x"]), "y": float(table["y"])}
+    else:
+        options.pop("hole_table", None)
     return options
 
 
@@ -24639,17 +27768,361 @@ class FitCalculatorDialog(QDialog):
             self.report.setText(f"⚠ {ex}")
 
 
-class AnnotationDialog(QDialog):
-    """Parameters of a geometric tolerance frame, datum, surface finish or weld symbol."""
+class BearingDialog(QDialog):
+    """Bearing library (Phase 5): type, size and load case with the bearing's own tolerances
+    and the recommended shaft / housing seats. `diameter` preselects a bearing whose bore or
+    outside diameter it is (for a seat on a drawing)."""
 
-    def __init__(self, parent, kind, annotation=None):
+    def __init__(self, parent, title="Bearing", diameter=None, button_text="Insert"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.catalogue = bearing_catalogue()
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.kind = QComboBox()
+        for key, text in BEARING_TYPES.items():
+            self.kind.addItem(text, key)
+        self.size = QComboBox()
+        self.load = QComboBox()
+        for key, text in BEARING_LOAD_CASES.items():
+            self.load.addItem(text, key)
+        self.info = QLabel()
+        self.info.setTextFormat(Qt.PlainText)
+        self.info.setWordWrap(True)
+        self.info.setMinimumWidth(430)
+        form.addRow("Type:", self.kind)
+        form.addRow("Size:", self.size)
+        form.addRow("Load case:", self.load)
+        layout.addLayout(form)
+        layout.addWidget(self.info)
+        note = QLabel("Sizes are the common catalogue values; check them against the "
+                      "manufacturer's data sheet.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#aab2bd;")
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText(button_text)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.kind.currentIndexChanged.connect(self._fill_sizes)
+        self.size.currentIndexChanged.connect(self._update)
+        self.load.currentIndexChanged.connect(self._update)
+        if diameter is not None:                      # the bearing that fits this diameter
+            match = next((item for item in self.catalogue
+                          if abs(item["d"] - diameter) < 0.01 or abs(item["D"] - diameter) < 0.01), None)
+            if match is not None:
+                self.kind.setCurrentIndex(self.kind.findData(match["type"]))
+                self._fill_sizes()
+                self.size.setCurrentIndex(self.size.findText(self._size_text(match)))
+        self._fill_sizes(keep=True)
+
+    @staticmethod
+    def _size_text(item):
+        return f"{item['name']}   d {item['d']:g} × D {item['D']:g} × B {item['B']:g}"
+
+    def _fill_sizes(self, *_, keep=False):
+        current = self.size.currentText() if keep else None
+        self.size.blockSignals(True)
+        self.size.clear()
+        for item in self.catalogue:
+            if item["type"] == self.kind.currentData():
+                self.size.addItem(self._size_text(item), item["name"])
+        if current:
+            index = self.size.findText(current)
+            if index >= 0:
+                self.size.setCurrentIndex(index)
+        self.size.blockSignals(False)
+        plain = self.kind.currentData() in ("plain", "needle")
+        self.load.setEnabled(not plain)
+        self._update()
+
+    def bearing(self):
+        return bearing_find(self.size.currentData()) if self.size.currentData() else None
+
+    def seat(self):
+        bearing = self.bearing()
+        return bearing_seat(bearing, self.load.currentData()) if bearing else None
+
+    def _update(self, *_):
+        bearing, seat = self.bearing(), self.seat()
+        if bearing is None:
+            self.info.setText("")
+            return
+        (bore_up, bore_low), (out_up, out_low) = bearing_ring_deviations(bearing)
+        dev = lambda up, low: f"{up * 1000:+.0f} / {low * 1000:+.0f} µm".replace("+0 ", "0 ").replace("+0 /", "0 /")
+        lines = [f"{bearing['name']}: bore d = {bearing['d']:g} mm ({dev(bore_up, bore_low)}), "
+                 f"outside D = {bearing['D']:g} mm ({dev(out_up, out_low)}), width {bearing['B']:g} mm, "
+                 f"chamfer r = {bearing['r']:g} mm",
+                 "",
+                 f"Shaft seat:    Ø{bearing['d']:g} {seat['shaft']}   "
+                 f"({dev(*tol_deviations(seat['shaft'], bearing['d']))})",
+                 f"Housing seat:  Ø{bearing['D']:g} {seat['housing']}   "
+                 f"({dev(*tol_deviations(seat['housing'], bearing['D']))})",
+                 f"Shoulders:     shaft Ø ≥ {seat['shoulder_shaft']:g} mm, housing Ø ≤ "
+                 f"{seat['shoulder_housing']:g} mm, fillet r ≤ {seat['fillet']:g} mm"]
+        for side, diameter, symbol, ring in (("shaft", bearing["d"], seat["shaft"], (bore_up, bore_low)),
+                                             ("housing", bearing["D"], seat["housing"], (out_up, out_low))):
+            up, low = tol_deviations(symbol, diameter)
+            if side == "shaft":                       # bore (hole) on the shaft
+                gap_max, gap_min = ring[0] - low, ring[1] - up
+            else:                                     # housing (hole) on the outer ring
+                gap_max, gap_min = up - ring[1], low - ring[0]
+            kind = "clearance" if gap_min >= 0 else "interference" if gap_max <= 0 else "transition"
+            lines.append(f"{side.title()} fit: {kind}, clearance {gap_min * 1000:+.0f} … "
+                         f"{gap_max * 1000:+.0f} µm")
+        if seat["note"]:
+            lines += ["", seat["note"]]
+        self.info.setText("\n".join(lines))
+
+
+class StackupDialog(QDialog):
+    """Tolerance stack-up (Phase 5): a chain of dimensions of the sheet (or typed in) with a sign
+    each; worst-case and statistical (RSS) totals of the gap and the check against its limits.
+    `stackup` {"name", "rows", "min", "max", "show"} is edited and returned by result()."""
+
+    def __init__(self, parent, dimensions, general, stackup=None):
+        super().__init__(parent)
+        self.setWindowTitle("Tolerance stack-up")
+        self.resize(760, 520)
+        self.dimensions, self.general = dimensions, general
+        stackup = stackup or {"name": "Gap", "rows": [], "min": 0.0, "max": None, "show": False}
+        layout = QVBoxLayout(self)
+        top = QFormLayout()
+        self.name = QLineEdit(stackup.get("name", "Gap"))
+        top.addRow("Name of the gap:", self.name)
+        layout.addLayout(top)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Dimension", "Nominal", "Upper", "Lower", "Sign", "From"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        layout.addWidget(self.table, 1)
+        buttons = QHBoxLayout()
+        self.pick = QComboBox()
+        self.pick.addItem("Add a dimension of the sheet…", None)
+        for index, dimension in enumerate(dimensions):
+            if dimension.get("type", "length") in ("length", "diameter", "radius", "ordinate", "chamfer", "arc"):
+                text = TechnicalDrawingDialog._dimension_list_text(dimension)
+                self.pick.addItem(f"{index + 1}: {text}", index)
+        self.pick.activated.connect(self._add_dimension)
+        add_manual = QPushButton("Add a row")
+        add_manual.clicked.connect(lambda: self._add_row({"name": "Part", "nominal": 10.0, "upper": 0.1,
+                                                         "lower": -0.1, "sign": 1}))
+        remove = QPushButton("Remove row")
+        remove.clicked.connect(lambda: self.table.removeRow(self.table.currentRow()) or self._update())
+        buttons.addWidget(self.pick, 1)
+        buttons.addWidget(add_manual)
+        buttons.addWidget(remove)
+        layout.addLayout(buttons)
+        limits = QFormLayout()
+        self.low = QLineEdit("" if stackup.get("min") is None else f"{stackup['min']:g}")
+        self.high = QLineEdit("" if stackup.get("max") is None else f"{stackup['max']:g}")
+        for edit in (self.low, self.high):
+            edit.setPlaceholderText("no limit")
+            edit.editingFinished.connect(self._update)
+        limits.addRow("Smallest allowed gap (mm):", self.low)
+        limits.addRow("Largest allowed gap (mm):", self.high)
+        self.show_table = QCheckBox("Show the stack-up as a table on the sheet")
+        self.show_table.setChecked(bool(stackup.get("show")))
+        limits.addRow(self.show_table)
+        layout.addLayout(limits)
+        self.report = QLabel()
+        self.report.setTextFormat(Qt.PlainText)
+        self.report.setWordWrap(True)
+        layout.addWidget(self.report)
+        ok = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok.accepted.connect(self.accept)
+        ok.rejected.connect(self.reject)
+        layout.addWidget(ok)
+        self.table.itemChanged.connect(lambda _item: self._update())
+        for row in stackup.get("rows", ()):
+            self._add_row(row)
+        self._update()
+
+    def _add_dimension(self, *_):
+        index = self.pick.currentData()
+        self.pick.setCurrentIndex(0)
+        if index is None:
+            return
+        dimension = self.dimensions[index]
+        upper, lower = tol_dimension_deviations(dimension["value"], dimension.get("tol"), self.general)
+        label = str(dimension.get("label", "")).strip()
+        self._add_row({"dim": index, "name": f"#{index + 1} {label}".strip(),
+                       "nominal": abs(float(dimension["value"])), "upper": upper, "lower": lower,
+                       "sign": 1})
+
+    def _add_row(self, row):
+        self.table.blockSignals(True)
+        index = self.table.rowCount()
+        self.table.insertRow(index)
+        values = (row.get("name", ""), f"{float(row['nominal']):g}", f"{float(row['upper']):+g}",
+                  f"{float(row['lower']):+g}", "+" if float(row.get("sign", 1)) >= 0 else "−",
+                  "dimension" if row.get("dim") is not None else "typed in")
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            if column == 5:
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setData(Qt.UserRole, row.get("dim"))
+            self.table.setItem(index, column, item)
+        self.table.blockSignals(False)
+        self._update()
+
+    def rows(self):
+        rows = []
+        for index in range(self.table.rowCount()):
+            text = lambda column: (self.table.item(index, column).text()
+                                   if self.table.item(index, column) else "").replace("−", "-")
+            try:
+                row = {"name": text(0)[:60], "nominal": float(text(1)), "upper": float(text(2)),
+                       "lower": float(text(3)), "sign": -1 if text(4).strip().startswith("-") else 1}
+            except ValueError:
+                continue
+            dim = self.table.item(index, 5).data(Qt.UserRole) if self.table.item(index, 5) else None
+            if dim is not None:
+                row["dim"] = int(dim)
+            rows.append(row)
+        return rows
+
+    def _limit(self, edit):
+        try:
+            return float(edit.text().replace(",", "."))
+        except ValueError:
+            return None
+
+    def _update(self, *_):
+        rows = self.rows()
+        if not rows:
+            self.report.setText("Add the dimensions of the chain; a minus sign subtracts a dimension.")
+            return
+        result = tol_stackup(rows, self._limit(self.low), self._limit(self.high))
+        mark = lambda ok: "✔ within the limits" if ok else "✘ outside the limits"
+        self.report.setText(
+            f"Nominal gap: {result['nominal']:.3f} mm\n"
+            f"Worst case: {result['worst'][0]:.3f} … {result['worst'][1]:.3f} mm   {mark(result['worst_ok'])}\n"
+            f"Statistical (RSS): {result['rss'][0]:.3f} … {result['rss'][1]:.3f} mm   {mark(result['rss_ok'])}")
+
+    def result(self):
+        return {"name": self.name.text().strip()[:60] or "Gap", "rows": self.rows(),
+                "min": self._limit(self.low), "max": self._limit(self.high),
+                "show": self.show_table.isChecked()}
+
+
+class AnnotationDialog(QDialog):
+    """Parameters of a geometric tolerance frame, datum, surface finish, weld symbol, note, hole
+    or thread callout or balloon. `parts` (names) label the balloon numbers."""
+
+    def __init__(self, parent, kind, annotation=None, parts=None, item=1):
         super().__init__(parent)
         self.kind = kind
         self.setWindowTitle(TOL_ANNOTATION_TITLES[kind])
         annotation = tol_normalize_annotation(annotation) if annotation else None
+        self._annotation = annotation
         self._offset = annotation["offset"] if annotation else [60.0, -40.0]
+        self._parts = list(parts or [])
         form = QFormLayout()
-        if kind == "gdt":
+
+        def length_spin(value, minimum=0.0):
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, 100000.0)
+            spin.setDecimals(3)
+            spin.setSuffix(" mm")
+            spin.setValue(float(value))
+            return spin
+
+        def count_spin(value):
+            spin = QSpinBox()
+            spin.setRange(1, 999)
+            spin.setPrefix("× ")
+            spin.setValue(int(value))
+            return spin
+        if kind == "note":
+            self.note_text = QPlainTextEdit(annotation["text"] if annotation else "")
+            self.note_text.setPlaceholderText("Text of the note (several lines possible)")
+            self.note_text.setMinimumSize(320, 110)
+            self.note_leader = QCheckBox("Leader with an arrow to the clicked feature")
+            self.note_leader.setChecked(annotation["leader"] if annotation else True)
+            self.note_frame = QCheckBox("Frame around the text")
+            self.note_frame.setChecked(bool(annotation and annotation["frame"]))
+            form.addRow("Text:", self.note_text)
+            form.addRow(self.note_leader)
+            form.addRow(self.note_frame)
+        elif kind == "hole":
+            a = annotation or {"linked": True, "d": 6.6, "through": True, "depth": 10.0,
+                               "cbore": None, "csk": None, "count": 1}
+            self.linked = QCheckBox("Follow the model (values read from the hole)")
+            self.linked.setChecked(a["linked"])
+            self.hole_count = count_spin(a["count"])
+            self.hole_d = length_spin(a["d"], 0.001)
+            self.hole_through = QCheckBox("Through (THRU)")
+            self.hole_through.setChecked(a["through"])
+            self.hole_depth = length_spin(a["depth"])
+            self.cbore = QCheckBox("Counterbore")
+            self.cbore.setChecked(bool(a["cbore"]))
+            self.cbore_d = length_spin((a["cbore"] or (11.0, 6.8))[0], 0.001)
+            self.cbore_depth = length_spin((a["cbore"] or (11.0, 6.8))[1], 0.001)
+            self.csk = QCheckBox("Countersink")
+            self.csk.setChecked(bool(a["csk"]))
+            self.csk_d = length_spin((a["csk"] or (12.0, 90.0))[0], 0.001)
+            self.csk_angle = QDoubleSpinBox()
+            self.csk_angle.setRange(10.0, 170.0)
+            self.csk_angle.setSuffix("°")
+            self.csk_angle.setValue(float((a["csk"] or (12.0, 90.0))[1]))
+            form.addRow(self.linked)
+            form.addRow("Number of holes:", self.hole_count)
+            form.addRow("Diameter:", self.hole_d)
+            form.addRow(self.hole_through)
+            form.addRow("Depth:", self.hole_depth)
+            form.addRow(self.cbore)
+            form.addRow("Counterbore Ø / depth:", self._pair(self.cbore_d, self.cbore_depth))
+            form.addRow(self.csk)
+            form.addRow("Countersink Ø / angle:", self._pair(self.csk_d, self.csk_angle))
+            self._linked_widgets = (self.hole_count, self.hole_d, self.hole_through, self.hole_depth,
+                                    self.cbore, self.cbore_d, self.cbore_depth, self.csk,
+                                    self.csk_d, self.csk_angle)
+        elif kind == "thread":
+            a = annotation or {"linked": True, "label": "M8", "label_pitch": "M8×1.25",
+                               "show_pitch": False, "cls": "6H", "internal": True,
+                               "length": 16.0, "through": False, "count": 1}
+            self.linked = QCheckBox("Follow the model (size, length read from the thread)")
+            self.linked.setChecked(a["linked"])
+            self.thread_count = count_spin(a["count"])
+            self.thread_label = QLineEdit(a["label"])
+            self.thread_label.setToolTip("Designation without the pitch (metric coarse: M8)")
+            self.thread_label_pitch = QLineEdit(a["label_pitch"])
+            self.thread_label_pitch.setToolTip("Designation with the pitch (M8×1.25)")
+            self.show_pitch = QCheckBox("Print the pitch (always for fine threads)")
+            self.show_pitch.setChecked(a["show_pitch"])
+            self.thread_cls = QComboBox()
+            self.thread_cls.setEditable(True)
+            self.thread_cls.addItems(["6H", "6g", "7H", "6e", "5H", "4h", "2B", "2A", ""])
+            self.thread_cls.setCurrentText(a["cls"])
+            self.thread_cls.setToolTip("Tolerance class: capital letter for internal threads (6H), "
+                                       "lower case for external ones (6g); Unified: 2B / 2A")
+            self.thread_internal = QCheckBox("Internal thread (tapped hole)")
+            self.thread_internal.setChecked(a["internal"])
+            self.thread_length = length_spin(a["length"])
+            self.thread_through = QCheckBox("Through (THRU)")
+            self.thread_through.setChecked(a["through"])
+            form.addRow(self.linked)
+            form.addRow("Number of threads:", self.thread_count)
+            form.addRow("Designation:", self.thread_label)
+            form.addRow("With pitch:", self.thread_label_pitch)
+            form.addRow(self.show_pitch)
+            form.addRow("Tolerance class:", self.thread_cls)
+            form.addRow(self.thread_internal)
+            form.addRow("Thread depth / length:", self.thread_length)
+            form.addRow(self.thread_through)
+            self._linked_widgets = (self.thread_count, self.thread_label, self.thread_label_pitch,
+                                    self.thread_internal, self.thread_length, self.thread_through)
+        elif kind == "balloon":
+            self.balloon_item = QSpinBox()
+            self.balloon_item.setRange(1, 999)
+            self.balloon_item.setValue(annotation["item"] if annotation else int(item))
+            self.balloon_part = QLabel()
+            self.balloon_item.valueChanged.connect(self._update_balloon_part)
+            form.addRow("Item number:", self.balloon_item)
+            form.addRow("Part:", self.balloon_part)
+            self._update_balloon_part()
+        elif kind == "gdt":
             self.symbol = QComboBox()
             for key, (title, _datum, _diameter) in TOL_GDT_SYMBOLS.items():
                 self.symbol.addItem(title, key)
@@ -24705,7 +28178,7 @@ class AnnotationDialog(QDialog):
                 self.roughness.setText(annotation["value"])
                 self.lay.setCurrentIndex(max(0, self.lay.findData(annotation["lay"])))
                 self.allowance.setText(annotation["allowance"])
-        else:
+        elif kind == "weld":
             self.weld_type = QComboBox()
             self.weld_other = QComboBox()
             self.weld_other.addItem("None", "")
@@ -24737,10 +28210,47 @@ class AnnotationDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
+        if kind in ("hole", "thread"):
+            self.linked.toggled.connect(self._sync_linked)
+            self._sync_linked()
+
+    @staticmethod
+    def _pair(first, second):
+        row = QHBoxLayout()
+        row.addWidget(first)
+        row.addWidget(second)
+        return row
+
+    def _sync_linked(self, *_):
+        """Values that follow the model are not typed in."""
+        for widget in self._linked_widgets:
+            widget.setEnabled(not self.linked.isChecked())
+
+    def _update_balloon_part(self, *_):
+        index = self.balloon_item.value() - 1
+        self.balloon_part.setText(self._parts[index] if 0 <= index < len(self._parts) else
+                                  "(not in the parts list)")
 
     def annotation(self):
         data = {"kind": self.kind, "offset": list(self._offset)}
-        if self.kind == "gdt":
+        if self.kind == "note":
+            data.update(text=self.note_text.toPlainText(), leader=self.note_leader.isChecked(),
+                        frame=self.note_frame.isChecked())
+        elif self.kind == "hole":
+            data.update(linked=self.linked.isChecked(), count=self.hole_count.value(),
+                        d=self.hole_d.value(), through=self.hole_through.isChecked(),
+                        depth=self.hole_depth.value(),
+                        cbore=[self.cbore_d.value(), self.cbore_depth.value()] if self.cbore.isChecked() else None,
+                        csk=[self.csk_d.value(), self.csk_angle.value()] if self.csk.isChecked() else None)
+        elif self.kind == "thread":
+            data.update(linked=self.linked.isChecked(), count=self.thread_count.value(),
+                        label=self.thread_label.text(), label_pitch=self.thread_label_pitch.text(),
+                        show_pitch=self.show_pitch.isChecked(), cls=self.thread_cls.currentText(),
+                        internal=self.thread_internal.isChecked(), length=self.thread_length.value(),
+                        through=self.thread_through.isChecked())
+        elif self.kind == "balloon":
+            data["item"] = self.balloon_item.value()
+        elif self.kind == "gdt":
             data.update(symbol=self.symbol.currentData(), tolerance=self.tolerance.text(),
                         diameter=self.diameter.isChecked(), modifier=self.modifier.currentData(),
                         datums=[edit.text() for edit in self.datums if edit.text().strip()])
@@ -24749,7 +28259,7 @@ class AnnotationDialog(QDialog):
         elif self.kind == "surface":
             data.update(removal=self.removal.currentData(), value=self.roughness.text(),
                         lay=self.lay.currentData(), allowance=self.allowance.text())
-        else:
+        elif self.kind == "weld":
             data.update({"type": self.weld_type.currentData(), "other": self.weld_other.currentData(),
                          "size": self.weld_size.text(), "all_around": self.all_around.isChecked(),
                          "field": self.field_weld.isChecked(), "tail": self.tail.text()})
@@ -24760,9 +28270,16 @@ class TechnicalDrawingDialog(QDialog):
     _workspace_state = None          # panel position / visibility, kept for the program session
 
     def __init__(self, parent=None, project_name="", mesh=None, options=None,
-                 source_entries=None, source_entry=None, source_locked=False, mesh_for=None):
+                 source_entries=None, source_entry=None, source_locked=False, mesh_for=None,
+                 parts_for=None, model_info_for=None):
         super().__init__(parent)
         self._mesh_for = mesh_for or (lambda entry: entry.get("solid"))
+        # gears and thread features of a sheet's model (Phase 4; the main window adds the bodies)
+        self._model_info_for = model_info_for or (lambda entry: _drawing_model_info(entry, [entry]))
+        # parts list of a sheet's model (the main window adds the child bodies)
+        self._parts_for = parts_for or (lambda entry: [
+            {"name": entry.get("name", "Part"), "qty": 1,
+             "material": str(entry.get("material", DEFAULT_MATERIAL))}])
         # a window of its own like the assembly window (dark title bar: see showEvent)
         self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint |
                             Qt.WindowCloseButtonHint | Qt.WindowSystemMenuHint)
@@ -24869,12 +28386,26 @@ class TechnicalDrawingDialog(QDialog):
                                              lambda view=name: self._begin_view_placement(view),
                                              checkable=True)
         self.dimension_actions = {}
+        dimension_tips = {
+            "chamfer": "Chamfer: pick the chamfer's straight edge ('2 × 45°' on a leader)",
+            "arc": "Arc length: pick an arc (concentric dimension with ⌒)",
+            "baseline": "Baseline dimensions: click the base point, then every point measured "
+                        "from it (horizontal or vertical as the first two lie; right-click ends)",
+            "chain": "Chain dimensions: click point after point on one line (horizontal or "
+                     "vertical as the first two lie; right-click ends)",
+            "ordinate": "Ordinate dimensions: click the origin (0), then the points; each gets its "
+                        "X and Y coordinate (right-click ends)"}
         for label, kind, icon in (("Length", "length", "length.png"),
                                   ("Radius", "radius", "radius.png"),
                                   ("Diameter", "diameter", "diameter.png"),
-                                  ("Angle", "angle", "angle.png")):
+                                  ("Angle", "angle", "angle.png"),
+                                  ("Chamfer", "chamfer", "chamfer.png"),
+                                  ("Arc Length", "arc", "arc.png"),
+                                  ("Baseline", "baseline", "multiple.png"),
+                                  ("Chain", "chain", "point_to_point.png"),
+                                  ("Ordinate", "ordinate", "origin.png")):
             self.dimension_actions[kind] = action(
-                icon, label, f"Place a {label.lower()} dimension on a view",
+                icon, label, dimension_tips.get(kind, f"Place a {label.lower()} dimension on a view"),
                 lambda value=kind: self._add_dimension(value), checkable=True)
         self.act_fit = action("show_all_objects.png", "Fit Sheet", "Show the whole sheet (Home)",
                               lambda: self.canvas.fit_sheet())
@@ -24959,6 +28490,10 @@ class TechnicalDrawingDialog(QDialog):
             self.front_view.addItem(label, vector)
         # cut sections A-A, B-B, …: listed in the Views panel; each can be placed as a view
         self.sections = [dict(item) for item in _drawing_sections(self._options)]
+        # Phase 3: detail and auxiliary views of this sheet
+        self.details = [dict(item) for item in self._options.get("details") or []]
+        self.stackups = [copy.deepcopy(item) for item in self._options.get("stackups") or []]
+        self.aux_views = [dict(item) for item in self._options.get("aux_views") or []]
         if self.sections:          # older drawings: the placed "section" view is section A-A
             for record in self.view_placements:
                 if record.get("name") == "section":
@@ -24982,6 +28517,38 @@ class TechnicalDrawingDialog(QDialog):
         self.cut_offset.setToolTip("Distance of the selected cut from the centre of the part")
         self.section_plane.currentIndexChanged.connect(self._on_section_edited)
         self.cut_offset.valueChanged.connect(self._on_section_edited)
+        # Phase 3: kind of section and its parameters
+        self.section_kind = QComboBox()
+        for kind in DRAWING_SECTION_KINDS:
+            self.section_kind.addItem(DRAWING_SECTION_KIND_TEXT[kind], kind)
+        self.section_kind.setToolTip(
+            "Full: the whole part cut · Half: one half cut, a centre line between · Offset: a "
+            "stepped cut through two parallel planes · Aligned: a second leg at an angle turned "
+            "into the plane (flanges, wheels) · Removed: only the cut face, placed beside · "
+            "Revolved: the cut face turned 90° on the views (ribs, spokes)")
+        self.section_axis = QComboBox()
+        self.section_axis.addItem("Horizontal in the section view", "u")
+        self.section_axis.addItem("Vertical in the section view", "v")
+        self.section_axis.setToolTip("Direction along which the half / step / bend lies")
+
+        def spin(suffix, low, high, tip):
+            box = QDoubleSpinBox()
+            box.setRange(low, high)
+            box.setDecimals(2)
+            box.setSuffix(suffix)
+            box.setToolTip(tip)
+            box.valueChanged.connect(self._on_section_edited)
+            return box
+        self.section_split = spin(" mm", -100000, 100000, "Half: position of the centre line · "
+                                  "Offset: where the cut steps · Aligned: position of the axis "
+                                  "(from the centre of the part)")
+        self.section_offset2 = spin(" mm", -100000, 100000, "Offset section: the plane after the step")
+        self.section_angle = spin("°", -179, 179, "Aligned section: angle of the second leg")
+        self.section_side = QComboBox()
+        self.section_side.addItem("Cut the positive side", 1)
+        self.section_side.addItem("Cut the negative side", -1)
+        for widget in (self.section_kind, self.section_axis, self.section_side):
+            widget.currentIndexChanged.connect(self._on_section_edited)
         section_buttons = QHBoxLayout()
         section_buttons.setSpacing(4)
         for text, icon, tip, slot in (
@@ -25024,6 +28591,75 @@ class TechnicalDrawingDialog(QDialog):
         self.tolerance.setCompleter(completer)
         self.surface = QLineEdit(self._options.get("surface", ""))
         self.surface.setToolTip("General surface finish note of the title block, e.g. Ra 3.2")
+        # per sheet (Phase 2): material and treatment of the part, units, notes, tables
+        self.material = QLineEdit(self._options.get("material", ""))
+        self.material.setToolTip("Material of the part in the title block, e.g. EN AW-6082 T6")
+        material_completer = QCompleter(sorted(MATERIAL_DENSITIES_G_CM3), self.material)
+        material_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.material.setCompleter(material_completer)
+        self.material_from_model = QToolButton()
+        self.material_from_model.setText("↺")
+        self.material_from_model.setToolTip("Take the material of the sheet's model")
+        self.material_from_model.clicked.connect(self._material_from_model)
+        self.material_row = QHBoxLayout()
+        self.material_row.setContentsMargins(0, 0, 0, 0)
+        self.material_row.addWidget(self.material, 1)
+        self.material_row.addWidget(self.material_from_model)
+        self.treatment = QLineEdit(self._options.get("treatment", ""))
+        self.treatment.setToolTip("Surface treatment / coating, e.g. anodised black, zinc plated")
+        self.unit = QComboBox()
+        self.unit.addItem("Millimetres (mm)", "mm")
+        self.unit.addItem("Inches (in)", "inch")
+        self.unit.setCurrentIndex(max(0, self.unit.findData(self._options.get("unit", "mm"))))
+        self.unit.setToolTip("Unit of the printed lengths on this sheet (the model is in mm)")
+        self.dual_units = QCheckBox("Second unit in brackets")
+        self.dual_units.setChecked(bool(self._options.get("dual_units")))
+        self.dual_units.setToolTip("Dual dimensioning: every length also in the other unit, "
+                                   "e.g. 25 [0.984]")
+        self.notes = QPlainTextEdit(str(self._options.get("notes", "") or ""))
+        self.notes.setPlaceholderText("General notes, printed above the title block\n"
+                                      "e.g. 1. Deburr all edges")
+        self.notes.setMaximumHeight(110)
+        self.parts_list = QCheckBox("Parts list above the title block")
+        self.parts_list.setChecked(bool(self._options.get("parts_list")))
+        self.parts_list.setToolTip("Item, name, quantity and material of the sheet's model and its "
+                                   "bodies (alike bodies counted together); balloons use its numbers")
+        self.hole_table_button = QPushButton("Hole table of the selected view…")
+        self.hole_table_button.setToolTip("Select a view in the Views panel, then click where the "
+                                          "table should sit: every hole of the view gets an ID and "
+                                          "its X / Y position and size are listed")
+        self.hole_table_button.clicked.connect(self._begin_hole_table)
+        self.hole_table_remove = QPushButton("Remove hole table")
+        self.hole_table_remove.clicked.connect(self._remove_hole_table)
+        self.hole_table = copy.deepcopy(self._options.get("hole_table")) \
+            if isinstance(self._options.get("hole_table"), dict) else None
+        # gears (Phase 4): data table, quality class, simplified teeth
+        self.gear_table = copy.deepcopy(self._options.get("gear_table")) \
+            if isinstance(self._options.get("gear_table"), dict) else None
+        self.gear_quality = QComboBox()
+        for quality in DRAWING_GEAR_QUALITIES:
+            self.gear_quality.addItem(quality, quality)
+        self.gear_quality.setCurrentIndex(max(0, self.gear_quality.findData(
+            str(self._options.get("gear_quality", "8")))))
+        self.gear_quality.setToolTip("Accuracy grade of the gear (ISO 1328-1 / DIN 3961), printed "
+                                     "in the gear data table")
+        self.gear_simplified = QCheckBox("Simplified gear teeth (ISO 2203)")
+        self.gear_simplified.setChecked(bool(self._options.get("gear_simplified", True)))
+        self.gear_simplified.setToolTip("Gears made with the Gear tool: tip circle thick, pitch "
+                                        "circle chain line, root circle thin instead of every tooth")
+        self.gear_table_button = QPushButton("Gear data table…")
+        self.gear_table_button.setToolTip("Click where the table of the gear's data (module, "
+                                          "teeth, diameters, mate, centre distance) should sit")
+        self.gear_table_button.clicked.connect(lambda: self._begin_table_placement("gear"))
+        self.gear_table_remove = QPushButton("Remove gear table")
+        self.gear_table_remove.clicked.connect(self._remove_gear_table)
+        self.hatch = QComboBox()
+        self.hatch.addItem("Automatic (from the material)", "auto")
+        for key, (title, _lines, _period) in DRAWING_HATCHES.items():
+            self.hatch.addItem(title, key)
+        self.hatch.setCurrentIndex(max(0, self.hatch.findData(self._options.get("hatch", "auto"))))
+        self.hatch.setToolTip("Hatching of cut faces; touching parts are hatched in opposite "
+                              "directions")
         self.tolerance_presets = QToolButton()
         self.tolerance_presets.setText("▾")
         self.tolerance_presets.setToolTip("Choose a general tolerance class")
@@ -25058,6 +28694,32 @@ class TechnicalDrawingDialog(QDialog):
         section_form = QFormLayout()
         section_form.addRow("Cut plane:", self.section_plane)
         section_form.addRow("Cut offset:", self.cut_offset)
+        section_form.addRow("Kind:", self.section_kind)
+        section_form.addRow("Split along:", self.section_axis)
+        section_form.addRow("Split / step at:", self.section_split)
+        section_form.addRow("Offset after step:", self.section_offset2)
+        section_form.addRow("Leg angle:", self.section_angle)
+        section_form.addRow("Half to cut:", self.section_side)
+        self.section_form = section_form
+        # views made from other views (Phase 3)
+        derived_buttons = QGridLayout()
+        for row, (text, tip, slot) in enumerate((
+                ("Detail view…", "Click the centre of the detail on a view, then a point of its "
+                 "circle; place the enlarged view on the sheet", lambda: self._begin_view_pick("detail")),
+                ("Auxiliary view…", "Click an inclined straight edge on a main view: the new view "
+                 "looks square onto that face (its true shape)", lambda: self._begin_view_pick("aux")),
+                ("Break view…", "Click two points on a view: the part between them is left out "
+                 "(long parts; dimensions keep the real length)", lambda: self._begin_view_pick("break")),
+                ("Broken-out section…", "Click two corners of a rectangle on a main view: inside it "
+                 "the material in front of the chosen depth is cut away",
+                 lambda: self._begin_view_pick("broken_out")),
+                ("Clear breaks / broken-out", "Remove the breaks and the broken-out section of the "
+                 "selected view", self._clear_view_cuts))):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            derived_buttons.addWidget(button, row // 2, row % 2)
+        self.derived_buttons = derived_buttons
 
         logo_row = QHBoxLayout()
         self.logo_field = QLineEdit()
@@ -25103,6 +28765,8 @@ class TechnicalDrawingDialog(QDialog):
         sheet_form.addRow("Page:", self.page)
         sheet_form.addRow("General tolerances:", self.tolerance_row)
         sheet_form.addRow("Surface finish:", self.surface)
+        sheet_form.addRow("Material:", self.material_row)
+        sheet_form.addRow("Surface treatment:", self.treatment)
         sheet_form.addRow("Projection:", self.projection)
 
         view_page = QWidget()
@@ -25110,6 +28774,26 @@ class TechnicalDrawingDialog(QDialog):
         view_layout.setContentsMargins(6, 6, 6, 6)
         view_layout.addWidget(QLabel("<b>Model of this sheet</b>"))
         view_layout.addLayout(model_row)
+        # an assembly as the sheet's model (Phase 5): exploded view with trace lines
+        explode_row = QHBoxLayout()
+        self.explode_check = QCheckBox("Exploded view")
+        self.explode_check.setToolTip("Assembly sheets: the aligned parts moved apart along their "
+                                      "alignment, with chain lines from where they sit")
+        self.explode_distance = QDoubleSpinBox()
+        self.explode_distance.setRange(1.0, 1000.0)
+        self.explode_distance.setValue(20.0)
+        self.explode_distance.setSuffix(" mm")
+        self.explode_check.toggled.connect(self._on_explode_changed)
+        # the arrows redraw after a short pause (an assembly sheet takes a moment to project)
+        self._explode_timer = QTimer(self)
+        self._explode_timer.setSingleShot(True)
+        self._explode_timer.setInterval(400)
+        self._explode_timer.timeout.connect(self._on_explode_changed)
+        self.explode_distance.valueChanged.connect(lambda *_: self._explode_timer.start())
+        explode_row.addWidget(self.explode_check)
+        explode_row.addWidget(self.explode_distance, 1)
+        view_layout.addLayout(explode_row)
+        self._sync_explode_controls()
         view_layout.addWidget(QLabel("<b>Placed views</b>"))
         self.view_list = QListWidget()
         self.view_list.currentRowChanged.connect(self._select_view_row)
@@ -25139,6 +28823,8 @@ class TechnicalDrawingDialog(QDialog):
         view_layout.addWidget(self.section_list)
         view_layout.addLayout(section_buttons)
         view_layout.addLayout(section_form)
+        view_layout.addWidget(QLabel("<b>Details, auxiliary views, breaks</b>"))
+        view_layout.addLayout(self.derived_buttons)
 
         dimensions_page = QWidget()
         dimension_layout = QVBoxLayout(dimensions_page)
@@ -25178,6 +28864,26 @@ class TechnicalDrawingDialog(QDialog):
         sheet_layout.addLayout(sheet_form)
         sheet_layout.addWidget(QLabel("<b>Logo</b>"))
         sheet_layout.addLayout(logo_row)
+        sheet_layout.addWidget(QLabel("<b>Section hatching</b>"))
+        sheet_layout.addWidget(self.hatch)
+        sheet_layout.addWidget(QLabel("<b>Units</b>"))
+        unit_form = QFormLayout()
+        unit_form.addRow("Lengths in:", self.unit)
+        unit_form.addRow(self.dual_units)
+        sheet_layout.addLayout(unit_form)
+        sheet_layout.addWidget(QLabel("<b>Notes</b>"))
+        sheet_layout.addWidget(self.notes)
+        sheet_layout.addWidget(QLabel("<b>Tables</b>"))
+        sheet_layout.addWidget(self.parts_list)
+        sheet_layout.addWidget(self.hole_table_button)
+        sheet_layout.addWidget(self.hole_table_remove)
+        sheet_layout.addWidget(QLabel("<b>Gears</b>"))
+        sheet_layout.addWidget(self.gear_simplified)
+        gear_form = QFormLayout()
+        gear_form.addRow("Quality:", self.gear_quality)
+        sheet_layout.addLayout(gear_form)
+        sheet_layout.addWidget(self.gear_table_button)
+        sheet_layout.addWidget(self.gear_table_remove)
         sheet_layout.addStretch(1)
 
         self.canvas = TechnicalDrawingCanvas()
@@ -25283,9 +28989,22 @@ class TechnicalDrawingDialog(QDialog):
         self.tb_file.addAction(self.act_redo)
         toolbar_gap("tb_drawing_toolbar_gap", 10)
         self.tb_tools = toolbar("Drawing Tools", "tb_drawing_tools")
+        basic = ("length", "radius", "diameter", "angle")
         for act in [self.act_select, self.act_cut, None, *self.view_actions.values(), None,
-                    *self.dimension_actions.values(), None]:
+                    *(self.dimension_actions[kind] for kind in basic)]:
             self.tb_tools.addSeparator() if act is None else self.tb_tools.addAction(act)
+        # chamfer, arc length, baseline, chain, ordinate: one drop-down button
+        more = QToolButton()
+        more.setIcon(QIcon(os.path.join(icon_dir, "dimension.png")))
+        more.setToolTip("More dimensions: chamfer, arc length, baseline, chain, ordinate")
+        more.setPopupMode(QToolButton.InstantPopup)
+        more_menu = QMenu(more)
+        for kind, act in self.dimension_actions.items():
+            if kind not in basic:
+                more_menu.addAction(act)
+        more.setMenu(more_menu)
+        self.tb_tools.addWidget(more)
+        self.tb_tools.addSeparator()
         self.tb_tools.addWidget(tool_group("", [grid_icon, QLabel("Grid"), self.sp_grid,
                                                 QLabel("Snap"), self.sp_snap], framed=False))
         self.tb_tools.addAction(self.act_snap)
@@ -25395,8 +29114,18 @@ class TechnicalDrawingDialog(QDialog):
         for widget in [self.front_view, self.view_scale]:
             widget.currentIndexChanged.connect(self._refresh_preview)
         for widget in (self.project, self.author, self.date, self.version, self.page,
-                       self.title, self.number, self.tolerance, self.surface):
+                       self.title, self.number, self.tolerance, self.surface, self.material,
+                       self.treatment):
             widget.editingFinished.connect(self._refresh_preview)
+        self.unit.currentIndexChanged.connect(self._refresh_preview)
+        self.dual_units.toggled.connect(self._refresh_preview)
+        self.parts_list.toggled.connect(self._refresh_preview)
+        self.hatch.currentIndexChanged.connect(self._refresh_preview)
+        self.gear_quality.currentIndexChanged.connect(self._refresh_preview)
+        self.gear_simplified.toggled.connect(self._refresh_preview)
+        self.canvas.viewPicked.connect(self._on_view_picked)
+        self.notes.textChanged.connect(self._queue_refresh_preview)
+        self.canvas.tablePlaced.connect(self._on_table_placed)
         self.projection.currentIndexChanged.connect(self._refresh_preview)
         self._activate_source(self.sheets[self.active_sheet].get("source"))
         self._fill_model_combo()
@@ -25456,7 +29185,9 @@ class TechnicalDrawingDialog(QDialog):
             mesh = None
             if source.get("kind") == "project":
                 entry = self._project_entry(source.get("name"))
-                if entry is not None:
+                if entry is not None and entry.get("type") == "assembly":     # Phase 5
+                    mesh = _drawing_assembly_mesh(entry, float(source.get("explode") or 0.0))
+                elif entry is not None:
                     mesh = self._mesh_for(entry)
             elif source.get("kind") == "model":
                 model = self.models.get(source.get("id"))
@@ -25475,6 +29206,8 @@ class TechnicalDrawingDialog(QDialog):
         self.mesh = self._mesh_of(source)
         self.current_source_entry = self._project_entry(source.get("name")) \
             if source and source.get("kind") == "project" else None
+        if hasattr(self, "explode_check"):
+            self._sync_explode_controls()
         self._update_object_info()
         self.canvas.empty_hint = (
             "Choose a view in the toolbar, then click the sheet to place it" if self.mesh else
@@ -25488,12 +29221,15 @@ class TechnicalDrawingDialog(QDialog):
         icon_dir = os.path.join(_LOG_DIR, "icons")
         choices = [(None, "No model", "")]
         for entry in self.source_entries:
-            choices.append((self._source_of_entry(entry), entry.get("name", "Extrusion"),
+            choices.append((self._source_of_entry(entry),
+                            entry.get("name", "Extrusion") + ("  (assembly)" if entry.get("type") == "assembly" else ""),
+                            "assembly.png" if entry.get("type") == "assembly" else
                             "import.png" if entry.get("type") == "imported" else "extrusion.png"))
         for model_id, model in self.models.items():
             choices.append(({"kind": "model", "id": model_id},
                             f"{model.get('name', 'Model')}  (imported file)", "import.png"))
-        current = self._source_key(self.sheet_source)
+        # (an exploded assembly is the same model choice)
+        current = self._source_key(self._source_base(self.sheet_source))
         if self.sheet_source and all(self._source_key(source) != current
                                      for source, _text, _icon in choices):
             choices.append((self.sheet_source, f"{self._source_name(self.sheet_source)}  (missing)",
@@ -25507,11 +29243,57 @@ class TechnicalDrawingDialog(QDialog):
         self.model_combo.setCurrentIndex(max(0, self.model_combo.findData(current)))
         self.model_combo.blockSignals(False)
 
+    @staticmethod
+    def _source_base(source):
+        """A sheet's model without the exploded-view distance of an assembly."""
+        if not source:
+            return source
+        return {key: value for key, value in source.items() if key != "explode"}
+
     def _on_model_chosen(self, index):
         source = self.model_combo.itemData(index, Qt.UserRole + 1)
-        if self._source_key(source) == self._source_key(self.sheet_source):
+        if self._source_key(source) == self._source_key(self._source_base(self.sheet_source)):
             return
         self._set_sheet_model(source)
+
+    def _sync_explode_controls(self):
+        entry = self.current_source_entry
+        is_assembly = entry is not None and entry.get("type") == "assembly"
+        can_explode = False
+        if is_assembly:
+            assembly = assembly_from_data(entry.get("assembly_data"))
+            can_explode = any(assembly_explosion_direction(assembly, component) is not None
+                              for component in assembly["components"])
+        explode = float((self.sheet_source or {}).get("explode") or 0.0)
+        for widget in (self.explode_check, self.explode_distance):
+            widget.blockSignals(True)
+        self.explode_check.setChecked(explode > 0)
+        if explode > 0:
+            self.explode_distance.setValue(explode)
+        self.explode_check.setEnabled(can_explode or explode > 0)
+        self.explode_distance.setEnabled(is_assembly and explode > 0)
+        self.explode_check.setToolTip(
+            "Assembly sheets: the aligned parts moved apart along their alignment, with chain "
+            "lines from where they sit" if can_explode or not is_assembly else
+            "Only parts with an alignment (mate, flush, concentric …) move apart - this assembly "
+            "has none yet. Add them in the Assembly window.")
+        for widget in (self.explode_check, self.explode_distance):
+            widget.blockSignals(False)
+
+    def _on_explode_changed(self, *_):
+        """Exploded view of an assembly sheet: the aligned parts apart, with trace lines."""
+        if self.sheet_source is None or self.current_source_entry is None or \
+                self.current_source_entry.get("type") != "assembly":
+            return
+        source = self._source_base(self.sheet_source)
+        if self.explode_check.isChecked():
+            source["explode"] = float(self.explode_distance.value())
+        self._activate_source(source)
+        self._sync_explode_controls()
+        self.drawing_status.setText(
+            f"Exploded view: aligned parts {self.explode_distance.value():g} mm apart"
+            if self.explode_check.isChecked() else "Assembly fitted together")
+        self._refresh_preview()
 
     def _set_sheet_model(self, source):
         """Show another model on this sheet: the placed views stay where they are and show the new
@@ -25551,7 +29333,7 @@ class TechnicalDrawingDialog(QDialog):
         self.canvas.set_mode("place_view", GRAPHIC_PREFIX + graphic_id)
         self._sync_tool_buttons()
         self.drawing_status.setText(
-            f"{data['name']}: {_drawing_fmt(data['width'])} × {_drawing_fmt(data['height'])} mm · "
+            f"{data['name']}: {_drawing_number(data['width'])} × {_drawing_number(data['height'])} mm · "
             "click the sheet to place it (Esc cancels)")
 
     def _on_graphic_scale_changed(self, _index):
@@ -25574,6 +29356,10 @@ class TechnicalDrawingDialog(QDialog):
         letter = _section_view_letter(name, self.sections)
         if letter:
             return f"Section {letter}-{letter}"
+        if str(name).startswith("detail-"):
+            return f"Detail {name[len('detail-'):]}"
+        if str(name).startswith("aux-"):
+            return f"Auxiliary view {name[len('aux-'):]}"
         return {"top": "Top View", "front": "Front View", "left": "Left Side",
                 "right": "Right Side", "isometric": "Isometric"}.get(
                     name, str(name or "View").title())
@@ -25594,7 +29380,102 @@ class TechnicalDrawingDialog(QDialog):
             "orientation": self.sheet_orientation.currentData(),
             "title": self.title.text().strip(),
             "number": self.number.text().strip(),
+            "material": self.material.text().strip(),
+            "treatment": self.treatment.text().strip(),
+            "notes": self.notes.toPlainText().strip(),
+            "unit": self.unit.currentData(),
+            "dual_units": self.dual_units.isChecked(),
+            "parts_list": self.parts_list.isChecked(),
+            "parts": self._current_parts() if self.parts_list.isChecked() else [],
+            "hole_table": copy.deepcopy(self.hole_table),
+            "details": [dict(item) for item in self.details],
+            "aux_views": [dict(item) for item in self.aux_views],
+            "hatch": self.hatch.currentData(),
+            "gear_table": copy.deepcopy(self.gear_table),
+            "gear_quality": self.gear_quality.currentData(),
+            "gear_simplified": self.gear_simplified.isChecked(),
+            "stackups": copy.deepcopy(self.stackups),
+            "_model_material": (self.current_source_entry or {}).get("material", ""),
         }
+
+    def _current_parts(self):
+        """Parts list of the sheet's model (the solid and its bodies, or the imported file)."""
+        source = self.sheet_source
+        if not source:
+            return []
+        if source.get("kind") == "model":
+            model = self.models.get(source.get("id"))
+            return [{"name": model.get("name", "Model") if model else "Imported model",
+                     "qty": 1, "material": ""}]
+        entry = self._project_entry(source.get("name"))
+        return self._parts_for(entry) if entry is not None else []
+
+    def _material_from_model(self):
+        entry = self.current_source_entry
+        material = entry.get("material", DEFAULT_MATERIAL) if entry is not None else ""
+        if not material:
+            self.drawing_status.setText("The sheet's model has no material")
+            return
+        self.material.setText(str(material))
+        self._refresh_preview()
+
+    def _begin_hole_table(self):
+        record = self.canvas.selected
+        if record is None or record.get("name") not in ("front", "top", "right", "left") and \
+                not str(record.get("name", "")).startswith("section"):
+            QMessageBox.information(self, "Hole table", "Select a placed view (front, top, side or "
+                                    "section) in the Views panel or on the sheet first.")
+            return
+        self._hole_table_view = record.get("name")
+        self._table_kind = "hole"
+        self.canvas.set_mode("place_table")
+
+    def _begin_table_placement(self, kind):
+        """Gear data table (Phase 4): click where its top left corner should sit."""
+        if not self._model_info(self.sheet_source).get("gears"):
+            QMessageBox.information(self, "Gear data table", "The model of this sheet is no gear "
+                                    "made with the Gear tool.")
+            return
+        self._table_kind = kind
+        self.canvas.set_mode("place_table")
+        self.drawing_status.setText("Gear data table: click where its top left corner should be")
+
+    def _remove_gear_table(self):
+        if self.gear_table is None:
+            return
+        self.gear_table = None
+        self.drawing_status.setText("Gear data table removed")
+        self._refresh_preview()
+
+    def _on_table_placed(self, point):
+        kind = getattr(self, "_table_kind", None)
+        if isinstance(kind, tuple) and kind[0] == "stackup":
+            self._table_kind = None
+            if 0 <= kind[1] < len(self.stackups):
+                self.stackups[kind[1]].update(x=float(point[0]), y=float(point[1]))
+                self.drawing_status.setText("Stack-up table placed")
+                self._refresh_preview()
+            return
+        if kind == "gear":
+            self._table_kind = None
+            self.gear_table = {"x": float(point[0]), "y": float(point[1])}
+            self.drawing_status.setText("Gear data table placed")
+            self._refresh_preview()
+            return
+        view = getattr(self, "_hole_table_view", None)
+        if not view:
+            return
+        self.hole_table = {"view": view, "x": float(point[0]), "y": float(point[1])}
+        self.drawing_status.setText(f"Hole table of the {self._placement_label({'name': view})} "
+                                    "placed")
+        self._refresh_preview()
+
+    def _remove_hole_table(self):
+        if self.hole_table is None:
+            return
+        self.hole_table = None
+        self.drawing_status.setText("Hole table removed")
+        self._refresh_preview()
 
     def _store_active_sheet(self):
         self.sheets[self.active_sheet] = self._sheet_from_widgets()
@@ -25602,10 +29483,29 @@ class TechnicalDrawingDialog(QDialog):
     def _load_sheet_into_widgets(self, sheet):
         """Show a stored sheet in the editor (fields, views, dimensions, sections, model)."""
         widgets = (self.front_view, self.view_scale, self.sheet_size, self.sheet_orientation,
-                   *self.rotation, self.title, self.number)
+                   *self.rotation, self.title, self.number, self.material, self.treatment,
+                   self.notes, self.unit, self.dual_units, self.parts_list, self.hatch,
+                   self.gear_quality, self.gear_simplified)
         for widget in widgets:
             widget.blockSignals(True)
         try:
+            self.material.setText(str(sheet.get("material") or ""))
+            self.treatment.setText(str(sheet.get("treatment") or ""))
+            self.notes.setPlainText(str(sheet.get("notes") or ""))
+            self.unit.setCurrentIndex(max(0, self.unit.findData(sheet.get("unit") or "mm")))
+            self.dual_units.setChecked(bool(sheet.get("dual_units")))
+            self.parts_list.setChecked(bool(sheet.get("parts_list")))
+            self.hole_table = copy.deepcopy(sheet.get("hole_table")) \
+                if isinstance(sheet.get("hole_table"), dict) else None
+            self.details[:] = [dict(item) for item in sheet.get("details") or []]
+            self.stackups[:] = [copy.deepcopy(item) for item in sheet.get("stackups") or []]
+            self.aux_views[:] = [dict(item) for item in sheet.get("aux_views") or []]
+            self.hatch.setCurrentIndex(max(0, self.hatch.findData(sheet.get("hatch") or "auto")))
+            self.gear_table = copy.deepcopy(sheet.get("gear_table")) \
+                if isinstance(sheet.get("gear_table"), dict) else None
+            self.gear_quality.setCurrentIndex(max(0, self.gear_quality.findData(
+                str(sheet.get("gear_quality") or "8"))))
+            self.gear_simplified.setChecked(bool(sheet.get("gear_simplified", True)))
             self.canvas.set_mode()
             self.front_view.setCurrentIndex(max(0, self.front_view.findData(
                 tuple(sheet.get("front") or (0, 1, 0)))))
@@ -25785,8 +29685,18 @@ class TechnicalDrawingDialog(QDialog):
             source = sheet_options.get("source")
             sheet_options["_geometry_cache"] = self._geometry_caches.setdefault(
                 self._source_key(source), {})
+            sheet_options["_model"] = self._model_info(source)
             jobs.append((self._mesh_of(source), sheet_options))
         return jobs
+
+    def _model_info(self, source):
+        """Gears and thread features of a sheet's model (only project solids have them)."""
+        if not source or source.get("kind") != "project":
+            return {"gears": [], "threads": []}
+        entry = self._project_entry(source.get("name"))
+        if entry is not None and entry.get("type") == "assembly":
+            return _drawing_assembly_info(entry, float(source.get("explode") or 0.0))
+        return self._model_info_for(entry) if entry is not None else {"gears": [], "threads": []}
 
     # ── undo / redo ───────────────────────────────────────────────────────────
     # what a snapshot holds: the content of the drawing, i.e. every sheet and the shared title
@@ -25938,8 +29848,11 @@ class TechnicalDrawingDialog(QDialog):
     def _section_text(self, section):
         letter = section["letter"]
         placed = any(record.get("name") == f"section-{letter}" for record in self.view_placements)
+        kind = section.get("kind", "full")
+        note = "" if placed or kind == "revolved" else "  (view not placed)"
+        kind_text = "" if kind == "full" else f"  ·  {DRAWING_SECTION_KIND_TEXT[kind]}"
         return (f"{letter}-{letter}  ·  {DRAWING_SECTION_PLANE_TEXT[section['plane']]}  ·  "
-                f"{section['offset']:g} mm" + ("" if placed else "  (view not placed)"))
+                f"{section['offset']:g} mm{kind_text}{note}")
 
     def _refresh_section_list(self, select_row=None):
         row = self.section_list.currentRow() if select_row is None else select_row
@@ -25956,17 +29869,34 @@ class TechnicalDrawingDialog(QDialog):
         """Show the selected cut in the plane / offset fields."""
         section = self.sections[row] if 0 <= row < len(self.sections) else None
         for widget in (self.section_plane, self.cut_offset, self.btn_rotate_section,
-                       self.btn_remove_section):
+                       self.btn_remove_section, self.section_kind):
             widget.setEnabled(section is not None)
         self.view_actions["section"].setEnabled(bool(self.sections))
+        parameters = (self.section_axis, self.section_split, self.section_offset2,
+                      self.section_angle, self.section_side)
         if section is None:
+            for widget in parameters:
+                widget.setEnabled(False)
             return
-        self.section_plane.blockSignals(True)
-        self.cut_offset.blockSignals(True)
+        widgets = (self.section_plane, self.cut_offset, self.section_kind) + parameters
+        for widget in widgets:
+            widget.blockSignals(True)
         self.section_plane.setCurrentIndex(max(0, self.section_plane.findData(section["plane"])))
         self.cut_offset.setValue(float(section["offset"]))
-        self.section_plane.blockSignals(False)
-        self.cut_offset.blockSignals(False)
+        kind = section.get("kind", "full")
+        self.section_kind.setCurrentIndex(max(0, self.section_kind.findData(kind)))
+        self.section_axis.setCurrentIndex(max(0, self.section_axis.findData(section.get("axis", "u"))))
+        self.section_split.setValue(float(section.get("split", 0.0)))
+        self.section_offset2.setValue(float(section.get("offset2", section["offset"])))
+        self.section_angle.setValue(float(section.get("angle", 45.0)))
+        self.section_side.setCurrentIndex(max(0, self.section_side.findData(section.get("side", 1))))
+        for widget in widgets:
+            widget.blockSignals(False)
+        # only the parameters of this kind
+        uses = {"axis": kind in ("half", "offset", "aligned"), "split": kind in ("half", "offset", "aligned"),
+                "offset2": kind == "offset", "angle": kind == "aligned", "side": kind == "half"}
+        for widget, key in zip(parameters, ("axis", "split", "offset2", "angle", "side")):
+            widget.setEnabled(uses[key])
 
     def _on_section_edited(self, *_):
         section = self._current_section()
@@ -25974,12 +29904,117 @@ class TechnicalDrawingDialog(QDialog):
             return
         section["plane"] = int(self.section_plane.currentData())
         section["offset"] = float(self.cut_offset.value())
+        kind = self.section_kind.currentData()
+        for key in ("kind", "axis", "split", "offset2", "angle", "side"):
+            section.pop(key, None)
+        if kind != "full":
+            section.update(kind=kind, axis=self.section_axis.currentData(),
+                           split=float(self.section_split.value()),
+                           offset2=float(self.section_offset2.value()),
+                           angle=float(self.section_angle.value()),
+                           side=int(self.section_side.currentData()))
+        if kind == "revolved":            # drawn on the views: no section view of its own
+            view = f"section-{section['letter']}"
+            self.view_placements[:] = [r for r in self.view_placements if r.get("name") != view]
+            self.dimensions[:] = [d for d in self.dimensions if d.get("view") != view]
+            self._refresh_view_list()
+            self._refresh_dimension_list()
         self._refresh_section_list()
         self._refresh_preview()
 
+    def _next_letter(self):
+        """A letter not used by a section, detail or auxiliary view of this sheet."""
+        used = {item["letter"] for item in self.sections} | \
+            {item["letter"] for item in self.details} | {item["letter"] for item in self.aux_views}
+        return next((letter for letter in self.SECTION_LETTERS if letter not in used), None)
+
+    # views made from other views (Phase 3) ---------------------------------------
+    PICK_VIEWS = {"detail": "a view", "aux": "a main view", "break": "a main or auxiliary view",
+                  "broken_out": "a main view"}
+
+    def _begin_view_pick(self, purpose):
+        if self.mesh is None:
+            self.drawing_status.setText("This sheet has no model")
+            return
+        self.canvas.set_mode("view_pick", purpose)
+
+    def _view_record(self, name):
+        return next((record for record in self.view_placements if record.get("name") == name), None)
+
+    def _on_view_picked(self, purpose, view, points):
+        record = self._view_record(view)
+        if purpose in ("detail", "aux"):
+            letter = self._next_letter()
+            if letter is None:
+                self.drawing_status.setText("No more letters available")
+                return
+            if purpose == "detail":
+                centre, edge = np.asarray(points[0], dtype=float), np.asarray(points[1], dtype=float)
+                radius = float(np.linalg.norm(edge - centre))
+                if radius <= 1e-6:
+                    self.drawing_status.setText("Detail: click the centre, then a point of the circle")
+                    return
+                factor, ok = QInputDialog.getDouble(
+                    self, "Detail view", "Enlargement (detail scale / view scale):", 2.0, 0.1, 50.0, 1)
+                if not ok:
+                    return
+                self.details.append({"letter": letter, "view": view, "u": float(centre[0]),
+                                     "v": float(centre[1]), "r": radius, "factor": float(factor)})
+                name = f"detail-{letter}"
+            else:
+                self.aux_views.append({"letter": letter, "view": view,
+                                       "a": [float(v) for v in points[0]],
+                                       "b": [float(v) for v in points[1]], "flip": False})
+                name = f"aux-{letter}"
+            self.canvas.set_mode("place_view", name)     # (kept while it waits to be placed)
+            self._refresh_preview()
+            self.drawing_status.setText(f"Click where the view {letter} should go")
+            return
+        if record is None:
+            return
+        first, second = np.asarray(points[0], dtype=float), np.asarray(points[1], dtype=float)
+        if purpose == "break":
+            du, dv = abs(second[0] - first[0]), abs(second[1] - first[1])
+            k = 0 if du >= dv else 1
+            a, b = sorted((float(first[k]), float(second[k])))
+            if b - a <= 1e-6:
+                return
+            record.setdefault("breaks", []).append({"axis": "u" if k == 0 else "v", "a": a, "b": b})
+            self.drawing_status.setText("Break added (dimensions keep the real length)")
+        else:
+            depth, ok = QInputDialog.getDouble(
+                self, "Broken-out section",
+                "Depth of the cut plane (from the centre of the part, toward the viewer +):",
+                0.0, -100000.0, 100000.0, 2)
+            if not ok:
+                return
+            record["broken_out"] = {"rect": [float(first[0]), float(first[1]), float(second[0]),
+                                             float(second[1])], "depth": float(depth)}
+            self.drawing_status.setText("Broken-out section added")
+        self._refresh_preview()
+
+    def _clear_view_cuts(self):
+        record = self.canvas.selected
+        if record is None or not ("breaks" in record or "broken_out" in record):
+            self.drawing_status.setText("Select a view with a break or broken-out section first")
+            return
+        record.pop("breaks", None)
+        record.pop("broken_out", None)
+        self.drawing_status.setText("Breaks and broken-out section removed")
+        self._refresh_preview()
+
+    def _prune_derived_views(self):
+        """Details and auxiliary views whose view was removed are dropped (with their parent)."""
+        placed = {record.get("name") for record in self.view_placements}
+        pending = self.canvas.active_view if self.canvas.mode == "place_view" else None
+        self.aux_views[:] = [item for item in self.aux_views if item["view"] in placed and
+                             (f"aux-{item['letter']}" in placed or f"aux-{item['letter']}" == pending)]
+        placed = {record.get("name") for record in self.view_placements}
+        self.details[:] = [item for item in self.details if item["view"] in placed and
+                           (f"detail-{item['letter']}" in placed or f"detail-{item['letter']}" == pending)]
+
     def _add_section(self, plane=0, offset=0.0):
-        letter = next((letter for letter in self.SECTION_LETTERS
-                       if self._section_index(letter) < 0), None)
+        letter = self._next_letter()
         if letter is None:
             self.drawing_status.setText("No more section letters available")
             return
@@ -26068,6 +30103,7 @@ class TechnicalDrawingDialog(QDialog):
         return options
 
     def _refresh_preview(self, *_):
+        self._prune_derived_views()
         picture = QPicture()
         sheet = _drawing_sheet(self.drawing_options())
         picture.setBoundingRect(QRect(0, 0, int(sheet["w"]), int(sheet["h"])))
@@ -26075,6 +30111,7 @@ class TechnicalDrawingDialog(QDialog):
         try:
             options = self.drawing_options()
             options["dimensions"] = []
+            options["_model"] = self._model_info(self.sheet_source)
             options.update(_geometry_cache=self._geometry_cache, _page_scale=1.0,
                            _projection_resolution=900, _isometric_resolution=1200,
                            _colors=DRAWING_SCREEN_COLORS)
@@ -26089,6 +30126,8 @@ class TechnicalDrawingDialog(QDialog):
             self.drawing_status.setText(f"Preview unavailable: {ex}")
             return
         painter.end()
+        self._resolve_callouts()                 # hole / thread callouts follow the model
+        self.canvas.units = _drawing_units_of(options)
         self.canvas.set_sheet(picture, layout, self.view_placements, self.dimensions)
         self._commit_history()                   # every finished change is one undo step
 
@@ -26113,7 +30152,7 @@ class TechnicalDrawingDialog(QDialog):
             vertices = np.asarray(self.mesh[0], dtype=float).reshape(-1, 3)
             used = vertices[np.unique(np.asarray(self.mesh[1], dtype=int))]
             size = used.max(axis=0) - used.min(axis=0)
-            text += "  ·  " + " × ".join(_drawing_fmt(float(value)) for value in size) + " mm"
+            text += "  ·  " + " × ".join(_drawing_number(float(value)) for value in size) + " mm"
         self.object_info.setText(text)
         self.object_info.setToolTip("Model drawn on this sheet (choose another one in the Views "
                                     "panel; each sheet has its own)")
@@ -26270,6 +30309,11 @@ class TechnicalDrawingDialog(QDialog):
                 self.drawing_status.setText("Add a section first (Cut tool or Views panel)")
                 self._sync_tool_buttons()
                 return
+            if section.get("kind") == "revolved":
+                self.drawing_status.setText("A revolved section is drawn on the views themselves "
+                                            "(no view of its own to place)")
+                self._sync_tool_buttons()
+                return
             name = f"section-{section['letter']}"
         self.canvas.set_mode("place_view", name)
 
@@ -26364,14 +30408,17 @@ class TechnicalDrawingDialog(QDialog):
     def _on_dimension_placed(self, points):
         if self._pending_dimension is None:
             return
-        kind, label = self._pending_dimension
+        tool, label = self._pending_dimension
+        kind = points.get("type") or tool     # baseline / chain make lengths, ordinate ordinates
         value = float(points["value"])
         dimension = {"type": kind, "label": label, "value": value,
                      "view": points["view"], "points": points["points"]}
-        if kind != "angle":
+        if kind not in ("angle", "arc"):
             dimension.update(a=points["a"], b=points["b"])
+        dimension.update(points.get("extra") or {})
         self.dimensions.append(dimension)
-        self._pending_dimension = None
+        if self.canvas.mode != "dimension" or tool not in ("baseline", "chain", "ordinate"):
+            self._pending_dimension = None    # a series stays on until right-click
         self.dimension_value.setSuffix("°" if kind == "angle" else " mm")
         self.dimension_value.setValue(value)
         self.canvas.select_dimension(len(self.dimensions) - 1)     # the new one stays highlighted
@@ -26420,8 +30467,20 @@ class TechnicalDrawingDialog(QDialog):
         box = QFrame()
         layout = QFormLayout(box)
         layout.setContentsMargins(0, 4, 0, 4)
-        title = QLabel("<b>Tolerance of the selected dimension</b>")
+        title = QLabel("<b>Selected dimension</b>")
         layout.addRow(title)
+        self.dim_orient = QComboBox()
+        for text, key in (("Aligned (point to point)", None), ("Horizontal", "h"), ("Vertical", "v")):
+            self.dim_orient.addItem(text, key)
+        self.dim_orient.setToolTip("Length dimensions: along the measured points, or their "
+                                   "horizontal / vertical distance")
+        self.dim_reference = QCheckBox("Reference dimension (in brackets, not toleranced)")
+        self.dim_reference.setToolTip("Auxiliary dimension for information only (ISO 129-1)")
+        self.dim_orient.currentIndexChanged.connect(self._apply_dimension_style)
+        self.dim_reference.toggled.connect(self._apply_dimension_style)
+        layout.addRow("Orientation:", self.dim_orient)
+        layout.addRow(self.dim_reference)
+        layout.addRow(QLabel("<b>Tolerance</b>"))
         self.tol_mode = QComboBox()
         for mode in TOL_MODES:
             self.tol_mode.addItem(TOL_MODE_TITLES[mode], mode)
@@ -26446,6 +30505,16 @@ class TechnicalDrawingDialog(QDialog):
         self.tol_status.setWordWrap(True)
         calculator = QPushButton("Fit calculator…")
         calculator.clicked.connect(self._open_fit_calculator)
+        self.bearing_seat_button = QPushButton("Bearing seat…")
+        self.bearing_seat_button.setToolTip(
+            "For a bearing seat: choose the bearing and load case; the selected diameter gets the "
+            "recommended shaft or housing fit, and a note gives the shoulder diameter and the "
+            "largest fillet radius")
+        self.bearing_seat_button.clicked.connect(self._apply_bearing_seat)
+        self.stackup_button = QPushButton("Tolerance stack-up…")
+        self.stackup_button.setToolTip("Add up a chain of toleranced dimensions (worst case and "
+                                       "statistical) and check a gap against its limits")
+        self.stackup_button.clicked.connect(self._open_stackup)
         layout.addRow("Mode:", self.tol_mode)
         layout.addRow("Upper:", self.tol_upper)
         layout.addRow("Lower:", self.tol_lower)
@@ -26453,12 +30522,22 @@ class TechnicalDrawingDialog(QDialog):
         layout.addRow(self.tol_show_dev)
         layout.addRow(self.tol_status)
         layout.addRow(calculator)
+        layout.addRow(self.bearing_seat_button)
+        layout.addRow(self.stackup_button)
         layout.addRow(QLabel("<b>Annotations</b>"))
         annotation_row = QGridLayout()
         for index, kind in enumerate(TOL_ANNOTATION_KINDS):
             button = QPushButton(TOL_ANNOTATION_TITLES[kind] + "…")
-            button.setToolTip("Set the values, click the feature on a view, then click where the "
-                              "symbol should sit. Double-click an entry in the list to edit it.")
+            button.setToolTip(
+                "Click the hole on a view, then where the callout should sit: the values are read "
+                "from the model" if kind == "hole" else
+                "Click the thread on a view (its circle or from the side), then where the callout "
+                "should sit: the designation is read from the model" if kind == "thread" else
+                "Click the part, then where the balloon should sit. On an assembly sheet the item "
+                "number is taken from the clicked part, otherwise you choose it from the parts "
+                "list" if kind == "balloon" else
+                "Set the values, click the feature on a view, then click where the symbol should "
+                "sit. Drag it on the sheet, double-click an entry in the list to edit it.")
             button.clicked.connect(lambda checked=False, k=kind: self._start_annotation(k))
             annotation_row.addWidget(button, index // 2, index % 2)
         layout.addRow(annotation_row)
@@ -26487,7 +30566,47 @@ class TechnicalDrawingDialog(QDialog):
         self.tol_show_dev.setChecked(bool(tolerance.get("show_deviations", True)) if tolerance else True)
         for widget in self._tol_widgets:
             widget.blockSignals(False)
+        dimension = self.dimensions[row] if valid else {}
+        for widget in (self.dim_orient, self.dim_reference):
+            widget.blockSignals(True)
+        self.dim_orient.setCurrentIndex(max(0, self.dim_orient.findData(dimension.get("orient"))))
+        self.dim_orient.setEnabled(valid and dimension.get("type", "length") == "length")
+        self.dim_reference.setChecked(bool(dimension.get("reference")))
+        self.dim_reference.setEnabled(valid and dimension.get("type") != "ordinate")
+        for widget in (self.dim_orient, self.dim_reference):
+            widget.blockSignals(False)
         self._update_tolerance_fields(row)
+
+    def _apply_dimension_style(self, *_):
+        """Orientation and reference flag of the selected dimension; a horizontal / vertical
+        length measures the projected distance of its points."""
+        row = self.dimension_list.currentRow()
+        if not 0 <= row < len(self.dimensions) or self.dimensions[row].get("type") == "annotation":
+            return
+        dimension = self.dimensions[row]
+        if self.dim_reference.isChecked():
+            dimension["reference"] = True
+        else:
+            dimension.pop("reference", None)
+        if dimension.get("type", "length") == "length":
+            orient = self.dim_orient.currentData()
+            points = dimension.get("points") or [dimension.get("a"), dimension.get("b")]
+            if len(points) >= 2 and points[0] is not None and points[1] is not None:
+                delta = np.subtract(points[1], points[0])
+                value = abs(float(delta[0])) if orient == "h" else abs(float(delta[1])) \
+                    if orient == "v" else float(np.linalg.norm(delta))
+                if value <= 1e-9:
+                    self.drawing_status.setText("The points have no distance in this direction")
+                    self._load_tolerance_editor(row)
+                    return
+                dimension["value"] = value
+                if orient:
+                    dimension["orient"] = orient
+                else:
+                    dimension.pop("orient", None)
+        self._refresh_dimension_list_texts()
+        self._show_dimension_value(row)
+        self._refresh_preview()
 
     def _update_tolerance_fields(self, row):
         mode = self.tol_mode.currentData()
@@ -26549,6 +30668,78 @@ class TechnicalDrawingDialog(QDialog):
         summary = tol_tolerance_summary(abs(float(dimension["value"])), dimension.get("tol"))
         return f"{text}  [{summary}]" if summary else text
 
+    def _open_stackup(self):
+        """Tolerance stack-up (Phase 5): edit one of the sheet's chains or start a new one."""
+        names = [f"{index + 1}: {item.get('name', 'Gap')}" for index, item in enumerate(self.stackups)]
+        index = len(self.stackups)
+        if names:
+            choice, ok = QInputDialog.getItem(self, "Tolerance stack-up", "Stack-up:",
+                                              names + ["New stack-up"], 0, False)
+            if not ok:
+                return
+            index = names.index(choice) if choice in names else len(self.stackups)
+        current = self.stackups[index] if index < len(self.stackups) else None
+        dialog = StackupDialog(self, self.dimensions, self.tolerance.text().strip(), current)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        result = dialog.result()
+        if not result["rows"]:
+            if current is not None:
+                del self.stackups[index]
+            self._refresh_preview()
+            return
+        if current is not None:
+            result.update({key: current[key] for key in ("x", "y") if key in current})
+            self.stackups[index] = result
+        else:
+            self.stackups.append(result)
+        if result["show"] and "x" not in result:
+            self._table_kind = ("stackup", index)
+            self.canvas.set_mode("place_table")
+            self.drawing_status.setText("Stack-up table: click where its top left corner should be")
+        self._refresh_preview()
+
+    def _apply_bearing_seat(self):
+        """Bearing seat (Phase 5): recommended fit on the selected diameter, plus a note with the
+        shoulder diameter and the fillet radius."""
+        row = self.dimension_list.currentRow()
+        if not 0 <= row < len(self.dimensions) or \
+                self.dimensions[row].get("type", "length") not in ("diameter", "length"):
+            QMessageBox.information(self, "Bearing seat", "Select the diameter of the shaft or "
+                                    "housing seat (a diameter or length dimension) first.")
+            return
+        dimension = self.dimensions[row]
+        value = float(dimension["value"])
+        dialog = BearingDialog(self, "Bearing seat", diameter=value, button_text="Apply")
+        if dialog.exec_() != QDialog.Accepted or dialog.bearing() is None:
+            return
+        bearing, seat = dialog.bearing(), dialog.seat()
+        housing = abs(value - bearing["D"]) < abs(value - bearing["d"])
+        nominal = bearing["D"] if housing else bearing["d"]
+        if abs(value - nominal) > 0.05 * nominal:
+            if QMessageBox.question(self, "Bearing seat", f"The dimension is Ø{value:g} mm, the "
+                                    f"bearing's {'outside' if housing else 'bore'} Ø{nominal:g} mm. "
+                                    "Apply the fit anyway?") != QMessageBox.Yes:
+                return
+        symbol = seat["housing"] if housing else seat["shaft"]
+        dimension["tol"] = {"mode": "fit", "fit": symbol, "show_deviations": True}
+        text = (f"Bearing {bearing['name']}: housing shoulder Ø ≤ {seat['shoulder_housing']:g}"
+                if housing else
+                f"Bearing {bearing['name']}: shaft shoulder Ø ≥ {seat['shoulder_shaft']:g}") + \
+            f", fillet r ≤ {seat['fillet']:g}"
+        points = dimension.get("points") or [dimension.get("a")]
+        if points and points[0] is not None:
+            self.dimensions.append({"type": "annotation", "label": "", "value": 0.0,
+                                    "view": dimension.get("view"), "points": [list(points[0])],
+                                    "ann": tol_normalize_annotation(
+                                        {"kind": "note", "text": text, "leader": True,
+                                         "offset": [70.0, 70.0]})})
+        self._refresh_dimension_list()
+        self._load_tolerance_editor(row)
+        self.drawing_status.setText(f"{'Housing' if housing else 'Shaft'} seat Ø{nominal:g} {symbol} "
+                                    f"for bearing {bearing['name']}")
+        self._refresh_preview()
+
     def _open_fit_calculator(self):
         row = self.dimension_list.currentRow()
         size = float(self.dimensions[row]["value"]) if 0 <= row < len(self.dimensions) else 25.0
@@ -26561,27 +30752,128 @@ class TechnicalDrawingDialog(QDialog):
             self._refresh_dimension_list_texts()
             self._refresh_preview()
 
+    def _part_names(self):
+        return [part.get("name", "") for part in self._current_parts()]
+
     def _start_annotation(self, kind):
-        dialog = AnnotationDialog(self, kind)
+        if kind in ("hole", "thread"):
+            # placed first; the values are read from the model at the clicked point
+            self._pending_annotation = {"kind": kind}
+            self.canvas.set_mode("annotation")
+            self.drawing_status.setText(f"{TOL_ANNOTATION_TITLES[kind]}: click the "
+                                        f"{kind} on a view, then where the callout should sit")
+            return
+        geometry = (self._geometry_cache or {}).get("geometry")
+        if kind == "balloon" and geometry and geometry[2].get("components"):
+            # assembly sheet: the item number comes from the clicked part (Phase 5)
+            self._pending_annotation = {"kind": "balloon", "auto": True}
+            self.canvas.set_mode("annotation")
+            self.drawing_status.setText("Balloon: click a part on a view, then where the balloon "
+                                        "should sit")
+            return
+        used = [int((d.get("ann") or {}).get("item", 0)) for d in self.dimensions
+                if (d.get("ann") or {}).get("kind") == "balloon"]
+        dialog = AnnotationDialog(self, kind, parts=self._part_names(),
+                                  item=next(n for n in range(1, 1000) if n not in used))
         if dialog.exec_() != QDialog.Accepted:
             return
         annotation = dialog.annotation()
         if annotation is None:
             QMessageBox.information(self, "Annotation", "The annotation needs its main value "
-                                    "(for example the datum letter).")
+                                    "(for example the datum letter or the text of a note).")
             return
         self._pending_annotation = annotation
         self.canvas.set_mode("annotation")
+
+    def _callout_view(self, name):
+        """(topology of the sheet's model, frame of the view `name`) for reading holes and threads;
+        (None, None) without a model or for imported graphics."""
+        geometry = (self._geometry_cache or {}).get("geometry")
+        if not geometry or not isinstance(name, str):
+            return None, None
+        topology, frames = geometry[2], geometry[3]
+        plane_name = name
+        letter = _section_view_letter(name, self.sections)
+        if letter is not None:
+            section = next((item for item in self.sections if item["letter"] == letter), None)
+            if section is None:
+                return None, None
+            plane_name = DRAWING_SECTION_PLANES[int(section["plane"])]
+        frame = frames.get(plane_name)
+        if frame is None:
+            return None, None
+        right, up, normal = frame
+        return topology, {"right": right, "up": up, "normal": normal}
+
+    def _resolve_callouts(self):
+        """Hole and thread callouts that follow the model take its current values."""
+        changed = False
+        for dimension in self.dimensions:
+            annotation = dimension.get("ann") if dimension.get("type") == "annotation" else None
+            if not annotation or annotation.get("kind") not in ("hole", "thread") or \
+                    not annotation.get("linked") or not dimension.get("points"):
+                continue
+            topology, view = self._callout_view(dimension.get("view"))
+            if topology is None:
+                continue
+            resolved = _drawing_resolve_callout(tol_normalize_annotation(annotation), topology,
+                                                view, dimension["points"][0])
+            if resolved is not None and resolved != tol_normalize_annotation(annotation):
+                dimension["ann"] = resolved
+                changed = True
+        if changed:
+            self._refresh_dimension_list_texts()
 
     def _on_annotation_placed(self, data):
         annotation = getattr(self, "_pending_annotation", None)
         if annotation is None:
             return
+        self._pending_annotation = None
+        if annotation.get("auto"):
+            topology, view = self._callout_view(data["view"])
+            item = None if topology is None else \
+                _drawing_component_at(topology, view, data["position"])
+            if item is None:
+                used = [int((d.get("ann") or {}).get("item", 0)) for d in self.dimensions
+                        if (d.get("ann") or {}).get("kind") == "balloon"]
+                dialog = AnnotationDialog(self, "balloon", parts=self._part_names(),
+                                          item=next(n for n in range(1, 1000) if n not in used))
+                if dialog.exec_() != QDialog.Accepted or dialog.annotation() is None:
+                    self.drawing_status.setText("Balloon not placed")
+                    return
+                annotation = dialog.annotation()
+            else:
+                annotation = tol_normalize_annotation({"kind": "balloon", "item": item})
+        elif annotation["kind"] in ("hole", "thread") and "label" not in annotation and "d" not in annotation:
+            # read the hole / thread at the clicked point, then let the user check the values
+            topology, view = self._callout_view(data["view"])
+            found = None
+            if topology is not None:
+                reach = max(float(topology["span"]) * 0.02, 0.5)
+                found = (_drawing_hole_at if annotation["kind"] == "hole" else _drawing_thread_at)(
+                    topology, view, data["position"], reach)
+            if found is None:
+                QMessageBox.information(
+                    self, TOL_ANNOTATION_TITLES[annotation["kind"]],
+                    f"No {annotation['kind']} was found at the clicked point - enter the values "
+                    "yourself (they then do not follow the model).")
+                raw = {"kind": annotation["kind"], "linked": False}
+                raw.update({"d": 6.6} if annotation["kind"] == "hole" else
+                           {"label": "M8", "label_pitch": "M8×1.25", "cls": "6H"})
+            else:
+                raw = dict(found, kind=annotation["kind"], linked=True)
+                if annotation["kind"] == "thread" and found.get("cls") is None:
+                    raw["cls"] = "6H" if found["internal"] else "6g"     # no feature: a default
+            raw["offset"] = data["offset"]
+            dialog = AnnotationDialog(self, annotation["kind"], tol_normalize_annotation(raw))
+            if dialog.exec_() != QDialog.Accepted or dialog.annotation() is None:
+                self.drawing_status.setText("Callout not placed")
+                return
+            annotation = dialog.annotation()
         annotation = dict(annotation, offset=data["offset"])
         self.dimensions.append({"type": "annotation", "label": "", "value": 0.0,
                                 "view": data["view"], "points": [data["position"]],
                                 "ann": annotation})
-        self._pending_annotation = None
         self.canvas.select_dimension(len(self.dimensions) - 1)
         self._refresh_dimension_list()
         self._load_tolerance_editor(len(self.dimensions) - 1)
@@ -26593,7 +30885,8 @@ class TechnicalDrawingDialog(QDialog):
         if not 0 <= row < len(self.dimensions) or self.dimensions[row].get("type") != "annotation":
             return
         annotation = self.dimensions[row].get("ann")
-        dialog = AnnotationDialog(self, (annotation or {}).get("kind", "gdt"), annotation)
+        dialog = AnnotationDialog(self, (annotation or {}).get("kind", "gdt"), annotation,
+                                  parts=self._part_names())
         if dialog.exec_() == QDialog.Accepted and dialog.annotation() is not None:
             self.dimensions[row]["ann"] = dialog.annotation()
             self._refresh_dimension_list_texts()
@@ -26624,6 +30917,12 @@ class TechnicalDrawingDialog(QDialog):
         if not 0 <= row < len(self.dimensions):
             return
         self.dimensions.pop(row)
+        for stackup in self.stackups:                 # stack-up rows keep pointing at their dimension
+            for item in stackup.get("rows", ()):
+                if item.get("dim") == row:
+                    item.pop("dim")                   # the values stay, typed in from now on
+                elif isinstance(item.get("dim"), int) and item["dim"] > row:
+                    item["dim"] -= 1
         self.canvas.select_dimension(None)
         self.canvas._hover_dimension = None
         self.canvas._dimension_drag = None
@@ -27113,8 +31412,9 @@ def assembly_component_status(component, objects, assembly=None):
 def assembly_keep_appearance(old_bodies, new_bodies):
     """Update re-reads only the shape: the colour and transparency the bodies have in the
     assembly stay. A new body takes them from the old body of the same name (or, if the names
-    changed, the one at the same place when the count is the same); a body that is new gets the
-    object's transparency when all its old bodies had the same one."""
+    changed, the one at the same place when the count is the same); a body that is new (e.g. an
+    extrusion added to the source since) gets the object's colour / transparency when all its
+    old bodies had the same one — the Assembly window sets both for the whole object."""
     if not old_bodies:
         return
     by_name = {}
@@ -27123,6 +31423,10 @@ def assembly_keep_appearance(old_bodies, new_bodies):
     by_index = len(old_bodies) == len(new_bodies)
     opacities = {round(float(body.get("opacity", 1.0)), 6) for body in old_bodies}
     common = float(old_bodies[0].get("opacity", 1.0)) if len(opacities) == 1 else None
+    colors = {tuple(round(float(c), 6) for c in list(body.get("color", DEFAULT_SOLID_COLOR))[:3])
+              for body in old_bodies}
+    common_color = [float(c) for c in list(old_bodies[0].get("color", DEFAULT_SOLID_COLOR))[:3]] \
+        if len(colors) == 1 else None
     for index, body in enumerate(new_bodies):
         old = by_name.get(body.get("name"))
         if old is None and by_index:
@@ -27130,8 +31434,11 @@ def assembly_keep_appearance(old_bodies, new_bodies):
         if old is not None:
             body["color"] = [float(c) for c in list(old.get("color", body["color"]))[:3]]
             body["opacity"] = float(old.get("opacity", body["opacity"]))
-        elif common is not None:
-            body["opacity"] = common
+        else:
+            if common is not None:
+                body["opacity"] = common
+            if common_color is not None:
+                body["color"] = list(common_color)
 
 def assembly_refresh_component(component, objects, window=None):
     """Re-read the source of a component; position, rotation, applied cuts and the colour /
@@ -27505,6 +31812,396 @@ def assembly_export_mesh(assembly, components=None):
             vertices += list(body_vertices)
             triangles += [(a + offset, b + offset, c + offset) for a, b, c in body_triangles]
     return (vertices, triangles) if triangles else None
+
+# fits and clearances (Technical Drawing Phase 5) --------------------------------
+def assembly_component_cylinders(component):
+    """Cylindrical surfaces of a placed component (world coordinates), from coaxial circular
+    rims of its meshes: [{"axis", "point", "radius", "low", "high", "inner" (a bore)}]."""
+    cylinders = []
+    for body in component["bodies"]:
+        if body.get("fused") or not body["triangles"]:
+            continue
+        world = assembly_world_vertices(component, body["vertices"])
+        V, T = _drawing_prepare_mesh(world.tolist(), body["triangles"])
+        topology = _drawing_topology(V, T, threads=[])
+        tolerance = max(topology["span"] * 1e-4, 1e-6)
+        rims = []
+        for circle in topology["circles"]:
+            if not circle.get("edges"):
+                continue
+            axis = np.asarray(circle["axis"], dtype=float)
+            axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+            info = _drawing_rim_info(topology, dict(circle, axis=axis))
+            rims.append((np.asarray(circle["center"], dtype=float), axis, float(circle["radius"]),
+                         bool(info and info["inner"])))
+        used = set()
+        for i, (centre, axis, radius, inner) in enumerate(rims):
+            if i in used:
+                continue
+            group = [i]
+            for j in range(i + 1, len(rims)):
+                other = rims[j]
+                offset = other[0] - centre
+                if j not in used and abs(float(other[1] @ axis)) > 0.9999 and \
+                        abs(other[2] - radius) <= max(1e-3 * radius, tolerance) and \
+                        float(np.linalg.norm(offset - (offset @ axis) * axis)) <= max(1e-3 * radius, tolerance):
+                    group.append(j)
+            if len(group) < 2:
+                continue
+            used.update(group)
+            ts = [float((rims[k][0] - centre) @ axis) for k in group]
+            cylinders.append({"axis": axis, "point": centre, "radius": radius, "low": min(ts),
+                              "high": max(ts), "inner": any(rims[k][3] for k in group)})
+    return cylinders
+
+
+def assembly_fit_pairs(assembly):
+    """Shaft / bore pairs of different visible components: coaxial cylinders of about the same
+    diameter (one a bore, one a shaft) that overlap along the axis."""
+    components = [c for c in assembly["components"] if c.get("visible", True)]
+    cylinders = {id(c): assembly_component_cylinders(c) for c in components}
+    pairs, seen = [], set()
+    for shaft_part in components:
+        for hole_part in components:
+            if shaft_part is hole_part:
+                continue
+            for shaft in cylinders[id(shaft_part)]:
+                if shaft["inner"]:
+                    continue
+                for hole in cylinders[id(hole_part)]:
+                    if not hole["inner"]:
+                        continue
+                    axis = shaft["axis"]
+                    offset = hole["point"] - shaft["point"]
+                    if abs(float(hole["axis"] @ axis)) < 0.9995 or \
+                            float(np.linalg.norm(offset - (offset @ axis) * axis)) > 0.02 * hole["radius"] + 0.05 or \
+                            abs(hole["radius"] - shaft["radius"]) > max(0.02 * hole["radius"], 0.05):
+                        continue
+                    sign = 1.0 if float(hole["axis"] @ axis) > 0 else -1.0
+                    base = float(offset @ axis)
+                    h0, h1 = sorted((base + sign * hole["low"], base + sign * hole["high"]))
+                    if min(shaft["high"], h1) - max(shaft["low"], h0) <= 1e-6:
+                        continue
+                    key = (shaft_part["name"], hole_part["name"], round(2 * hole["radius"], 2))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    pairs.append({"shaft_part": shaft_part, "hole_part": hole_part,
+                                  "shaft_d": 2 * shaft["radius"], "hole_d": 2 * hole["radius"],
+                                  "axis": axis, "point": shaft["point"]})
+    return pairs
+
+
+def assembly_fit_result(hole_d, hole_dev, shaft_d, shaft_dev):
+    """Clearance range and kind of a shaft / bore pair from their nominal sizes and deviations."""
+    largest = (hole_d + hole_dev[0]) - (shaft_d + shaft_dev[1])
+    smallest = (hole_d + hole_dev[1]) - (shaft_d + shaft_dev[0])
+    kind = "clearance" if smallest >= 0 else "interference" if largest <= 0 else "transition"
+    return {"max": largest, "min": smallest, "kind": kind}
+
+
+def _point_triangle_distance(points, a, b, c):
+    """Distances from points (n, 3) to triangles (m, 3 each): (n, m) (Ericson, vectorised)."""
+    p = points[:, None, :]
+    ab, ac, ap = b - a, c - a, p - a
+    d1, d2 = np.einsum("ijk,jk->ij", ap, ab), np.einsum("ijk,jk->ij", ap, ac)
+    bp, cp = p - b, p - c
+    d3, d4 = np.einsum("ijk,jk->ij", bp, ab), np.einsum("ijk,jk->ij", bp, ac)
+    d5, d6 = np.einsum("ijk,jk->ij", cp, ab), np.einsum("ijk,jk->ij", cp, ac)
+    va, vb, vc = d3 * d6 - d5 * d4, d5 * d2 - d1 * d6, d1 * d4 - d3 * d2
+    denominator = va + vb + vc
+    denominator = np.where(np.abs(denominator) < 1e-30, 1e-30, denominator)
+    v, w = vb / denominator, vc / denominator
+    closest = a + v[..., None] * ab + w[..., None] * ac                          # inside the face
+    # regions outside: vertices and edges
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_ab = np.clip(d1 / np.where(d1 - d3 == 0, 1e-30, d1 - d3), 0, 1)
+        t_ac = np.clip(d2 / np.where(d2 - d6 == 0, 1e-30, d2 - d6), 0, 1)
+        t_bc = np.clip((d4 - d3) / np.where((d4 - d3) + (d5 - d6) == 0, 1e-30, (d4 - d3) + (d5 - d6)), 0, 1)
+    on_ab = a + t_ab[..., None] * ab
+    on_ac = a + t_ac[..., None] * ac
+    on_bc = b + t_bc[..., None] * (c - b)
+    outside = (va <= 0) | (vb <= 0) | (vc <= 0)
+    candidates = np.stack([closest, on_ab, on_ac, on_bc,
+                           np.broadcast_to(a, closest.shape), np.broadcast_to(b, closest.shape),
+                           np.broadcast_to(c, closest.shape)])
+    distances = np.linalg.norm(candidates - p[None], axis=-1)
+    inside_face = distances[0]
+    edge_best = distances[1:].min(axis=0)
+    return np.where(outside, edge_best, np.minimum(inside_face, edge_best))
+
+
+def assembly_world_mesh(component, offset=None):
+    """(vertices, triangles) of a component's shown bodies in assembly coordinates."""
+    vertices, triangles = [], []
+    for body in component["bodies"]:
+        if body.get("fused") or not body["triangles"]:
+            continue
+        world = assembly_world_vertices(component, body["vertices"])
+        if offset is not None:
+            world = world + offset
+        triangles += [(a + len(vertices), b + len(vertices), c + len(vertices)) for a, b, c in body["triangles"]]
+        vertices += world.tolist()
+    return np.asarray(vertices, dtype=float).reshape(-1, 3), np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+
+
+def assembly_min_distance(first, second, reach=5.0, samples=2500):
+    """Smallest distance between two components' meshes (closer than `reach`, else None) and
+    whether they overlap (a point of one lies inside the other). Vertices of one mesh near the
+    other are tested against its nearby triangles, both ways."""
+    meshes = [assembly_world_mesh(first), assembly_world_mesh(second)]
+    if not all(len(T) for _V, T in meshes):
+        return None, False
+    lows = [V[np.unique(T)].min(axis=0) for V, T in meshes]
+    highs = [V[np.unique(T)].max(axis=0) for V, T in meshes]
+    if np.any(lows[0] > highs[1] + reach) or np.any(lows[1] > highs[0] + reach):
+        return None, False
+    best, overlap = None, False
+    for (P, PT), (Q, QT), q_low, q_high in ((meshes[0], meshes[1], lows[1], highs[1]),
+                                             (meshes[1], meshes[0], lows[0], highs[0])):
+        points = P[np.unique(PT)]
+        near = np.all((points >= q_low - reach) & (points <= q_high + reach), axis=1)
+        points = points[near]
+        if not len(points):
+            continue
+        if len(points) > samples:
+            points = points[np.linspace(0, len(points) - 1, samples).astype(int)]
+        corners = Q[QT]
+        box_low, box_high = points.min(axis=0) - reach, points.max(axis=0) + reach
+        keep = np.all((corners.max(axis=1) >= box_low) & (corners.min(axis=1) <= box_high), axis=1)
+        corners = corners[keep]
+        if not len(corners):
+            continue
+        a, b, c = corners[:, 0], corners[:, 1], corners[:, 2]
+        nearest = np.full(len(points), np.inf)
+        chunk = max(1, 200_000 // max(len(corners), 1))          # about 35 MB of work arrays
+        for start in range(0, len(points), chunk):
+            block = _point_triangle_distance(points[start:start + chunk], a, b, c)
+            nearest[start:start + chunk] = block.min(axis=1)
+        distance = float(nearest.min())
+        best = distance if best is None else min(best, distance)
+        # overlap: points clearly away from the other surface (not just touching it, where the
+        # facets of two round parts cross) that lie inside the other mesh
+        clear = np.argsort(nearest)
+        clear = clear[nearest[clear] > 0.02]
+        probes = list(clear[:6]) + list(clear[np.linspace(0, len(clear) - 1, 6).astype(int)]) \
+            if len(clear) else []
+        for index in dict.fromkeys(probes):
+            if _drawing_point_inside(Q, QT, points[index]):
+                overlap = True
+                break
+    if best is not None and best > reach:
+        best = None
+    return best, overlap
+
+
+def assembly_part_drawings(source_name, objects):
+    """Sheets of the project's technical drawings that show the solid `source_name`, with the
+    general tolerance of their drawing: [(sheet options, general tolerance text)]."""
+    sheets = []
+    for entry in objects:
+        if entry.get("type") != "technical_drawing":
+            continue
+        options = entry.get("options") or {}
+        for sheet in drawing_sheet_options(options):
+            source = sheet.get("source") if "source" in sheet else \
+                ({"kind": "project", "name": entry["parent"]["name"]} if entry.get("parent") else None)
+            if source and source.get("kind") == "project" and source.get("name") == source_name:
+                sheets.append((sheet, options.get("tolerance") or "ISO 2768-m"))
+    return sheets
+
+
+def assembly_part_tolerance(component, diameter, objects):
+    """(upper, lower) deviation of a diameter of a component and where it comes from: the
+    bearing's own tolerance (ISO 492), a toleranced dimension of the part's drawing, else the
+    drawing's general tolerance (ISO 2768-m if the part has no drawing)."""
+    source = assembly_find_source(component.get("source_name"), objects) \
+        if component.get("kind") == "project" else None
+    bearing = (source or {}).get("bearing")
+    if bearing:
+        bore, outside = bearing_ring_deviations(bearing)
+        if abs(diameter - bearing["d"]) <= 0.05:
+            return bore, f"bearing {bearing['name']} bore"
+        if abs(diameter - bearing["D"]) <= 0.05:
+            return outside, f"bearing {bearing['name']} outside"
+    general = "ISO 2768-m"
+    if source is not None:
+        for sheet, sheet_general in assembly_part_drawings(source["name"], objects):
+            general = sheet_general
+            for dimension in sheet.get("dimensions") or []:
+                if dimension.get("type", "length") in ("diameter", "length") and dimension.get("tol") and \
+                        abs(abs(float(dimension.get("value", 0.0))) - diameter) <= 0.02:
+                    tolerance = tol_normalize_tolerance(dimension["tol"])
+                    label = tolerance.get("fit") if tolerance and tolerance["mode"] == "fit" else \
+                        tol_tolerance_summary(diameter, tolerance)
+                    return tol_dimension_deviations(diameter, tolerance), f"drawing: {label}"
+    upper, lower = tol_dimension_deviations(diameter, None, general)
+    return (upper, lower), f"general ({general})"
+
+
+class AssemblyCheckDialog(QDialog):
+    """Fits and clearances of the assembly (Phase 5). Fits: every shaft in a bore of another
+    part with the tolerances of both (bearing data, the parts' drawings, else general
+    tolerances): fit type and the clearance range. Clearances: the smallest gap between parts at
+    nominal size and with the worst general tolerances; pairs below the required gap or
+    overlapping are marked, a click selects the part in the view."""
+
+    def __init__(self, assembly_window):
+        super().__init__(assembly_window)
+        self.window_ = assembly_window
+        self.setWindowTitle("Fits and clearances")
+        self.resize(900, 560)
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+        fits_page = QWidget()
+        fits_layout = QVBoxLayout(fits_page)
+        self.fits = QTableWidget(0, 7)
+        self.fits.setHorizontalHeaderLabels(["Shaft (part)", "Bore (part)", "Ø nominal", "Shaft tolerance",
+                                             "Bore tolerance", "Clearance min … max", "Fit"])
+        self.fits.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.fits.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.fits.cellClicked.connect(lambda row, _col: self._select_row(self._fit_rows, row))
+        fits_layout.addWidget(self.fits)
+        tabs.addTab(fits_page, "Fits")
+        clear_page = QWidget()
+        clear_layout = QVBoxLayout(clear_page)
+        form = QFormLayout()
+        self.required = QDoubleSpinBox()
+        self.required.setRange(0.0, 100.0)
+        self.required.setDecimals(2)
+        self.required.setSuffix(" mm")
+        self.required.setValue(0.5)
+        self.required.setToolTip("Smallest gap moving or neighbouring parts must keep")
+        self.reach = QDoubleSpinBox()
+        self.reach.setRange(0.5, 100.0)
+        self.reach.setValue(5.0)
+        self.reach.setSuffix(" mm")
+        self.reach.setToolTip("Only pairs closer than this are listed")
+        form.addRow("Required gap:", self.required)
+        form.addRow("Look up to:", self.reach)
+        clear_layout.addLayout(form)
+        run = QPushButton("Check clearances")
+        run.clicked.connect(self._check_clearances)
+        clear_layout.addWidget(run)
+        self.clearances = QTableWidget(0, 5)
+        self.clearances.setHorizontalHeaderLabels(["Part", "Part", "Gap (nominal)", "Gap (worst case)", "Result"])
+        self.clearances.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.clearances.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.clearances.cellClicked.connect(lambda row, _col: self._select_row(self._clear_rows, row))
+        clear_layout.addWidget(self.clearances, 1)
+        tabs.addTab(clear_page, "Clearances")
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.rejected.connect(self.reject)
+        layout.addWidget(close)
+        self._fit_rows, self._clear_rows = [], []
+        self._check_fits()
+
+    def _objects(self):
+        return self.window_._window.state.get("objects", [])
+
+    def _select_row(self, rows, row):
+        if 0 <= row < len(rows):
+            first, second = rows[row]
+            self.window_._select(first)
+            self.window_.view.update()
+            self.status.setText(f"Selected {first['name']} (with {second['name']})")
+
+    @staticmethod
+    def _item(text, bad=False):
+        item = QTableWidgetItem(text)
+        if bad:
+            item.setForeground(QColor("#ff6b6b"))
+        return item
+
+    def _check_fits(self):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            pairs = assembly_fit_pairs(self.window_.assembly)
+        finally:
+            QApplication.restoreOverrideCursor()
+        objects = self._objects()
+        self.fits.setRowCount(0)
+        self._fit_rows = []
+        for pair in pairs:
+            shaft_dev, shaft_from = assembly_part_tolerance(pair["shaft_part"], round(pair["shaft_d"], 3), objects)
+            hole_dev, hole_from = assembly_part_tolerance(pair["hole_part"], round(pair["hole_d"], 3), objects)
+            result = assembly_fit_result(pair["hole_d"], hole_dev, pair["shaft_d"], shaft_dev)
+            row = self.fits.rowCount()
+            self.fits.insertRow(row)
+            mm = lambda value: f"{value:+.3f}"
+            values = (pair["shaft_part"]["name"], pair["hole_part"]["name"], f"{pair['hole_d']:.3f}",
+                      f"{mm(shaft_dev[0])} / {mm(shaft_dev[1])}  ({shaft_from})",
+                      f"{mm(hole_dev[0])} / {mm(hole_dev[1])}  ({hole_from})",
+                      f"{result['min']:+.3f} … {result['max']:+.3f}", result["kind"])
+            general = "general" in shaft_from or "general" in hole_from
+            for column, value in enumerate(values):
+                self.fits.setItem(row, column, self._item(value, column == 6 and general))
+            self._fit_rows.append((pair["shaft_part"], pair["hole_part"]))
+        self.status.setText(
+            f"{len(pairs)} shaft / bore pair(s). Tolerances come from bearings, then from the parts' "
+            "drawings (a toleranced diameter of the same size), else from the general tolerance "
+            "(marked red: give these diameters a fit on the part's drawing)." if pairs else
+            "No shaft / bore pairs found (coaxial cylinders of about the same diameter on two parts).")
+
+    def _check_clearances(self):
+        components = [c for c in self.window_.assembly["components"] if c.get("visible", True)]
+        objects = self._objects()
+        fitted = {(a["name"], b["name"]) for a, b in self._fit_rows} | \
+            {(b["name"], a["name"]) for a, b in self._fit_rows}
+        self.clearances.setRowCount(0)
+        self._clear_rows = []
+        failing = 0
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for index, first in enumerate(components):
+                for second in components[index + 1:]:
+                    gap, overlap = assembly_min_distance(first, second, float(self.reach.value()))
+                    if gap is None:
+                        continue
+                    # worst case: both parts at the limits of their general tolerance (largest size)
+                    widen = 0.0
+                    for part in (first, second):
+                        box = assembly_bounds(part)
+                        source = assembly_find_source(part.get("source_name"), objects) \
+                            if part.get("kind") == "project" else None
+                        general = next((g for _s, g in assembly_part_drawings(source["name"], objects)),
+                                       "ISO 2768-m") if source else "ISO 2768-m"
+                        size = float(np.max(box[1] - box[0])) if box is not None else 0.0
+                        widen += tol_general_tolerance(general, size) or 0.0
+                    worst = gap - widen
+                    if (first["name"], second["name"]) in fitted and gap < 0.05:
+                        result, bad = "touching: shaft / bore fit (see Fits)", False
+                    elif overlap:
+                        result, bad = "OVERLAP (interference)", True
+                    elif gap < 1e-3:
+                        result, bad = "touching", False
+                    elif worst < self.required.value():
+                        result, bad = f"too small (< {self.required.value():g} mm worst case)", True
+                    else:
+                        result, bad = "OK", False
+                    failing += bad
+                    row = self.clearances.rowCount()
+                    self.clearances.insertRow(row)
+                    for column, value in enumerate((first["name"], second["name"], f"{gap:.3f}",
+                                                    f"{worst:.3f}", result)):
+                        self.clearances.setItem(row, column, self._item(value, bad))
+                    self._clear_rows.append((first, second))
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.status.setText(
+            f"{len(self._clear_rows)} pair(s) closer than {self.reach.value():g} mm, {failing} failing. "
+            "Worst case: the gap less the ISO 2768 general tolerances of both parts (their largest size)."
+            if self._clear_rows else f"No parts closer than {self.reach.value():g} mm to each other.")
+        failing_row = next((row for row in range(self.clearances.rowCount())
+                            if self.clearances.item(row, 4).foreground().color() == QColor("#ff6b6b")), None)
+        if failing_row is not None:                    # the first failing pair is selected
+            self.clearances.selectRow(failing_row)
+            self._select_row(self._clear_rows, failing_row)
+
 
 # persistence -------------------------------------------------------------------
 def assembly_to_data(assembly, keep_empty=False):
@@ -28492,6 +33189,11 @@ class AssemblyDialog(QDialog):
             "fit_together.png", "Fit together", "Restore all exploded parts to their alignments.",
             self._fit_together)
         self.act_fit_together.setEnabled(False)
+        self.act_fit_check = action(
+            "fit_check.png", "Fits and clearances",
+            "Fits and clearances — check every shaft in a bore (fit type and clearance range from "
+            "the parts' tolerances) and the smallest gaps between parts.",
+            lambda: AssemblyCheckDialog(self).exec_())
         self.act_measure = action(
             "measurement.png", "Measure",
             "Measure edges and corners on assembly parts",
@@ -28519,7 +33221,8 @@ class AssemblyDialog(QDialog):
         for act in (self.act_new, self.act_open, self.act_save, self.act_save_as, None,
                     self.act_import, self.act_export, None, self.act_undo, self.act_redo, None,
                     self.act_measure, self.act_remove, None,
-                    self.act_align, self.act_exploded, self.act_fit_together, self.act_section, None,
+                    self.act_align, self.act_exploded, self.act_fit_together, self.act_section,
+                    self.act_fit_check, None,
                     *self._view_actions, self.act_origin, self.act_show_all, None):
             toolbar.addSeparator() if act is None else toolbar.addAction(act)
         self.act_update_selected = action(
@@ -30855,6 +35558,10 @@ class MainWindow(QMainWindow):
         self.act_pump=QAction(QIcon(os.path.join(icon_dir, "pump.png")),
                               "Pump", self, triggered=self._create_pump,
                               toolTip="Pump - Generate a simple water pump housing with inlet and outlet")
+        self.act_bearing=QAction(QIcon(os.path.join(icon_dir, "bearing.png")),
+                                 "Bearing", self, triggered=self._create_bearing,
+                                 toolTip="Bearing - Insert a standard ball, needle or plain bearing; "
+                                         "shows its shaft / housing seats (fits, shoulders)")
         self.act_extrude=QAction(QIcon(os.path.join(icon_dir, "extrusion.png")), "Extrusion", self,
                                  triggered=self._open_extrude_panel,
                                  toolTip="Extrusion — Extrude the selected sketch")
@@ -30891,6 +35598,7 @@ class MainWindow(QMainWindow):
                                  checkable=True,toggled=self._set_measure_mode,
                                  toolTip="Measurement — Click edges and corners to measure")
         tb2.addAction(self.act_gear); tb2.addAction(self.act_thread); tb2.addAction(self.act_pump)
+        tb2.addAction(self.act_bearing)
         tb2.addAction(self.act_measure)
         tb2.addSeparator()
         view_actions = (
@@ -31347,7 +36055,7 @@ class MainWindow(QMainWindow):
         self._cut_timer.timeout.connect(self._update_cut_preview)
 
         # feature (chamfer / fillet) panel
-        self._dock_feat=QDockWidget("Chamfer / Fillet",self)
+        self._dock_feat=QDockWidget("Chamfer",self)
         self._dock_feat.setObjectName("dock_chamfer_fillet")
         self._dock_feat.setFeatures(QDockWidget.DockWidgetMovable)
         feat_w=QWidget(); feat_lay=QVBoxLayout(feat_w); feat_lay.setContentsMargins(8,8,8,8); feat_lay.setSpacing(6)
@@ -31858,11 +36566,16 @@ class MainWindow(QMainWindow):
         self.cb_thread_kind.setToolTip("External screw thread or internal nut thread.")
         self.cb_thread_kind.setEnabled(True)
         self.cb_thread_fit=QComboBox()
-        self.cb_thread_fit.addItem("Grade 6", "6")
-        self.cb_thread_fit.addItem("Grade 7", "7")
-        #self.cb_thread_fit.setToolTip("Grade 6: 0.15 mm radial clearance. Grade 7: 0.25 mm radial clearance.")
-        self.lbl_thread_fit_info=QLabel(
-            "Radial Clearance: Grade 6: 0.15mm - Grade 7: 0.25mm")
+        self.cb_thread_fit.setToolTip(
+            "Tolerance class of the thread (ISO 965 6H / 6g …, Unified 2A / 2B …, Tr 7H / 7e, "
+            "G A / B). It is printed in thread callouts and sets the clearance of the printable "
+            "profile: classes 1-6 0.15 mm, 7-8 0.25 mm, plus the allowance of e / f / g / G.")
+        self.cb_thread_hand=QComboBox()
+        self.cb_thread_hand.addItem("Right-hand", "right")
+        self.cb_thread_hand.addItem("Left-hand (LH)", "left")
+        self.cb_thread_hand.setToolTip("Direction of the helix; left-hand threads are marked LH "
+                                       "on drawings")
+        self.lbl_thread_fit_info=QLabel("")
         self.lbl_thread_fit_info.setWordWrap(True)
         self.lbl_thread_fit_info.setMaximumWidth(229)
         self.lbl_thread_fit_info.setStyleSheet("color:#aab2bd;font-size:12px;")
@@ -31879,8 +36592,9 @@ class MainWindow(QMainWindow):
         thread_form.addRow(self.lbl_thread_turns, self.sp_thread_turns)
         thread_form.addRow(self.lbl_thread_depth, self.sp_thread_depth)
         thread_form.addRow("Thread:", self.cb_thread_kind)
-        thread_form.addRow("Fit / clearance grade:", self.cb_thread_fit)
+        thread_form.addRow("Tolerance class:", self.cb_thread_fit)
         thread_form.addRow(self.lbl_thread_fit_info)
+        thread_form.addRow("Hand:", self.cb_thread_hand)
         thread_form.addRow("Length:", self.cb_thread_extent)
         thread_form.addRow("Thread length:", self.sp_thread_length)
         thread_lay.addLayout(thread_form)
@@ -31909,6 +36623,11 @@ class MainWindow(QMainWindow):
         self.cb_thread_size.currentIndexChanged.connect(self._schedule_thread_preview)
         self.cb_thread_size.currentIndexChanged.connect(self._thread_size_mode_changed)
         self.cb_thread_fit.currentIndexChanged.connect(self._schedule_thread_preview)
+        self.cb_thread_fit.currentIndexChanged.connect(self._update_thread_fit_info)
+        self.cb_thread_hand.currentIndexChanged.connect(self._schedule_thread_preview)
+        self.cb_thread_size.currentIndexChanged.connect(lambda *_: self._fill_thread_classes())
+        self.cb_thread_kind.currentIndexChanged.connect(lambda *_: self._fill_thread_classes())
+        self._fill_thread_classes()
         self.sp_thread_length.valueChanged.connect(self._schedule_thread_preview)
         self.sp_thread_turns.valueChanged.connect(self._schedule_thread_preview)
         self.sp_thread_depth.valueChanged.connect(self._schedule_thread_preview)
@@ -32759,7 +37478,7 @@ class MainWindow(QMainWindow):
         self.act_new_sketch.setVisible(not in_sk); self.act_extrude.setVisible(not in_sk)
         self.act_surface.setVisible(not in_sk); self.act_gear.setVisible(not in_sk)
         self.act_cut_surface.setVisible(not in_sk)
-        self.act_thread.setVisible(not in_sk); self.act_pump.setVisible(not in_sk)
+        self.act_thread.setVisible(not in_sk); self.act_pump.setVisible(not in_sk); self.act_bearing.setVisible(not in_sk)
         self.act_ring.setVisible(not in_sk)
         self.act_bridge.setVisible(not in_sk)
         self.act_chamfer.setVisible(not in_sk); self.act_fillet.setVisible(not in_sk)
@@ -32778,7 +37497,7 @@ class MainWindow(QMainWindow):
         self.act_new_sketch.setEnabled(mode==MODE_NORMAL)
         self.act_surface.setEnabled(mode==MODE_NORMAL); self.act_gear.setEnabled(mode==MODE_NORMAL)
         self.act_cut_surface.setEnabled(mode==MODE_NORMAL)
-        self.act_thread.setEnabled(mode==MODE_NORMAL); self.act_pump.setEnabled(mode==MODE_NORMAL)
+        self.act_thread.setEnabled(mode==MODE_NORMAL); self.act_pump.setEnabled(mode==MODE_NORMAL); self.act_bearing.setEnabled(mode==MODE_NORMAL)
         self.act_extrude.setEnabled(mode==MODE_NORMAL)
         self.act_ring.setEnabled(mode==MODE_NORMAL)
         self.act_bridge.setEnabled(mode==MODE_NORMAL)
@@ -33474,6 +38193,45 @@ class MainWindow(QMainWindow):
 
     PUMP_COLORS = {"housing": (0.3, 0.75, 0.95), "lid": (0.55, 0.85, 0.7), "impeller": (0.95, 0.65, 0.25)}
 
+    def _create_bearing(self, _checked=False):
+        """Bearing tool (Phase 5): a standard bearing from the library as a part of its own at
+        the origin (axis +Z). It carries its data ("bearing"): drawings and the assembly's fit
+        check read the ring tolerances and seat recommendations from it."""
+        if self._busy():
+            return
+        dialog = BearingDialog(self, "Bearing")
+        if dialog.exec_() != QDialog.Accepted or dialog.bearing() is None:
+            return
+        bearing = dict(dialog.bearing(), load_case=dialog.load.currentData())
+        try:
+            vertices, triangles = bearing_mesh(bearing)
+        except Exception as ex:                       # (manifold3d missing or failing)
+            QMessageBox.critical(self, "Bearing", f"The bearing could not be built:\n{ex}")
+            return
+        names = {o["name"] for o in self.state["objects"]}
+        stem = f"Bearing {bearing['name']}"
+        name, suffix = stem, 2
+        while name in names:
+            name = f"{stem} ({suffix})"; suffix += 1
+        entry = {
+            "type": "imported", "name": name, "tree_item": None, "parent": None,
+            "visible": True, "opacity": 1.0, "color": (0.72, 0.74, 0.78),
+            "position": [0.0, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0],
+            "mesh_vertices": vertices, "triangles": triangles, "faces": _mesh_face_records([], triangles),
+            "mesh_faces": [], "source_format": "bearing", "fixed_position": False,
+            "solid": (list(vertices), triangles), "material": "Steel" if bearing["type"] != "plain" else "Bronze",
+            "bearing": bearing,
+        }
+        self._cache_normals(entry)
+        self.state["objects"].append(entry)
+        self.state["selected"] = entry
+        self._rebuild_tree()
+        self._mark_dirty()
+        self.view3d.update()
+        seat = bearing_seat(bearing, bearing["load_case"])
+        self._st(f"{name}: shaft Ø{bearing['d']:g} {seat['shaft']}, housing Ø{bearing['D']:g} "
+                 f"{seat['housing']} · move it into place with the placement fields or in the assembly")
+
     def _create_pump(self, _checked=False):
         if self._pump_preview is not None:
             self._show_compact_dock(self._dock_pump); return
@@ -33658,6 +38416,34 @@ class MainWindow(QMainWindow):
         self._thread_preview_timer.start()
         self.view3d.update()
 
+    def _fill_thread_classes(self, keep=None):
+        """Tolerance classes of the chosen thread family and side (internal / external); `keep`
+        (e.g. an older "6" / "7" grade of an edited thread) stays selectable."""
+        size = self.cb_thread_size.currentData()
+        standard = size[2] if size else "ISO"
+        kind = self.cb_thread_kind.currentData() or "external"
+        current = keep if keep is not None else self.cb_thread_fit.currentData()
+        classes = THREAD_CLASSES[thread_class_family(standard)][kind]
+        if standard in ("ST", "NPT"):
+            classes = ("",)                          # ISO 1478 / ASME B1.20.1: no tolerance classes
+        self.cb_thread_fit.blockSignals(True)
+        self.cb_thread_fit.clear()
+        for item in classes:
+            self.cb_thread_fit.addItem(item or "(none)", item)
+        if current in ("6", "7"):
+            self.cb_thread_fit.addItem(f"Grade {current} (older thread)", current)
+        index = self.cb_thread_fit.findData(current)
+        self.cb_thread_fit.setCurrentIndex(index if index >= 0 else 0)
+        self.cb_thread_fit.blockSignals(False)
+        self._update_thread_fit_info()
+
+    def _update_thread_fit_info(self, *_):
+        fit = self.cb_thread_fit.currentData()
+        size = self.cb_thread_size.currentData()
+        note = " · NPT is modelled straight (without its 1:16 taper)" if size and size[2] == "NPT" else ""
+        self.lbl_thread_fit_info.setText(
+            f"Radial clearance of the printable profile: {thread_clearance(fit):.2f} mm{note}")
+
     def _thread_size_mode_changed(self, *_):
         custom = self.cb_thread_size.currentData() is None
         for widget in (self.lbl_thread_turns, self.sp_thread_turns,
@@ -33677,7 +38463,9 @@ class MainWindow(QMainWindow):
             depth = None
         feat = {"type": "thread", "visible": True, "kind": target["kind"],
                 "nominal": nominal, "pitch": pitch, "standard": standard,
-                "fit": self.cb_thread_fit.currentData(),
+                "fit": self.cb_thread_fit.currentData() if self.cb_thread_fit.currentData() is not None
+                       else "6",
+                "hand": self.cb_thread_hand.currentData(),
                 "axis": np.asarray(target["axis"], float).tolist(),
                 "point": (target["center"] + target["start"] * target["axis"]).tolist(),
                 "radius": float(target["radius"]), "length": float(self.sp_thread_length.value()),
@@ -33904,7 +38692,8 @@ class MainWindow(QMainWindow):
             self.cb_thread_size.setCurrentIndex(self.cb_thread_size.findText(thread_size_label(
                 feat["nominal"], feat["pitch"], feat.get("standard", "ISO"))))
         self.cb_thread_kind.setCurrentIndex(self.cb_thread_kind.findData(feat["kind"]))
-        self.cb_thread_fit.setCurrentIndex(self.cb_thread_fit.findData(feat["fit"]))
+        self._fill_thread_classes(keep=feat["fit"])
+        self.cb_thread_hand.setCurrentIndex(max(0, self.cb_thread_hand.findData(feat.get("hand", "right"))))
         self.cb_thread_extent.blockSignals(True)
         self.cb_thread_extent.setCurrentIndex(self.cb_thread_extent.findData("whole" if feat.get("whole") else "distance"))
         self.cb_thread_extent.blockSignals(False)
@@ -35905,7 +40694,7 @@ class MainWindow(QMainWindow):
         if self._busy():
             return
         if self.view3d._feat_mode:
-            self._st("Finish or cancel the current chamfer / fillet first")
+            self._st(f"Finish or cancel the current {self._feat_type} first")
             return
         self._set_measure_mode(False)
         selected_face = self.state.get("sel_face")
@@ -36580,6 +41369,17 @@ class MainWindow(QMainWindow):
             row.setToolTip(0, "Edges of the face this sketch lies on — show them / use them "
                               "as fixed references (constraints already on them stay)")
             self.sketch_levels.addTopLevelItem(row)
+        solid_underlay = self.state.get("sketch_view_state", {}).get("solid_underlay")
+        if solid_underlay is not None:
+            # shaded silhouette of the visible solids behind the sketch: show / hide only
+            row = QTreeWidgetItem(["Solid bodies", ""])
+            row.setData(0, Qt.UserRole, SOLID_UNDERLAY_ROW)
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setCheckState(0, Qt.Checked if solid_underlay.get("visible", True) else Qt.Unchecked)
+            row.setForeground(0, QColor(*SOLID_UNDERLAY_COLOR))
+            row.setToolTip(0, "Visible solids projected onto this sketch (shaded silhouette and "
+                              "feature edges) — shown for orientation only, never a reference")
+            self.sketch_levels.addTopLevelItem(row)
         cut_underlay = self.state.get("sketch_view_state", {}).get("cut_underlay")
         if cut_underlay is not None:
             # hatched cut extrusions inside the bodies: show / hide only (never a reference)
@@ -36646,6 +41446,14 @@ class MainWindow(QMainWindow):
             self.view3d._hover2d = None
             self.view3d.update()
             return
+        if level == SOLID_UNDERLAY_ROW:
+            solid_underlay = self.state["sketch_view_state"].get("solid_underlay")
+            # remembered for the following sketches of this session
+            self._solid_underlay_visible = row.checkState(0) == Qt.Checked
+            if solid_underlay is not None:
+                solid_underlay["visible"] = self._solid_underlay_visible
+            self.view3d.update()
+            return
         if level == CUT_UNDERLAY_ROW:
             cut_underlay = self.state["sketch_view_state"].get("cut_underlay")
             # remembered for the following sketches of this session
@@ -36682,24 +41490,15 @@ class MainWindow(QMainWindow):
         self.view3d.update()
 
     def _collect_solid_underlay(self, active_sketch):
-        parent = self._sketch_parent[0] if self._sketch_parent else None
-        if parent is None or parent.get("type") != "surface":
-            return None
-        while parent is not None and parent.get("type") == "surface":
-            parent = parent.get("parent")
-        if parent is None or parent.get("type") not in ("extrusion", "imported") or \
-                not entry_visible(parent):
-            return None
-        root = parent
-        ancestor = parent.get("parent")
-        while ancestor is not None:
-            if ancestor.get("type") in ("extrusion", "imported"):
-                root = ancestor
-            ancestor = ancestor.get("parent")
+        """Shaded silhouette + feature edges of the visible solids behind a sketch (base plane,
+        Surface or face): every visible body of the project, not only the one the sketch is
+        attached to (e.g. the housing a separate lid's sketch is placed against). Display only;
+        the Sketch Explorer's "Solid bodies" row hides it. → {"outline", "edges", "visible"}
+        paths in sketch mm, or None."""
         objects = self.state.get("objects", [])
-        bodies = [entry for entry in [root] + entry_descendants(root, objects)
-                  if entry.get("type") in ("extrusion", "imported") and
-                  not entry.get("cut") and not entry.get("preview") and entry_visible(entry)]
+        bodies = [entry for entry in objects
+                  if entry.get("type") in ("extrusion", "imported") and entry.get("solid")
+                  and not entry.get("cut") and not entry.get("preview") and entry_visible(entry)]
         origin, axis_u, axis_v, _ = (
             np.asarray(axis, dtype=float) for axis in active_sketch.frame)
         outline = QPainterPath()
@@ -36709,19 +41508,15 @@ class MainWindow(QMainWindow):
             solid = body.get("solid")
             if solid is None or not len(solid[1]):
                 continue
-            vertices = np.asarray(solid[0], dtype=float)
-            indices = np.asarray(solid[1], dtype=int)
-            relative = vertices - origin
-            projected = np.column_stack((relative @ axis_u, relative @ axis_v))
-            for triangle in projected[indices]:
-                a, b, c = triangle
-                area = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
-                if abs(float(area)) < 1e-12:
-                    continue
-                if area < 0:
-                    triangle = triangle[::-1]
-                outline.addPolygon(QPolygonF([QPointF(float(x), float(y)) for x, y in triangle]))
-                outline.closeSubpath()
+            vertices = np.asarray(solid[0], dtype=float).reshape(-1, 3)
+            indices = np.asarray(solid[1], dtype=int).reshape(-1, 3)
+            # per body (front-facing triangles of a closed mesh only), then united: simplifying
+            # all triangles of every body in one path takes seconds on a larger project
+            try:
+                area = self._projected_mesh_area((vertices, indices), origin, axis_u, axis_v)
+                outline = area if outline.isEmpty() else outline.united(area)
+            except Exception as ex:
+                _dbg(f"solid underlay {body.get('name')}: {ex}")
             edge_data = body.get("_edge_data")
             if edge_data is None:
                 triangles = vertices[indices]
@@ -36740,7 +41535,8 @@ class MainWindow(QMainWindow):
         if outline.isEmpty():
             return None
         # Keep feature edges separate from the union so recesses and overlapping bodies remain visible.
-        return {"outline": outline.simplified(), "edges": edges}
+        return {"outline": outline.simplified(), "edges": edges,
+                "visible": getattr(self, "_solid_underlay_visible", True)}
 
     def _collect_coplanar_underlay(self, active_sketch, tol=1e-4):
         """Faces of visible solids that lie in the plane of a face sketch, other than the face
@@ -36949,7 +41745,10 @@ class MainWindow(QMainWindow):
         fit_points.extend(point for underlay in underlays
                           for path in underlay["paths"] for point in path)
         fit_points.extend(point for underlay in underlays for point in underlay["points"])
-        if solid_underlay is not None:
+        # a Surface sketch is fitted around the bodies too; face and base-plane sketches keep
+        # their usual view (their face / their own geometry)
+        if solid_underlay is not None and solid_underlay["visible"] and \
+                self._sketch_parent and self._sketch_parent[0].get("type") == "surface":
             bounds = solid_underlay["outline"].boundingRect()
             fit_points.extend(((bounds.left(), bounds.top()), (bounds.right(), bounds.bottom())))
         if fit_points:
@@ -37659,7 +42458,7 @@ class MainWindow(QMainWindow):
         """Open the editor for sketches, surfaces, extrusions, or features."""
         if self._busy(): return
         if self.view3d._feat_mode:
-            self._st("Finish or cancel the current chamfer / fillet first"); return
+            self._st(f"Finish or cancel the current {self._feat_type} first"); return
         self._set_measure_mode(False)
         if entry["type"] == "assembly":
             self._open_assembly_entry(entry)
@@ -37678,13 +42477,17 @@ class MainWindow(QMainWindow):
                 dialog = TechnicalDrawingDialog(
                     self, entry.get("name", "Technical Drawing"), None, options,
                     source_entries=self._drawing_sources(), source_entry=parent,
-                    mesh_for=lambda source: _drawing_source_mesh(source, self.state["objects"]))
+                    mesh_for=lambda source: _drawing_source_mesh(source, self.state["objects"]),
+                    parts_for=lambda source: _drawing_parts(source, self.state["objects"]),
+                    model_info_for=lambda source: _drawing_model_info(source, self.state["objects"]))
             finally:
                 self._end_operation_progress()
             if dialog.exec_() == QDialog.Accepted:
                 entry["options"] = self._drawing_options_for_storage(dialog.drawing_options())
                 # listed under the solid of its first sheet that shows one (else at the top)
-                entry["parent"] = dialog.source_entry()
+                parent = dialog.source_entry()
+                entry["parent"] = None if parent is not None and \
+                    parent.get("type") == "assembly" else parent
                 self._rebuild_tree()
                 self._mark_dirty()
                 self._st(f"Updated drawing: {entry['name']}")
@@ -37756,6 +42559,7 @@ class MainWindow(QMainWindow):
             self._feat_entry = src; self._feat_type = feat["type"]
             self._feat_chains = []
             self._clear_preview_meshes()
+            self._dock_feat.setWindowTitle('Chamfer' if feat['type']=='chamfer' else 'Fillet')
             self.lbl_feat_title.setText(f"<b>Edit {'Chamfer' if feat['type']=='chamfer' else 'Fillet'}: {src['name']}</b>")
             self.chk_feat_outside.blockSignals(True)
             self.chk_feat_outside.setChecked(bool(feat.get("outside")))
@@ -39785,9 +44589,11 @@ class MainWindow(QMainWindow):
         try:
             previous_faces = len(mesh[2])
             parent = fo.get("parent")
+            notes = []
             mesh, matched = apply_edge_feature(
                 mesh, fo["feat"], None, self._other_bodies(parent),
-                clip_outer=bool(parent and parent.get("type") in ("extrusion", "imported", "bridge")))
+                clip_outer=bool(parent and parent.get("type") in ("extrusion", "imported", "bridge")),
+                notes=notes)
             if len(matched) == len(fo["feat"].get("edges", [])) and matched:
                 fo["feat"]["edges"] = [
                     {"faces": list(chain["faces"]), "mid": chain["mid"].tolist(),
@@ -39800,7 +44606,12 @@ class MainWindow(QMainWindow):
             # the faces the feature trimmed get their real outline (rounded / chamfered corners)
             mesh = (mesh[0], mesh[1], refresh_face_boundaries(mesh[0], mesh[1], mesh[2]))
             fo.pop("_error", None)
-            self._set_item_tooltip(item, "")
+            # a size made smaller to fit its faces: shown on the tree item (and once when it is new)
+            note = "; ".join(dict.fromkeys(notes))
+            if note and fo.get("_note") != note:
+                self._st(f"'{fo.get('name')}': {note}")
+            fo["_note"] = note
+            self._set_item_tooltip(item, note[:1].upper() + note[1:] if note else "")
         except Exception as ex:
             fo["_error"] = str(ex)
             _dbg(f"feature '{fo.get('name')}' not applied: {ex}")
@@ -39881,6 +44692,61 @@ class MainWindow(QMainWindow):
         body["solid"] = (mesh[0], mesh[1]); body["faces"] = mesh[2]
         body["_cs_key"] = key
 
+    def _rejoin_joint_fillets(self, objs):
+        """A joint fillet (auto material) is built against the touching bodies as they are when
+        its own body is rebuilt — a body further down the list is then still without its own
+        chamfers / fillets (e.g. a knob whose rounded rim leaves less flat face to land on).
+        Such bodies are rebuilt once more here, against the finished ones. Cached per body
+        (its feature mesh + the finished meshes of those later bodies), so an unchanged project
+        does no extra work and two bodies filleted against each other cannot ping-pong. Walked
+        from the last body to the first: a body's key only depends on the bodies after it, and
+        those are final by then, so the key is stable on the next rebuild."""
+        skip = getattr(self, "_feat_skip", ())
+        for i in range(len(objs) - 1, -1, -1):
+            e = objs[i]
+            if e["type"] != "extrusion" or "base" not in e or e.get("cut") or \
+                    e.get("_feat_mesh") is None or e.get("_cut_mesh") is None or \
+                    e.get("_blend_mesh") is not None:
+                continue
+            feats = [o for o in objs if o["type"] == "feature" and o.get("parent") is e
+                     and id(o) not in skip and o.get("visible", True)]
+            if not any(fo["feat"].get("auto_material") for fo in feats):
+                continue
+            box = entry_bounds(e)
+            if box is None:
+                continue
+            reach = max(float(fo["feat"].get("radius", 0.0)) for fo in feats) + 1e-3
+            later = []
+            for o in objs[i + 1:]:
+                if o.get("type") not in ("extrusion", "imported") or o.get("cut") or \
+                        o.get("preview") or not o.get("solid") or not entry_visible(o):
+                    continue
+                if not any(f.get("type") == "feature" and f.get("parent") is o
+                           and f.get("visible", True) for f in objs):
+                    continue                     # no features of its own: already final
+                other = entry_bounds(o)
+                if other is None or np.any(other[0] > box[1] + reach) or \
+                        np.any(other[1] < box[0] - reach):
+                    continue
+                later.append((id(o), id(o["solid"][0]), id(o["solid"][1])))
+            if not later:
+                continue
+            key = (id(e["_feat_mesh"][0]), e.get("_feat_key")) + tuple(later)
+            if e.get("_joint_key") == key:
+                continue
+            mesh = e["_cut_mesh"]
+            for fo in feats:
+                mesh = self._apply_feature_checked(mesh, fo)
+            e["_feat_mesh"] = mesh
+            e["_joint_key"] = (id(mesh[0]), e.get("_feat_key")) + tuple(later)
+            e["solid"] = (mesh[0], mesh[1]); e["faces"] = mesh[2]
+            e["_pre_section"] = (mesh[0], mesh[1], mesh[2])
+            sections = self._section_entries(e)
+            self._apply_sections(e, e["_pre_section"], sections,
+                                 tuple((id(so), cut_surface_signature(so)) for so in sections))
+            if not MainWindow._render_data_current(e):
+                MainWindow._cache_normals(e)
+
     def _apply_cuts(self, progress=None):
         """Rebuild extrusion cuts/features and chamfer/fillet features on merged Bridge bodies."""
         objs = self.state["objects"]
@@ -39948,6 +44814,7 @@ class MainWindow(QMainWindow):
             self._apply_sections(e, e["_pre_section"], sections, section_key)
             if not MainWindow._render_data_current(e):
                 MainWindow._cache_normals(e)
+        self._rejoin_joint_fillets(objs)
         for i, e in enumerate(objs):
             if progress is not None:
                 progress(50 + 50 * i // len(objs))
@@ -40612,6 +45479,14 @@ class MainWindow(QMainWindow):
             self.lbl_feat_info.setText(html.escape(str(result)))
             self._st(f"Cannot apply {self._feat_type}: {result}")
             result = None
+        else:
+            notes = list(dict.fromkeys(getattr(self.sender(), "notes", None) or []))
+            if notes:
+                note = "; ".join(notes)
+                self.lbl_feat_info.setText(html.escape(note[:1].upper() + note[1:]))
+                self._st(f"{self._feat_type.capitalize()}: {note}")
+            elif self._feat_type == "fillet":      # (a chamfer shows its angle there instead)
+                self.lbl_feat_info.setText("")
         self._replace_preview_mesh(entry_id, result)
         if self._feat_entry is not None and entry_id == id(self._feat_entry):
             self._preview_mesh = self._preview_meshes[entry_id]
@@ -40945,6 +45820,7 @@ class MainWindow(QMainWindow):
         _dbg(f"\n{'='*60}\n_open_feature_panel: type={feat_type}")
         self._feat_entry=None; self._feat_type=feat_type; self._feat_chains=[]
         self._clear_preview_meshes()
+        self._dock_feat.setWindowTitle('Chamfer' if feat_type=='chamfer' else 'Fillet')
         self.lbl_feat_title.setText(f"<b>{'Chamfer' if feat_type=='chamfer' else 'Fillet'}</b>")
         self.lst_feat_edges.clear()
         self.chk_feat_outside.blockSignals(True); self.chk_feat_outside.setChecked(False)
@@ -41010,8 +45886,9 @@ class MainWindow(QMainWindow):
                    (self._preview_mesh if len(groups) == 1 else None)
             seed = _pm["mesh"] if isinstance(_pm, dict) else None
             if seed is None:
-                _dbg(f"confirm seed=None: feat_base_mesh tris={len(self._feat_base_mesh[1]) if self._feat_base_mesh else None} src_solid tris={len(src['solid'][1])}")
-                base_snap = getattr(self, "_feat_base_mesh", None)
+                base_snap = getattr(self, "_feat_base_mesh", None)   # (set only by some edit paths)
+                _dbg(f"confirm seed=None: feat_base_mesh tris={len(base_snap[1]) if base_snap else None} "
+                     f"src_solid tris={len(src['solid'][1])}")
                 base = base_snap if base_snap is not None else (src["solid"][0], src["solid"][1], src.get("faces", []))
                 try:
                     seed, _ = apply_edge_feature(
@@ -41506,6 +46383,9 @@ class MainWindow(QMainWindow):
                    "bridge_sources":[],"_bridge_source_indices":od.get("bridge_sources", [])}
                 if od.get("gear_parameters"):
                     e["gear_parameters"] = od["gear_parameters"]
+                if isinstance(od.get("bearing"), dict) and bearing_find(od["bearing"].get("name")):
+                    e["bearing"] = dict(bearing_find(od["bearing"]["name"]),
+                                        load_case=od["bearing"].get("load_case", "inner_normal"))
                 if e["source_format"] == "bridge":
                     e["base"] = (world_vertices, triangles, face_records)
                 self._cache_normals(e)
@@ -41649,6 +46529,8 @@ class MainWindow(QMainWindow):
                     d["bridge_sources"] = bridge_sources
                 if o.get("gear_parameters"):
                     d["gear_parameters"]=dict(o["gear_parameters"])
+                if o.get("bearing"):
+                    d["bearing"]=dict(o["bearing"])
             else:
                 d["height"]=o.get("height", 20.0); d["opacity"]=o.get("opacity", 1.0)
                 d["direction"]=o.get("direction", "one"); d["cut"]=bool(o.get("cut", False)); d["through"]=bool(o.get("through", False))
@@ -42093,7 +46975,9 @@ class MainWindow(QMainWindow):
             self._update_operation_progress(None, "Preparing drawing mesh and preview...")
             dialog = TechnicalDrawingDialog(
                 self, project_name, None, source_entries=sources, source_entry=initial_source,
-                mesh_for=lambda source: _drawing_source_mesh(source, self.state["objects"]))
+                mesh_for=lambda source: _drawing_source_mesh(source, self.state["objects"]),
+                parts_for=lambda source: _drawing_parts(source, self.state["objects"]),
+                model_info_for=lambda source: _drawing_model_info(source, self.state["objects"]))
         finally:
             self._end_operation_progress()
         if dialog.exec_() != QDialog.Accepted:
@@ -42103,6 +46987,8 @@ class MainWindow(QMainWindow):
                  if entry.get("type") == "technical_drawing"}
         name = next(f"Technical Drawing {number}" for number in range(1, len(taken) + 2)
                     if f"Technical Drawing {number}" not in taken)
+        if source is not None and source.get("type") == "assembly":
+            source = None                         # an assembly drawing is listed at the top level
         drawing = {"type": "technical_drawing", "name": name, "parent": source,
                    "visible": True,
                    "options": self._drawing_options_for_storage(dialog.drawing_options())}
@@ -42114,10 +47000,13 @@ class MainWindow(QMainWindow):
         self._st(f"Created {name}" + (f" under {source['name']}" if source is not None else ""))
 
     def _drawing_sources(self):
-        """Solids a drawing sheet can show: extrusions (not cut tools) and imported models."""
+        """Models a drawing sheet can show: extrusions (not cut tools), imported models and the
+        project's assemblies (assembly drawings, Phase 5)."""
         return [entry for entry in self.state.get("objects", [])
-                if entry.get("type") in ("extrusion", "imported") and not entry.get("cut") and
-                not entry.get("preview") and entry.get("solid") and entry["solid"][1]]
+                if (entry.get("type") in ("extrusion", "imported") and not entry.get("cut") and
+                    not entry.get("preview") and entry.get("solid") and entry["solid"][1]) or
+                (entry.get("type") == "assembly" and
+                 ((entry.get("assembly_data") or {}).get("components")))]
 
     def _drawing_jobs(self, entry, options):
         """(mesh, complete options) of every sheet of a stored drawing, as exported."""
@@ -42131,8 +47020,19 @@ class MainWindow(QMainWindow):
             if source and source.get("kind") == "project":
                 solid = next((item for item in sources if item.get("name") == source.get("name")),
                              None)
+                if solid is not None and solid.get("type") == "assembly":     # assembly drawing
+                    explode = float(source.get("explode") or 0.0)
+                    mesh = _drawing_assembly_mesh(solid, explode)
+                    sheet = dict(sheet, _model=_drawing_assembly_info(solid, explode))
+                    if sheet.get("parts_list"):
+                        sheet = dict(sheet, parts=_drawing_parts(solid, self.state["objects"]))
+                    solid = None
                 if solid is not None:
                     mesh = _drawing_source_mesh(solid, self.state["objects"])
+                    if sheet.get("parts_list"):           # the parts list as the model is now
+                        sheet = dict(sheet, parts=_drawing_parts(solid, self.state["objects"]))
+                    # gears and thread features of the model (Phase 4)
+                    sheet = dict(sheet, _model=_drawing_model_info(solid, self.state["objects"]))
             elif source and source.get("kind") == "model":
                 model = models.get(source.get("id"))
                 if model:

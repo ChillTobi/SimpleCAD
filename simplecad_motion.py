@@ -2569,16 +2569,20 @@ class MotionController(QObject):
             if component is None:
                 continue
             position, rotation = pose_placement(component, R, t)
-            placed = dict(component, position=position, rotation=rotation)
-            for body in component["bodies"]:
-                entry = body.get("_render")
-                if entry is None:
-                    continue
-                world = cad.assembly_world_vertices(placed, body["vertices"])
-                entry["solid"] = (list(map(tuple, world.tolist())), body["triangles"])
-                entry["faces"] = cad.assembly_world_faces(placed, body["faces"])
-                for key in cad._ASSEMBLY_CACHE_KEYS:
-                    entry.pop(key, None)
+            # the Assembly window shows a moved part by its drawing matrix (its mesh for
+            # picking follows when the frames stop); an older core places the bodies here
+            show_at = getattr(self.dialog, "_show_at", None)
+            if show_at is None or not show_at(component, position, rotation):
+                placed = dict(component, position=position, rotation=rotation)
+                for body in component["bodies"]:
+                    entry = body.get("_render")
+                    if entry is None:
+                        continue
+                    world = cad.assembly_world_vertices(placed, body["vertices"])
+                    entry["solid"] = (list(map(tuple, world.tolist())), body["triangles"])
+                    entry["faces"] = cad.assembly_world_faces(placed, body["faces"])
+                    for key in cad._ASSEMBLY_CACHE_KEYS:
+                        entry.pop(key, None)
             self._display[name] = (np.array(R, float), np.array(t, float))
 
     def show_frame(self, frame):

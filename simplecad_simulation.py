@@ -1038,6 +1038,9 @@ def condition_new(kind, name):
             "fluid": DEFAULT_FLUID, "liquid_model": "simple",
             "flow_mode": "fixed", "flow_lpm": 1.0,                   # coolant: L/min or a pump
             "pump_max_lpm": 4.0, "pump_max_kpa": 20.0, "pump_curve": [],
+            # a pump of the project (its group name): its estimated curve at its motor speed,
+            # copied in, for water (pump_density); the solver scales it to the liquid's density
+            "pump_source": "", "pump_rpm": 0.0, "pump_density": 0.0,
             "inlet_c": 25.0, "inlet_from": "", "reverse": False,
             "bath_mode": "container", "fill_auto": True, "fill_z": 0.0,   # bath
             "bath_c": 25.0, "bath_start_auto": True, "evaporation": True,
@@ -1065,6 +1068,9 @@ def condition_settings(data):
     condition["liquid_model"] = "flow" if data.get("liquid_model") == "flow" else "simple"
     condition["flow_mode"] = "pump" if data.get("flow_mode") == "pump" else "fixed"
     condition["pump_curve"] = [[float(q), float(p)] for q, p in data.get("pump_curve") or []]
+    condition["pump_source"] = str(data.get("pump_source") or "")
+    condition["pump_rpm"] = max(0.0, float(data.get("pump_rpm") or 0.0))
+    condition["pump_density"] = max(0.0, float(data.get("pump_density") or 0.0))
     condition["inlet_from"] = str(data.get("inlet_from") or "")
     condition["bath_mode"] = "fixed" if data.get("bath_mode") == "fixed" else "container"
     for key, default in (("reverse", False), ("fill_auto", True), ("bath_start_auto", True),
@@ -2032,14 +2038,39 @@ def pipe_flow(fluid, flow_m3s, geometry, t_bulk, t_wall=None, wall_mode=0.5):
 
 def pump_curve(condition):
     """(flows m³/s, pressures Pa) of a coolant pump, falling with the flow: a table
-    [[L/min, kPa], …] or the line from the shut-off pressure to the free-flowing flow rate."""
+    [[L/min, kPa], …] or the line from the shut-off pressure to the free-flowing flow rate. A
+    table made for another liquid (pump_density, kg/m³) is scaled to this liquid's density: a
+    centrifugal pump gives the same head, so its pressure goes with the density."""
     table = condition.get("pump_curve") or []
     if len(table) >= 2:
         points = np.array(sorted((float(q), float(p)) for q, p in table))
-        return points[:, 0] / 60000.0, np.maximum(points[:, 1], 0.0) * 1000.0
+        scale = 1.0
+        if float(condition.get("pump_density") or 0.0) > 0.0:
+            scale = float(fluid_density(condition.get("fluid", DEFAULT_FLUID), 20.0)) / float(condition["pump_density"])
+        return points[:, 0] / 60000.0, np.maximum(points[:, 1], 0.0) * 1000.0 * scale
     q_max = max(float(condition.get("pump_max_lpm", 4.0)), 1e-6) / 60000.0
     return np.array([0.0, q_max]), np.array([max(float(condition.get("pump_max_kpa", 20.0)), 0.0)
                                              * 1000.0, 0.0])
+
+
+def project_pumps(objects):
+    """Pumps made with the pump tool in the project: {group name: the housing's parameters}."""
+    pumps = {}
+    for entry in objects:
+        parameters = entry.get("pump_parameters") if isinstance(entry, dict) else None
+        if not parameters or entry.get("preview") or parameters.get("role") != "housing":
+            continue
+        pumps[str(parameters.get("group") or entry.get("name"))] = parameters
+    return pumps
+
+
+def project_pump_curve(parameters, samples=24):
+    """(table [[L/min, kPa], …] for water, motor speed rpm) of a project pump: the pump tool's
+    estimate at the motor speed saved with it."""
+    rpm = float(parameters.get("motor_speed") or 1500.0)
+    d = cad.pump_dimensions(parameters)
+    curve = cad.pump_curve(d, rpm, (1.0, d["d_out"], 0.0), samples=samples)
+    return [[round(q, 6), round(p, 6)] for q, p in zip(curve["flow"], curve["pump"])], rpm
 
 
 def pump_operating_point(curve, system_dp):
@@ -12255,7 +12286,15 @@ class ThermalDialog(QDialog):
             "Correlations: heat transfer from pipe-flow / natural-convection formulas (fast, both "
             "solvers).\nLiquid flow solved: in Airflow mode the liquid itself is simulated (needs "
             "about 4 or more cells across the channel).")
-        self.cb_flow_mode = combo([("fixed", "Fixed flow rate"), ("pump", "Pump curve")])
+        self.cb_coolant_flow = combo([("fixed", "Fixed flow rate"), ("pump", "Pump curve")])
+        self.cb_coolant_pump = QComboBox()
+        self.cb_coolant_pump.setFixedWidth(value_width)
+        self.cb_coolant_pump.setToolTip("Straight line: from the shut-off pressure to the free flow below.\n"
+                                        "A pump of the project: the pump tool's estimated curve at its motor "
+                                        "speed, for water, scaled to the liquid's density.")
+        self.lbl_pump_source = value_label()
+        self.lbl_pump_source.setWordWrap(True)
+        self.lbl_pump_source.setFixedWidth(value_width)
         self.sp_flow_lpm = _spin(0.0, 1000.0, " L/min", 0.1, decimals=3)
         self.sp_pump_max_lpm = _spin(0.001, 1000.0, " L/min", 0.5, decimals=2)
         self.sp_pump_max_lpm.setToolTip("Flow of the pump without any resistance")
@@ -12279,7 +12318,9 @@ class ThermalDialog(QDialog):
         self._condition_rows["bath"] = [self.cb_bath_mode, put_row(self.cb_bath_mode, "Volume:")]
         self._cap_liquid_model = put_row(self.cb_liquid_model, "Model:")
         self._condition_rows["liquid"] += [self.cb_liquid_model, self._cap_liquid_model]
-        self._cap_flow_mode = put_row(self.cb_flow_mode, "Flow:")
+        self._cap_flow_mode = put_row(self.cb_coolant_flow, "Flow:")
+        self._cap_coolant_pump = put_row(self.cb_coolant_pump, "Pump:")
+        self._cap_pump_source = put_row(self.lbl_pump_source, "Curve:")
         self._cap_flow_lpm = put_row(self.sp_flow_lpm, "Flow rate:")
         self._cap_pump_lpm = put_row(self.sp_pump_max_lpm, "Free flow:")
         self._cap_pump_kpa = put_row(self.sp_pump_max_kpa, "Shut-off:")
@@ -12288,7 +12329,8 @@ class ThermalDialog(QDialog):
         put_row(self.chk_reverse, span=True)
         self._cap_channel = put_row(self.lbl_channel, "Channel:")
         self._condition_rows["coolant"] = [
-            self.cb_flow_mode, self._cap_flow_mode, self.sp_flow_lpm, self._cap_flow_lpm,
+            self.cb_coolant_flow, self._cap_flow_mode, self.sp_flow_lpm, self._cap_flow_lpm,
+            self.cb_coolant_pump, self._cap_coolant_pump, self.lbl_pump_source, self._cap_pump_source,
             self.sp_pump_max_lpm, self._cap_pump_lpm, self.sp_pump_max_kpa, self._cap_pump_kpa,
             self.cb_inlet_from, self._cap_inlet_from, self.sp_inlet_c, self._cap_inlet_c,
             self.chk_reverse, self.lbl_channel, self._cap_channel]
@@ -12349,8 +12391,8 @@ class ThermalDialog(QDialog):
             spin.valueChanged.connect(self._on_condition_edited)
         for check in (self.chk_torque_reverse, self.chk_pin_axial):
             check.toggled.connect(self._on_condition_edited)
-        for box in (self.cb_liquid_fluid, self.cb_bath_mode, self.cb_liquid_model, self.cb_flow_mode,
-                    self.cb_inlet_from):
+        for box in (self.cb_liquid_fluid, self.cb_bath_mode, self.cb_liquid_model, self.cb_coolant_flow,
+                    self.cb_coolant_pump, self.cb_inlet_from):
             box.currentIndexChanged.connect(self._on_condition_edited)
         for check in (self.chk_reverse, self.chk_fill_auto, self.chk_bath_start_auto,
                       self.chk_evaporation):
@@ -14865,8 +14907,9 @@ class ThermalDialog(QDialog):
             condition["fluid"] = self.cb_liquid_fluid.currentData()
             condition["liquid_model"] = self.cb_liquid_model.currentData()
             if condition["kind"] == "coolant":
-                condition["flow_mode"] = self.cb_flow_mode.currentData()
+                condition["flow_mode"] = self.cb_coolant_flow.currentData()
                 condition["flow_lpm"] = float(self.sp_flow_lpm.value())
+                self._take_coolant_pump(condition, self.cb_coolant_pump.currentData() or "")
                 condition["pump_max_lpm"] = float(self.sp_pump_max_lpm.value())
                 condition["pump_max_kpa"] = float(self.sp_pump_max_kpa.value())
                 condition["inlet_from"] = self.cb_inlet_from.currentData() or ""
@@ -14883,6 +14926,30 @@ class ThermalDialog(QDialog):
         self._rebuild_tree()
         self._refresh_overlays()
         self._changed()
+
+    def _take_coolant_pump(self, condition, source, pumps=None, quiet=False):
+        """Use the curve of the project pump `source` for a coolant channel ("" = the straight
+        line): its estimate at its motor speed is copied into the condition. quiet: only update
+        the copy (when the pump was edited) and record that as a change of the study."""
+        if not source:
+            if condition.get("pump_source"):
+                condition.update(pump_source="", pump_curve=[], pump_rpm=0.0, pump_density=0.0)
+            return
+        pumps = project_pumps(self._window.state["objects"]) if pumps is None else pumps
+        if source not in pumps:                         # gone from the project: keep the copy
+            condition["pump_source"] = source
+            return
+        try:
+            table, rpm = project_pump_curve(pumps[source])
+        except (ValueError, ArithmeticError):
+            return
+        new = (source, table, rpm, 998.0)
+        if (condition.get("pump_source"), condition.get("pump_curve"), condition.get("pump_rpm"),
+                condition.get("pump_density")) == new:
+            return
+        condition.update(pump_source=source, pump_curve=table, pump_rpm=rpm, pump_density=998.0)
+        if quiet:
+            self._changed()
 
     def _channel_geometry(self, condition):
         """Shape of a coolant channel from its picked faces (cached), or None."""
@@ -14911,15 +14978,35 @@ class ThermalDialog(QDialog):
         self.cb_liquid_model.setCurrentIndex(max(0, self.cb_liquid_model.findData(condition["liquid_model"])))
         if kind == "coolant":
             pump = condition["flow_mode"] == "pump"
-            self.cb_flow_mode.setCurrentIndex(1 if pump else 0)
+            self.cb_coolant_flow.setCurrentIndex(1 if pump else 0)
             self.sp_flow_lpm.setValue(condition["flow_lpm"])
             self.sp_pump_max_lpm.setValue(condition["pump_max_lpm"])
             self.sp_pump_max_kpa.setValue(condition["pump_max_kpa"])
+            pumps = project_pumps(self._window.state["objects"])
+            source = condition.get("pump_source") or ""
+            if source and source in pumps:            # follow the pump if it was edited since
+                self._take_coolant_pump(condition, source, pumps, quiet=True)
+            self.cb_coolant_pump.clear()
+            self.cb_coolant_pump.addItem("Straight line", "")
+            for name in sorted(pumps):
+                self.cb_coolant_pump.addItem(name, name)
+            if source and source not in pumps:
+                self.cb_coolant_pump.addItem(f"{source} (no longer in the project)", source)
+            self.cb_coolant_pump.setCurrentIndex(max(0, self.cb_coolant_pump.findData(source)))
+            if source and condition.get("pump_curve"):
+                table = condition["pump_curve"]
+                self.lbl_pump_source.setText(
+                    f"pump tool estimate at {condition['pump_rpm']:g} rpm: {table[-1][0]:.3g} L/min free, "
+                    f"{table[0][1]:.3g} kPa shut-off (water; scaled to the liquid's density)")
             for widget in (self.sp_flow_lpm, self._cap_flow_lpm):
                 widget.setVisible(not pump)
+            for widget in (self.cb_coolant_pump, self._cap_coolant_pump):
+                widget.setVisible(pump)
+            for widget in (self.lbl_pump_source, self._cap_pump_source):
+                widget.setVisible(pump and bool(source))
             for widget in (self.sp_pump_max_lpm, self._cap_pump_lpm, self.sp_pump_max_kpa,
                            self._cap_pump_kpa):
-                widget.setVisible(pump)
+                widget.setVisible(pump and not source)
             self.cb_inlet_from.clear()
             self.cb_inlet_from.addItem("Own temperature", "")
             for other in self.study["conditions"]:
